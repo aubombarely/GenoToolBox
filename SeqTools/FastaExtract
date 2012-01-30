@@ -1,0 +1,357 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ FastaExtract.pl
+ Tool to extract sequences from a fasta file in different ways
+
+=cut
+
+=head1 SYPNOSIS
+
+ FastaExtract.pl [-h] -f <input_fasta_file> [-o output_basename]
+                       [-i <extract_by_id>] [-l <extract_by_length>] 
+                       [-r <extract_by_regexp>]
+                       [-v] [-C] [-R]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -f
+
+B<input_fasta_file>       input fasta file (mandatory)
+
+=item -o
+
+B<output_basename>        output basename (by default it will printed as stdout)
+
+=item -i
+
+B<extract_by_id>          filename to extract sequences by id
+
+=item -l 
+
+B<extract_by_length>      integer to extract sequences by length     
+
+=item -r
+
+B<regexp>                 regular expression to extract the sequences
+
+=item -C
+
+B<cut_sequence>           cut a part of the sequence extracted (coordinates)
+                          from the input filename (-i)
+
+=item -R
+
+B<revcom>                 return reverse complemetary of the sequence
+
+=item -v
+
+B<invert_selection>       invert the selection
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script extract a list of sequences from a fasta/qual file. 
+
+ There are three ways to supply the list of sequences:
+
+   1) As list of ids in a file (-i <id_list_file>)
+
+   2) As length value (-l <length>)
+
+   3) As regular expression to match with the id (-r <regexp>)
+
+   Examples:
+
+      fasta_extract.pl -f test.fasta -i id_file.txt > extract.fasta
+
+      fasta_extract.pl -f test.fasta -l 100 -v > seq_less100.fasta
+
+      fasta_extract.pl -f test.fasta -r 'Sl' > sl_seq.fasta
+
+      fasta_extract.pl -f test.fasta -r 'AAAAAAAAAA$' > seq_with_poliA.fasta
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ FastaExtract.pl
+
+
+=cut
+
+use strict;
+use warnings;
+
+use Getopt::Std;
+use Bio::SeqIO;
+
+our ($opt_f, $opt_o, $opt_i, $opt_l, $opt_r, $opt_v, $opt_C, $opt_R, $opt_h);
+getopts("f:o:i:l:r:vCRh");
+if (!$opt_f && !$opt_o && !$opt_i && !$opt_l && !$opt_r && !$opt_v && !$opt_C 
+    && !$opt_R && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Get the arguments and check them
+
+my $infasta_file = $opt_f || 
+    die("INPUT ARG. ERROR: -f <input_fasta_file> argument was not supplied.\n");
+
+my $id_file = $opt_i;
+my $length_cf = $opt_l;
+my $regexp;
+if (defined $opt_r) {
+    $regexp = qr/$opt_r/;
+}
+if ($opt_C) {
+    unless (defined $id_file) {
+	die("ERROR: -C option only can be used with -i option.\n");
+    }
+}
+
+if (!$id_file && !$length_cf && !$regexp) {
+    die("EXTRACTION ARG. ERROR: No extract options were used (-i,-l,-r)\n");
+}
+
+my $out = $opt_o;
+
+## Extract the list of ids from the id file if exists
+
+my %ids;
+my %trims;
+my $trims_count = 0;
+
+if (defined $id_file) {
+
+    print STDERR "\nEXTRACT BY IDS option [Enabled].\n";
+
+    open my $idfh, '<', $id_file || 
+	die("OPEN FILE ERROR: File=$id_file can not be openned (error:$!)\n");
+
+    while (<$idfh>) {
+	chomp($_);
+
+	## It will take only the first column and remove the rest
+
+	my @data = split(/\t/, $_);
+
+	## It will ignore the duplications overwritting the ids
+
+	$ids{$data[0]} = 1;
+	if (defined $data[1] && defined $data[2]) {
+	    if ($data[2] <= $data[1]) {
+		my $err = "ERROR: end trim coord:$data[2] should be lower ";
+		$err .= "than start trim coord:$data[1]\n";
+		die($err);
+	    }
+
+	    my $coords_href = { start => $data[1], end => $data[2] };
+	    if (exists $trims{$data[0]}) {
+		
+		push @{$trims{$data[0]}}, $coords_href;
+	    }
+	    else {
+		$trims{$data[0]} = [$coords_href];
+	    }
+	    $trims_count++;
+	}
+    }
+
+    my $ids_count = scalar(keys %ids);
+    print STDERR "\t$ids_count ids ($trims_count) were parsed from $id_file.\n"
+}
+
+## Open the input and the output fasta file
+
+
+print STDERR "\nEXTRACTING SEQUENCES FROM $infasta_file.\n";
+
+my $c = 0;
+
+my $inio = Bio::SeqIO->new(
+                             -file   => $infasta_file,
+                             -format => 'fasta'
+                          );
+
+
+## It will print the sequences in STDOUT by default
+
+my $outio;
+if (defined $out) {
+
+    my $outfasta = $out . '.fasta';
+
+    $outio = Bio::SeqIO->new( 
+	                      -file   => ">$outfasta",
+	                      -format => 'fasta'
+	                    );	
+}
+else {
+    $outio = Bio::SeqIO->new( -format => 'fasta' );
+}
+
+my $s = 0;
+while (my $seqobj = $inio->next_seq()) {
+    
+    $s++;
+    my $id = $seqobj->primary_id();
+    my $lg = $seqobj->length();
+
+    print STDERR "Processing id=$id (sequence $s)    \r";
+
+    ## Select only if it have one of the extract option
+
+    my $sel = 0;
+	
+    if (defined $id_file) {
+	if (exists $ids{$id}) {
+	    $sel = 1;
+	}
+    }
+    if (defined $length_cf) {
+	if ($lg > $length_cf) {
+	    $sel = 1;
+	}
+    }
+    if (defined $regexp) {
+	if ($id =~ $regexp) {
+	    $sel = 1;
+	}
+	elsif ($seqobj->seq() =~ $regexp) {
+	    $sel = 1;
+	}
+    }
+
+    if ($opt_v) {
+	
+	## Invert the selection 
+	$sel =~ s/0/2/;
+	$sel =~ s/1/0/;
+	$sel =~ s/2/1/;
+    }
+
+    ## If the sequence was selected, it will printed
+
+    if ($sel == 1) {
+	
+	if ($opt_C) {
+	    if (exists $trims{$id}) {
+
+		my @coords = @{$trims{$id}};
+
+		foreach my $coord (@coords) { 
+
+		    my $st = $coord->{start};
+		    my $en = $coord->{end};
+		    my $newid = $id . '_subseq_from' . $st . '_to' . $en;
+		    my $newseq = $seqobj->trunc($st,$en);
+		    $newseq->id($newid);
+
+		    if ($opt_R) {
+			$newseq = $newseq->revcom();
+		    }
+		    $outio->write_seq($newseq);
+		    $c++;
+		}
+	    }
+	}
+	else {
+	
+	    if ($opt_R) {
+		$seqobj = $seqobj->revcom();
+	    }
+	    $outio->write_seq($seqobj);
+	    $c++;
+	}
+    }
+}
+
+print STDERR "\n\nDONE.\n\t$c sequences were extracted from the $infasta_file.\n\n";
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+      This script extract a list of sequences from a fasta/qual file. 
+
+      There are three ways to supply the list of sequences:
+
+	  1) As list of ids in a file (-i <id_list_file>)
+    
+          2) As length value (-l <length>)
+
+          3) As regular expression to match with the id (-r <regexp>)
+
+    Usage:
+     
+      FastaExtract.pl [-h] -f <input_fasta_file> [-o <output_basename>] 
+                       [-i <filter_by_id>] [-l <filter_by_length>] 
+	               [-r <filter_by_regexp>] [-v] [-C]
+      
+    Examples:
+
+      fasta_extract.pl -f test.fasta -i id_file.txt > extract.fasta
+
+      fasta_extract.pl -f test.fasta -l 100 -v > seq_less100.fasta
+
+      fasta_extract.pl -f test.fasta -r 'Sl' > sl_seq.fasta
+
+      fasta_extract.pl -f test.fasta -r 'AAAAAAAAAA$' > seq_with_poliA.fasta
+
+    Flags:
+
+      -f <input_fasta_file>       input fasta file (mandatory)
+      -o <output_basename>        output basename (by default it will printed as stdout)
+      -i <extract_by_id>          filename to extract sequences by id
+      -l <extract_by_length>      integer to extract sequences by length     
+      -r <regexp>                 regular expression to extract the sequences
+      -C <enable_trimming>        trim seqs according -i file.
+      -R <revcom>                 get reverse complementary
+      -v <invert_selection>       invert the selection
+      -h <help>                   print the help
+     
+
+EOF
+exit (1);
+}
+
