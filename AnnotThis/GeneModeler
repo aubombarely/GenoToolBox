@@ -1,0 +1,1997 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GeneModeler
+ A script to create gene models in genbank format.
+
+=cut
+
+=head1 SYPNOSIS
+
+ genemodeler.pl [-h] -t <target_seq> 
+                     -d <completecdna_seq> 
+                     -p <completeprotein_seq>
+                     -o <output_basename>
+                     [-c <cdna_hit_mincoverage>]
+                     [-i <cdna_hit_minidentity>]
+                     [-b <cdna_hit_minblocks>]
+                     [-g <cdna_hit_maxgaps>]
+                     [-s <cdna_hit_sidesize>]
+                     [-E]
+                     [-S]
+
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -t
+
+B<target_seq>             target sequence in fasta format (mandatory)
+
+=item -d
+
+B<completecdna_seq>       complete cdna sequence in fasta format (mandatory)
+
+=item -p
+
+B<completeprotein_seq>    complete protein sequence in fasta format (mandatory)
+
+=item -o
+
+B<output_basename>        output_basename (mandatory)
+
+=item -c
+
+B<cdna_hit_mincoverage>   min. coverage for cdna hit (default: 95)
+
+=item -i 
+
+B<cdna_hit_minidentity>   min. identity for cdna hit (default: 90)
+
+=item -b 
+
+B<cdna_hit_minblocks>     min. block number for cdna hit (default: 2)
+                     
+=item -g 
+
+B<cdna_hit_maxgaps>       max. number of gaps for cdna hit (default: 10)
+
+=item -s 
+
+<cdna_hit_sidesize>      size of to take cdna hit margins (default: 50)
+
+=item -a
+
+<blat_argument_pass>      pass blat argument (example: -a '-fastMap -tileSize 8)
+
+=item -e
+
+<exonerate_argument_pass> pass exonerate argument (example: -e '--exhaustive')
+
+=item -E 
+
+<force_firstlast_by_exon> force firstMet and lastStop by codon walking to exon
+
+=item -S 
+
+<force_firstlast_by_seq>  force firstMet and lastStop by codon walking to seq
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script creates gene models in genbank format comparing a target sequence
+ with a cdna and protein dataset. It has several steps:
+
+ 1) Target alignment with cdna sequences using blat.
+
+ 2) Blat result parsing and filtering.
+
+ 3) Target sequence parsing.
+
+ 4) Protein sequence parsing.
+
+ 5) Exonerate run of target-protein.
+
+ 6) Exonerate result parsing and filtering.
+
+ 7) GenBank file output.
+
+ This script uses two external programs:
+
+  + blat ()
+  + exonerate ()
+
+ Its executables should be in the PATH to run this script.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ GeneModeler
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use POSIX qw(strftime);
+use Scalar::Util qw(looks_like_number);
+use Getopt::Std;
+use File::Basename;
+use File::Spec::Functions;
+use File::Path qw(make_path);
+
+use Math::BigFloat;
+use Bio::SeqIO;
+use Bio::Seq::RichSeq;
+use Bio::Tools::SeqStats;
+use Bio::SeqFeature::Generic;
+use Bio::SeqFeature::Gene::Transcript;
+use Bio::Location::Split;
+
+
+our ($opt_t, $opt_d, $opt_p, $opt_o, $opt_c, $opt_i, $opt_b, $opt_g, $opt_s, 
+     $opt_a, $opt_e, $opt_E, $opt_S, $opt_h);
+
+getopts("t:d:p:o:c:i:b:g:s:a:e:ESh");
+if (!$opt_t && !$opt_d && !$opt_p && !$opt_o && !$opt_c && !$opt_i && !$opt_b 
+    && !$opt_g && !$opt_s && !$opt_a && !$opt_e && !$opt_E && !$opt_S && 
+    !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Check variables.
+
+my $targetfas = $opt_t 
+    || die("DATA ARGUMENT -t <target_seq> WAS NOT SUPPLIED.\n");
+my $cdnafas = $opt_d 
+    || die("DATA ARGUMENT -d <completecdna_seq> WAS NOT SUPPLIED.\n");
+my $protfas = $opt_p
+    || die("DATA ARGUMENT -p <protein_seq> WAS NOT SUPPLIED.\n");
+my $outbase = $opt_o
+    || die("DATA ARGUMENT -o <output_basename> WAS NOT SUPPLIED.\n");
+
+my ($exon_switch, $seq_switch) = (0,0);
+if ($opt_E) {
+    $exon_switch = 1;
+}
+if ($opt_S) {
+    $seq_switch = 1;
+}
+
+## Default values
+
+my $min_cv = $opt_c || 95;
+my $min_id = $opt_i || 90;
+my $min_bl = $opt_b || 2;
+my $max_gp = $opt_g || 10;
+my $sides  = $opt_s || 50;
+
+## PRINT HEADER ###############################################################
+
+my $date = `date`;
+chomp($date);
+
+print STDERR "\n\n";
+print STDERR "############################################################\n";
+print STDERR "## genemodeler begins: $date       ##\n";
+print STDERR "############################################################\n\n";
+
+## STEP 1 #####################################################################
+
+print_header("Step 1: Run Blat");
+
+## BLAT ARGUMENTS SET:
+## Usually it will not need to pass any other argument but it is good if
+## the user can play a little bit more with the blat arguments.
+
+my %blat_args = ();
+
+my $blat_args = $opt_a;
+if (defined $blat_args) {                             ## Pass blat arguments
+
+    $blat_args =~ s/-/--/g;
+    my @blatargs = split(/\s+-/, $blat_args);
+    
+    foreach my $sing_arg (@blatargs) {
+	if ($sing_arg =~ m/^(-\w+)\s+(.+)\s*$/) {
+	    
+	    $blat_args{$1} = $2;
+	}
+	else {
+	    
+	    $blat_args{$sing_arg} = '';
+	}
+    }
+}
+
+
+if ($min_id =~ m/^\d+$/) {                            ## Overwrite identity
+
+    $blat_args{'-minIdentity'} = $min_id;
+}
+else {
+    die("ERROR: -i <cdna_hit_minidentity> is not an integer.\n");
+}
+
+## Always overwrite the output options to let the right parsing
+
+$blat_args{'-noHead'} = '';
+$blat_args{'-out'} = 'psl';
+
+my $blat_outfile = run_blat(\%blat_args, $cdnafas, $targetfas, $outbase);
+
+## STEP 2 #####################################################################
+
+## It will parse the blat using the function parse_blatresult();
+## The result will be a hash ref. with the following structure:
+##    $blat_href => { $target_id => [ { blatresult_col => value } ] }
+##    @blatresult_col = (Match, Mismatch, Repmatch, Ns, QGapCount, QGapBases,
+##                       TGapCount, TGapBases, Strand, QName, QSize, QStart,
+##                       QEnd, TName, TSize, TStart, TEnd, BlockCount, 
+##                       BlockSizes, QBlockStarts, TBlockStarts, QCov, TCov);
+
+print_header("Step 2: Parse Blat Output");
+
+## There is no needs to filter identity because it was set during the 
+## blat running
+
+my $blat_outhref = parse_blatresults($blat_outfile, $min_cv, $min_bl, $max_gp);
+
+## STEP 3 #####################################################################
+##
+## Parse the protein file and keep it into a hash
+##
+
+print_header("Step 3: Parse Protein File");
+
+my %protseq = ();
+
+my $pro_seqio = Bio::SeqIO->new( -file => $protfas, -format => 'fasta');
+
+while( my $protobj = $pro_seqio->next_seq()) {
+   
+    my $protid = $protobj->id();
+    print STDERR "\tParsing protein:$protid            \r";
+    
+    if (defined $protid) {
+	$protseq{$protid} = $protobj;
+    }
+}
+my $p = scalar(keys %protseq);
+print STDERR "\n\n\tDone. $p protein sequences have been parsed.\n";
+
+## STEP 4 #####################################################################
+##
+## Now it will parse the sequence file but at the same time it will prepare
+## the files to executate exonerate. It will store the files into a hash
+## %seqfiles = ( $que_id** => [$que_seqfile, $prot_seqfile] )
+## **queid will be modificated as: queid_xxx-yyy
+
+print_header("Step 4: Prepare Seq. Files");
+
+my $outdir = $outbase . '_seqdir';
+mkdir($outdir);
+
+my %seqfiles = ();
+
+my $que_seqio = Bio::SeqIO->new( -file => $targetfas, -format => 'fasta');
+
+while( my $queobj = $que_seqio->next_seq()) {
+  
+    my $queid = $queobj->id();
+    print STDERR "\tParsing query: $queid            \r";
+    
+    if (defined $blat_outhref->{$queid}) {            ## If the seq. has a hit
+
+	foreach my $hithref (@{$blat_outhref->{$queid}}) {
+	
+	    ## A hit will be elegible if it has a flanking seq. > $sides
+
+	    my $protid = $hithref->{TName};
+	    my $qst = $hithref->{QStart};
+	    my $qen = $hithref->{QEnd};
+	    my $str = $hithref->{Strand};
+	    my $qsz = $hithref->{QSize};
+
+	    if ($qst - $sides > 1 && $qen + $sides < $qsz) {
+		
+		$qst -= $sides;
+		$qen += $sides;
+		my $new_queid = $queid.'_'.$qst.'_'.$qen;
+		
+		## Also it should have the sequence in protein set
+
+		
+		if (exists $protseq{$protid}) {
+		
+		    my $seqfile = catfile($outdir, $new_queid .'.query.fasta');
+		    my $protfile = catfile($outdir, $protid . '.protein.fasta');
+
+		    ## Select the query sequence and write it
+
+		    my $newseq = $queobj->trunc($qst, $qen);
+		    if ($str =~ /-/) {
+		      
+			$newseq = $newseq->revcom();
+		    }
+		    
+		    $newseq->description( $queid . ':' . $qst . '..' .
+					  $qen ." str=($str)");
+
+		    my $newseqio = Bio::SeqIO->new( -file   => ">$seqfile", 
+						    -format => 'fasta');
+		
+		    $newseqio->write_seq($newseq);
+
+		    ## Same thing for protein seq
+
+		    my $newpepio = Bio::SeqIO->new( -file   => ">$protfile", 
+						    -format => 'fasta');
+		
+		    $newpepio->write_seq($protseq{$protid});
+
+		    ## Finally it will store in into the hash
+
+		    $seqfiles{$new_queid} = [$seqfile, $protfile];
+		}
+	    }
+	}
+    }
+}
+my $f = scalar(keys %seqfiles);
+print STDERR "\n\n\tDone. $f sequences have been parsed.\n";
+
+## STEP 5 #####################################################################
+##
+## 
+
+print_header("Step 5: Run exonerate");
+
+## First set the parameters
+
+my %exon_args = ();
+
+my $exon_args = $opt_e;
+if (defined $exon_args) {                          ## Pass exonerate arguments
+
+    $exon_args =~ s/--/---/g;
+    my @exonargs = split(/\s+-/, $exon_args);
+    
+    foreach my $sing_arg (@exonargs) {
+	if ($sing_arg =~ m/^(--\w+)\s+(.+)\s*$/) {
+	    
+	    $exon_args{$1} = $2;
+	}
+	else {
+	    
+	    $exon_args{$sing_arg} = '';
+	}
+    }
+}
+else {  ## Default parameters
+
+    $exon_args{'--exhaustive'} = '';
+}
+
+## Overwrite some of the parameters
+
+$exon_args{'--model'} = "protein2genome";
+$exon_args{'--querytype'} = "protein";
+$exon_args{'--targettype'} = "dna";
+$exon_args{'--showtargetgff'} = '';
+
+foreach my $exonid (keys %seqfiles) {
+
+    my $exon_result = run_exonerate(\%exon_args, 
+				   $seqfiles{$exonid}->[0],
+				   $seqfiles{$exonid}->[1],
+	);
+
+    push @{$seqfiles{$exonid}}, $exon_result;
+}
+
+## STEP 6 #####################################################################
+##
+## 
+
+print_header("Step 6: Parse exonerate out");
+my $e = 0;
+
+foreach my $exonid2 (sort keys %seqfiles) {
+
+    if (defined $seqfiles{$exonid2}->[2]) {
+    
+	print STDERR "\tParsing exonerate file for $exonid2            \r";
+	my $exonres_aref = parse_exonerate($seqfiles{$exonid2}->[2]);
+	
+	if (defined $exonres_aref) {
+	
+	    push @{$seqfiles{$exonid2}}, $exonres_aref;
+	}
+	$e++;
+    }
+}
+print STDERR "\n\n\tDone. $e exonerate files have been parsed.\n";
+
+
+## STEP 7 #####################################################################
+##
+## 
+
+print_header("Step 7: Create gene models");
+
+## Create the gmdir
+	
+my $gmdir = catdir($outdir, 'genemodels');
+make_path($gmdir);
+
+## To create the gene models it will take the sequence from the file
+## add in the sequence object the features and print as genbank format
+
+my ($gb, $es, $oc, $sa, $fm, $exo_f) = (0, 0, 0, 0, 0, 0);
+
+
+foreach my $gbid (sort keys %seqfiles) {
+
+    if (defined $seqfiles{$gbid}->[0] && ref($seqfiles{$gbid}->[3]) eq 'ARRAY'){
+    
+	## It should have just one sequence
+
+	my $seqio = Bio::SeqIO->new( -file   => $seqfiles{$gbid}->[0],
+				     -format => 'fasta'
+	    );
+
+
+	while(my $seq = $seqio->next_seq()) {
+
+	    ## Create two switches to add or not the sequence at the end
+	    ## of the loop
+	    
+	    my ($early_stop, $stop_absent, $orf_changed, $firstmet_absent) = 
+		(0, 0, 0, 0);
+
+	    ## Just take the highest score
+
+	    my %exodata =  %{$seqfiles{$gbid}->[3]->[0]};
+
+	    ## Check if we have ORF change in the exonerate data
+
+	    if ($exodata{TargetProteinAln} =~ m/#/) {
+		$orf_changed = 1;
+	    }
+
+	    ## Create the richseq
+	    my $newid = $seq->id() . '_' . $exodata{QueryID};
+
+	    my $rseq = Bio::Seq::RichSeq->new( -seq => $seq->seq(), 
+					       -id  => $newid );
+	    $rseq->accession($gbid);
+
+	    ## Split the data by type
+
+	    my $types_href = gff_typesplit($exodata{Gff});
+
+	    ## Create the source feature
+
+	    my $sourcefeat = Bio::SeqFeature::Generic->new(
+		-start       => 1,
+		-end         => $seq->length(),
+		-primary_tag => 'source'
+		);
+	    $rseq->add_SeqFeature($sourcefeat);
+
+	    ## Force first met or las stop codon if the switches are on
+	    
+	    force_first_met($types_href, $rseq, $exon_switch, $seq_switch);
+	    force_last_stop($types_href, $rseq, $exon_switch, $seq_switch);
+	    
+	    ## Create the gene feature
+
+	    my $genefeat = Bio::SeqFeature::Generic->new(
+		-start       => $types_href->{gene}->[0]->[3],
+		-end         => $types_href->{gene}->[0]->[4],
+		-strand      => $types_href->{gene}->[0]->[6],
+		-primary_tag => 'gene'
+		);
+	    $rseq->add_SeqFeature($genefeat);
+	    
+	    ## Calculate the mrna as (it will be added after exons)
+	    
+	    my $mrna_feat = create_mrna_feat($types_href);
+
+	    ## Add exons
+	    ## EXONS ##########################################################
+
+	    my @exon_feats = create_exon_feats($types_href);
+	    
+	    foreach my $exon_feat (@exon_feats) {
+
+		$rseq->add_SeqFeature($exon_feat);
+	    }
+
+	    ## Add now the mrna feat
+
+	    $rseq->add_SeqFeature($mrna_feat);
+
+	    ## Add introns
+	    ## INTRONS ########################################################
+
+	    my @intron_feats = create_intron_feats($types_href);
+	    
+	    foreach my $intron_feat (@intron_feats) {
+
+		$rseq->add_SeqFeature($intron_feat);
+	    }
+	    
+	    ## Now that we know where is the first cds it will add the 
+	    ## 5'UTR ##########################################################
+
+	    my $utr5_feat = create_5utr_feat($types_href);
+	    if (defined $utr5_feat) {
+
+		$rseq->add_SeqFeature($utr5_feat);
+	    }
+
+	    ## CDS ############################################################
+
+	    my $cds_feat = create_cds_feat($types_href, $rseq);
+	    if (defined $cds_feat) {
+
+		$rseq->add_SeqFeature($cds_feat);
+	    }
+	    
+	    ## Check if it has early stop or stop absent or it doesn't have
+	    ## first metionine
+
+	    my ($protseq) = $cds_feat->get_tag_values('translation');
+	    if ($protseq =~ m/\*\w/) {
+		$early_stop = 1;
+	    }
+	    if ($protseq =~ m/\w$/) {
+		$stop_absent = 1;
+	    }
+	    if ($protseq !~ m/^M/) {
+		$firstmet_absent = 1;
+	    }
+
+	    ## 3'UTR ##########################################################
+
+	    my $utr3_feat = create_3utr_feat($types_href);
+	    if (defined $utr3_feat) {
+
+		$rseq->add_SeqFeature($utr3_feat);
+	    }
+
+	    ## Now it will add some data to the seq. object
+
+	    my $date = strftime "%e-%b-%Y", localtime;
+	    $rseq->add_date($date);
+	    
+	    if ($early_stop == 0 && $orf_changed == 0 && $stop_absent == 0 &&
+		$firstmet_absent == 0) {
+
+		my $gbfilename = catfile($gmdir, $gbid . '.gb');
+		my $gbio = Bio::SeqIO->new( -file   => ">$gbfilename", 
+					    -format => 'genbank' );
+
+		$gbio->write_seq($rseq);
+
+		print STDERR "\tCreating genbank file for $gbid            \r";
+	    
+		$gb++;
+	    }
+	    else {
+		if ($early_stop == 1) {
+		    $es++;
+		}
+		elsif ($orf_changed == 1) {
+		    $oc++;
+		}
+		elsif ($stop_absent == 1) { 
+		    $sa++;
+		}
+		elsif ($firstmet_absent == 1) {
+		    $fm++;
+		}
+	    }
+	}
+    }
+    else {
+	$exo_f++;
+    }
+}
+print STDERR "\n\n\tDone. $gb genbank files have been created.\n";
+
+print_header("Step 8: Calculate stats");
+
+print STDERR "\tSummary:\n\t========\n";
+print STDERR "\tNo protein-target alignment:\t$exo_f\n";
+print STDERR "\tEarly stop codon:\t\t$es\n";
+print STDERR "\tChange in the ORF:\t\t$oc\n";
+print STDERR "\tStop codon absent:\t\t$sa\n";
+print STDERR "\tFirst Met absent:\t\t$fm\n";
+print STDERR "\tGene models created:\t\t$gb\n\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+ 
+      This script creates gene models in genbank format comparing a target 
+      sequence with a cdna and protein dataset. It has several steps:
+
+       1) Target alignment with cdna sequences using blat.
+
+       2) Blat result parsing and filtering.
+
+       3) Target sequence parsing.
+
+       4) Protein sequence parsing.
+
+       5) Exonerate run of target-protein.
+
+       6) Exonerate result parsing and filtering.
+
+       7) GenBank file output.
+
+      This script uses two external programs:
+
+       + blat ()
+       + exonerate ()
+
+      Its executables should be in the PATH to run this script.
+
+    Usage:
+      
+      GeneModeler    [-h] -t <target_seq>  -d <completecdna_seq> 
+                     -p <completeprotein_seq> -o <output_basename>
+                     [-c <cdna_hit_mincoverage>] [-i <cdna_hit_minidentity>]
+                     [-b <cdna_hit_minblocks>] [-g <cdna_hit_maxgaps>]
+                     [-s <cdna_hit_sidesize>] [-E] [-S]
+      
+    Flags:
+ 
+     -t <target_seq>            target sequence in fasta format (mandatory)
+     -d <completecdna_seq>      complete cdna sequence as fasta (mandatory)
+     -p <completeprotein_seq>   complete protein sequence as fasta (mandatory)
+     -o <output_basename>       output_basename (mandatory)
+     -c <cdna_hit_mincoverage>  min. coverage for cdna hit (default: 95)
+     -i <cdna_hit_minidentity>  min. identity for cdna hit (default: 90)
+     -b <cdna_hit_minblocks>    min. block number for cdna hit (default: 2)
+     -g <cdna_hit_maxgaps>      max. number of gaps for cdna hit (default: 10)
+     -s <cdna_hit_sidesize>     size of to take cdna hit margins (default: 50)
+     -E                         switch to force firstMet and lastStop by codon 
+                                walking through the exon
+     -S                         switch to force firstMet and lastStop by codon 
+                                walking through the seqquence
+     -h <help>                  print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+=head2 run_blat
+
+  Usage: my $outfile = run_blat($parameters_href, $dbfasta, $quefasta, $outbase)
+
+  Desc: run blat program with the specified parameters
+
+  Ret: $outfile, output filename
+
+  Args: a hash ref. with the running parameters (see blat -h for details).
+        $dbfasta, an scalar with database fasta filename
+        $quefasta, an scalar with query fasta file
+        $outbase, output base
+
+  Side_Effects: die if some parameters are not right
+                die if the running fails
+
+  Example: run_blat
+
+=cut
+
+sub run_blat {
+    my $phref = shift || die("ERROR: No par. href was supplied to run_blat().");
+    my $dbfas = shift || die("ERROR: No dbfasta was supplied to run_blast().");
+    my $qefas = shift || die("ERROR: No que.fasta was supplied to run_blat().");
+    my $out = shift || die("ERROR: No out basename was supplied to run_blat()");
+
+    if (ref($phref) ne 'HASH') {
+	die("ERROR: par. href supplied to run_blat is not a hash reference.");
+    }
+
+    ## Allowed arguments for blat
+
+    my %blatpar = (
+	'-t'                => "(dna|prot|dnax)",
+	'-q'                => "(dna|rna|prot|dnax|rnax)",
+	'-prot'             => '',
+        '-ooc'              => "[0-9]+",
+        '-tileSize'         => "[0-9]+",
+        '-stepSize'         => "[0-9]",
+        '-oneOff'           => "[0-1]",
+        '-minMatch'         => "[0-9]+",
+        '-minScore'         => "[0-9]+",
+        '-minIdentity'      => "[0-9]+",
+        '-maxGap'           => "[0-9]+",
+        '-noHead'           => '',
+        '-makeOoc'          => '',
+        '-repMatch'         => "[0-9]+",
+        '-mask'             => ".+",
+        '-qMask'            => ".+",
+        '-repeats'          => ".+",
+        '-minRepDivergence' => "[0-9]+",
+        '-dots'             => "[0-9]+",
+        '-trimT'            => '',
+	'-noTrimA'          => '',
+        '-trimHardA'        => '',
+        '-fastMap'          => '',
+        '-out'         => "(psl|pslx|axt|maf|sim4|wublast|blast|blast8|blast9)",
+	'-fine'             => '',
+        '-maxIntron'        => "[0-9]+",
+        '-extendThroughN'   => '',
+	);
+
+    ## Check that the parameters are allowed
+    
+    foreach my $phref_k (keys %{$phref}) {
+	
+	unless (exists $blatpar{$phref_k}) {
+	    die("ERROR: blat argument $phref_k does not exists (run_blat())\n");
+	}
+	else {
+	    my $phref_v = $phref->{$phref_k};
+	    my $checkpar = length($blatpar{$phref_k});
+	    if ($checkpar > 0 && $phref_v !~ m/^$blatpar{$phref_k}$/) {
+		die("ERROR: blat argument $phref_k = $phref_v is not permited");
+	    }
+	}
+    }
+
+    ## Now it will run the command
+
+    my $blatcmd = "blat $dbfas $qefas";
+    
+    foreach my $phref_ar (keys %{$phref}) {
+    
+	if (length($blatpar{$phref_ar}) > 0) {
+	
+	    my $phref_va = $phref->{$phref_ar};
+	    $blatcmd .= " $phref_ar=$phref_va";
+	}
+	else {
+	    $blatcmd .= " $phref_ar";
+	}
+     }
+
+    ## finally create the output
+
+    my $outfile = $out;
+    if (exists $phref->{'-out'}) {
+	$outfile .= '.' .$phref->{'-out'};
+    }
+    else {
+	$outfile .= '.psl';
+    }
+
+    $blatcmd .= " $outfile";
+
+    ## Now it will run the command
+
+    print STDERR "\nRUNNING BLAT CMD:\n$blatcmd\n\n";
+    my $err = system($blatcmd);
+
+    if ($err != 0) {
+	die("ERROR: An error occurs running $blatcmd (Error: $?)\n");
+    }
+    else {
+	print STDERR "\nBLAT CMD SUCCESS.\n";
+	return($outfile);
+    }
+}
+
+
+=head2 parse_blatresults
+
+  Usage: my $blat_results = parse_blatresults($blatfile, $cover, $block, $gaps)
+
+  Desc: parse the blat result file and returns a hashref with:
+        $blat_href => { $target_id => [ { keys => value } ] }
+        @keys = ( Match,        Mismatch,  Repmatch,   Ns,         QGapCount, 
+                  QGapBases,    TGapCount, TGapBases,  Strand,     QName, 
+                  QSize,        QStart,    QEnd,       TName,      TSize, 
+                  TStart,       TEnd,      BlockCount, BlockSizes, QBlockStart, 
+                  TBlockStart,  QCov,      TCov);
+
+  Ret: $blat_result a HASHREF of HAHSREF's of ARRAYREF's of HASHREF's
+
+  Args: $blatfile, a filename with the blast results in .psl format
+        $cover, min. query sequence coverage to keep the hit match
+        $block, min. number of blocks to keep the hit match
+        $gaps, max. number of gaps permitted
+
+  Side_Effects: die if some parameters are not right
+
+  Example: my $blat_results = parse_blatresults($blatfile, ''r, $block, $gaps)
+
+=cut
+
+sub parse_blatresults {
+    my $blatfile = shift || 
+	die("ERROR: No blatfile argument was supplied to parse_blatresult()");
+    my @filters = @_;
+    
+    foreach my $flt (@filters) {
+	if ($flt !~ m/^\d+$/) {
+	    die("ERROR: filter:$flt supplied to parse_blatresult isnt integer");
+	}
+    }
+
+    open my $blatfh, '<', $blatfile;    ## autodie should do the rest
+    
+    ## Count colums to write the status report
+
+    my $C = `cut -f1 $blatfile | wc -l`;
+    chomp($C);
+    my ($c, $d) = (0, 0);
+
+    ## Declare the variable
+
+    my %blatres = ();
+
+    ## Read the file and select the right fields
+
+    while(<$blatfh>) {
+	$c++;
+	chomp($_);
+	my @data = split(/\t/, $_);
+
+	print STDERR "\tParsing blat result file, line $c of $C ($d added)  \r";
+
+	## First create and populate the hash with the data
+
+	my %data = ();
+	my @keys = ('Match','Mismatch','Repmatch','Ns','QGapCount','QGapBases',
+                    'TGapCount','TGapBases','Strand','QName','QSize','QStart',
+		    'QEnd','TName','TSize','TStart','TEnd','BlockCount',
+                    'BlockSizes','QBlockStart','TBlockStart' );
+
+	my $n = 0;
+	foreach my $k (@keys) {
+	    
+	    $data{$k} = $data[$n];
+	    $n++;
+	}
+
+	## Second calculate the coverages (and round them) and add them
+
+	my $q_cov = Math::BigFloat->new($data[0] * 100 / $data[10])->bround(0);
+	my $t_cov = Math::BigFloat->new($data[0] * 100 / $data[14])->bround(0);
+
+	$data{QCov} = $q_cov;
+	$data{TCov} = $t_cov;
+
+	## Third filter it.
+
+	my $filterpass = 1;
+	if (defined $filters[0]) {                      ## Min. query coverage
+	    if ($data{TCov} < $filters[0]) {
+		
+		$filterpass = 0;
+	    }
+	}
+	if (defined $filters[1]) {                      ## Min. block numbers
+	    if ($data{BlockCount} < $filters[1]) {
+		
+		$filterpass = 0;
+	    }
+	}
+	if (defined $filters[2]) {                      ## Max. gap size
+	    if ($data{QGapCount} > $filters[2]) {
+		
+		$filterpass = 0;
+	    }
+	}
+
+	## Now it will add the data to the hash if it has passed the filter
+
+	if ($filterpass == 1) {
+	    
+	    $d++;
+	    if (exists $blatres{$data{QName}}) {
+	    
+		push @{$blatres{$data{QName}}}, \%data;	    
+	    }
+	    else {
+	    
+		$blatres{$data{QName}} = [\%data];
+	    }
+	}
+    }
+    
+    ## Now it should be done.
+
+    print STDERR "\n\n\tParsing finished ($d matches selected)\n";
+    
+    return(\%blatres);
+}
+
+
+=head2 run_exonerate
+
+  Usage: my $outfile = run_exonerate($parameters_href, $quefasta, $protfasta)
+
+  Desc: run exonerate program with the specified parameters
+
+  Ret: $outfile, output filename
+
+  Args: a hash ref. with the running parameters (see exonerate -h for details).
+        $quefasta, an scalar with query fasta filename
+        $protfasta, an scalar with protein fasta file
+
+  Side_Effects: die if some parameters are not right
+                die if the running fails
+                get the dirname from $quefasta
+
+  Example: my $outfile = run_exonerate($parameters_href, $quefasta, $protfasta);
+
+=cut
+
+sub run_exonerate {
+    my $phref = shift 
+	|| die("ERROR: No par. href was supplied to run_exonerate().");
+    my $qefas = shift 
+	|| die("ERROR: No query fasta was supplied to run_exonerate().");
+    my $ppfas = shift 
+	|| die("ERROR: No protein fasta was supplied to run_exonerate().");
+
+    if (ref($phref) ne 'HASH') {
+	die("ERROR: par.href supplied to run_exonerate is not a hash ref.");
+    }
+
+    ## Allowed arguments for exonerate
+
+    my @exomodels = ('ungapped', 'ungapped:trans', 'affine:global',
+		     'affine:bestfit', 'affine:local', 'affine:overlap',
+		     'est2genome', 'protein2dna', 'protein2genome',
+		     'coding2coding', 'coding2genome', 'genome2genome');
+    my $model = "(" . join("|", @exomodels) . ")";
+
+    my %exopar = (
+	'--querytype'            => "(dna|protein)",
+	'--targettype'           => "(dna|protein)",
+	'--exhaustive'           => '',
+	'--bigseq'               => "[0-9]+",
+	'--verbose'              => "[0-9]",
+	'--forcescan'            => "(none|query|target)",
+	'--dnawordlen'           => "[0-9]+",
+	'--proteinwordlen'       => "[0-9]+",
+	'--saturatethreshold'    => "[0-9]+",
+	'--useworddropoff'       => '',    
+	'--wordjump'             => "[0-9]+", 
+	'--dnawordthreshold'     => "[0-9]+",
+	'--proteinwordthreshold' => "[0-9]+",
+	'--model'                => "$model",
+	'--score'                => "[0-9]+",
+	'--percentage'           => "[0-9]+",
+	'--showalignment'        => '',
+        '--showsugar'            => '',
+	'--showcigar'            => '', 
+	'--showvulgar'           => '',
+	'--showquerygff'         => '',
+	'--showtargetgff'        => '',
+        '--ryo'                  => ".+",
+        '--bestn'                => "[0-9]+",
+        '--subopt'               => '',
+	'--terminalrangeint'     => '',
+	'--terminalrangeext'     => '',
+	'--joinrangeint'         => '',
+	'--joinrangeext'         => '',
+	'--spanrangeint'         => '',	
+	'--spanrangeext'         => '',
+	'--refine'               => "(none|full|region)",
+        '--refineboundary'       => "[0-9]+",
+	'--dnasubmat'            => "(nucleic|blosum62|pam250|edit|identity)",
+	'--proteinsubmat'        => "(nucleic|blosum62|pam250|edit|identity)",
+	'--gapopen'              => "[0-9]+",
+	'--gapextend'            => "[0-9]+",
+	'--minner'               => '',
+	'--maxner'               => "[0-9]+", 
+	'--neropen'              => "[0-9]+",
+	'--forcegtag'            => '',
+	'--minintron'            => "[0-9]+",
+	'--maxintron'            => "[0-9]+",
+	'--intronpenalty'        => "[0-9]+",
+	'--frameshift'           => "[0-9]+",
+	'--useaatla'             => '',
+	'--hspfilter'            => "[0-9]+",
+	'--softmaskquery'        => "[0-9]+",
+	'--softmasktarget'       => "[0-9]+",
+	'--dnahspdropoff'        => "[0-9]+",
+	'--proteinhspdropoff'    => "[0-9]+",
+	'--dnahspthreshold'      => "[0-9]+",
+	'--proteinhspthreshold'  => "[0-9]+",
+	'--alignmentwidth'       => "[0-9]+",
+        '--forwardcoordinates'   => '',
+	'--quality'              => "[0-9]+",
+	);
+
+    ## Check that the parameters are allowed
+    
+    foreach my $k (keys %{$phref}) {
+	
+	unless (exists $exopar{$k}) {
+	    die("ERROR: exonerate arg. $k does not exists (run_exonerate())\n");
+	}
+	else {
+	    my $phref_v = $phref->{$k};
+	    my $checkpar = length($exopar{$k});
+	    if ($checkpar > 0 && $phref_v !~ m/^$exopar{$k}$/) {
+		die("ERROR: exonerate argument $k = $phref_v is not permited");
+	    }
+	}
+    }
+
+    ## Now it will run the command
+
+    my $exoncmd = "exonerate --query $ppfas --target $qefas";
+    
+    foreach my $phref_ar (keys %{$phref}) {
+    
+	if (length($exopar{$phref_ar}) > 0) {
+	
+	    my $phref_va = $phref->{$phref_ar};
+	    $exoncmd .= " $phref_ar $phref_va";
+	}
+	else {
+	    $exoncmd .= " $phref_ar";
+	}
+     }
+
+    ## finally create the output
+
+    my $outdir = dirname($qefas);
+    my $basename = basename($qefas);
+    $basename =~ s/\.\w+$//;
+    my $outfile = catfile($outdir, $basename . '.exonerate.txt');
+
+    $exoncmd .= " > $outfile";
+
+    ## Now it will run the command
+
+    print STDERR "\nRUNNING EXONERATE CMD:\n$exoncmd\n\n";
+    my $err = system($exoncmd);
+
+    if ($err != 0) {
+	die("ERROR: An error occurs running $exoncmd (Error: $?)\n");
+    }
+    else {
+	print STDERR "\nEXONERATE CMD SUCCESS.\n";
+	return($outfile);
+    }
+}
+
+=head2 parse_exonerate
+
+  Usage: my $exodata_aref = parse_exonerate($exonerate_file)
+
+  Desc: parse the exonerate output
+
+  Ret: $exonerate_aref, a array ref. order by score with the following struture
+       [{ result1_key => result1_value }, { result2_key => result2_value }...]
+       possible keys are: QueryID, TargetID, Model, RawScore, QueryRange, 
+                          TargetRange, QueryProteinAln, TargetProteinAln, 
+                          TargetDNAAlign, QueryProtSeq, TargetProtSeq, Vulgar,
+                          Gff (last one will be an arrayref)
+
+  Args: $exonerate_file, file with exonerate results
+
+  Side_Effects: die if some parameters are not right
+
+  Example: my $exodata_aref = parse_exonerate($exonerate_file)
+
+=cut
+
+sub parse_exonerate {
+    my $efile = shift ||
+	die("ERROR: No exonerate file was supplied to parse_exonerate()");
+
+    my %sort_idx = ();
+    my %entry_idx = ();
+    my $entry;
+
+    my ($querypepswitch, $targetpepswitch, $targetdnaswitch) = (0, 0, 0);
+    my ($gffswitch, $emptyfile) = (0, 1);
+
+    open my $efh, '<', $efile;
+
+    my $idx = 0;
+    while(<$efh>) {
+	chomp($_);
+	
+	## Begining line: 'C4 Alignment:' => create a new entry hashref
+
+	if ($_ =~ m/^C4\s+Alignment:/) {
+	    $idx++;
+	    $emptyfile = 0;
+	    $entry = { 'QueryProteinAln'  => '', 
+		       'TargetProteinAln' => '', 
+                       'TargetDNAAln'     => '', 
+		       'QueryProtSeq'     => '', 
+		       'TargetProtSeq'    => '',
+		       'Gff'              => [],
+	    };
+	}
+
+	## Retrieve data from the alignment
+
+	if ($_ =~ m/\s+Query:\s+(.+)/) {
+	    
+	    my @idline = split(/\s+/, $1);
+	    $entry->{'QueryID'} = shift(@idline);
+	    $entry->{'QueryDescription'} = join(' ', @idline);
+	}
+	elsif ($_ =~ m/\s+Target:\s+(.+)/) {
+	    
+	    my @idline = split(/\s+/, $1);
+	    $entry->{'TargetID'} = shift(@idline);
+	    $entry->{'TargetDescription'} = join('', @idline);
+	}
+	elsif ($_ =~ m/\s+Model:\s+(.+)$/) {
+	    
+	    $entry->{'Model'} = $1;
+	}
+	elsif ($_ =~ m/\s+Raw\s+score:\s+(\d+)$/) {
+	
+	    $entry->{'RawScore'} = $1;
+	}
+	elsif ($_ =~ m/\s+Query\s+range:\s+(\d+)\s+->\s+(\d+)/) {
+	
+	    $entry->{'QueryRange'} = $1 . '..' . $2;
+	}
+	elsif ($_ =~ m/\s+Target\s+range:\s+(\d+)\s+->\s+(\d+)/) {
+	
+	    $entry->{'TargetRange'} = $1 . '..' . $2;
+	    $querypepswitch = 1;
+	}
+
+	## To retrieve the sequences:
+
+	if ($_ =~ m/\s+\d+\s+:\s+(.+)\s+:\s+\d+/) {
+	    if ($querypepswitch == 1) {
+	    
+		$entry->{'QueryProteinAln'} .= $1;
+		$targetpepswitch = 1;
+		$querypepswitch =0;
+		$targetdnaswitch = 0;
+	    }
+	    elsif ($targetdnaswitch) {
+	    
+		$entry->{'TargetDNAAln'} .= $1;
+		$targetpepswitch = 0;
+		$querypepswitch =1;
+		$targetdnaswitch = 0;
+	    }
+	}
+	elsif ($targetpepswitch == 1) {
+	    
+	    if ($_ =~ m/\s+(.+)/ && $1 !~ m/[\||!]/) {
+		
+		$entry->{'TargetProteinAln'} .= $1;
+	    
+		$targetpepswitch = 0;
+		$querypepswitch =0;
+		$targetdnaswitch = 1;
+	    }
+	}
+
+	## Now it will take vulgar line
+
+	if ($_ =~ m/vulgar:\s+(.+)/) {
+	
+	    $entry->{'Vulgar'} = $1;
+	    $targetpepswitch = 0;
+	    $querypepswitch =0;
+	    $targetdnaswitch = 0;
+	}
+
+	## Finally it will take the gff data
+
+	if ($_ =~ /##gff-version 2/) {
+	
+	    $gffswitch = 1;
+	}
+	elsif ($_ !~ m/^#/ && $gffswitch == 1) {
+	
+	    my @gffline = split(/\t/, $_);
+	    push @{$entry->{'Gff'}}, \@gffline;
+	}
+	elsif ($_ =~ /# --- END OF GFF DUMP ---/) {
+	
+	    $gffswitch = 0;
+	}
+	
+	## End line: -- completed exonerate analysis
+	## Time to add the data
+
+	if ($_ =~ m/-- completed exonerate analysis/) {
+	
+	    $sort_idx{$idx} = $entry->{'RawScore'};
+	    $entry_idx{$idx} = $entry;
+	    $entry = {};
+	}   
+    }
+   
+    ## Before return the array it will sort the entries by desc. raw score
+
+    my @edata = ();
+    foreach my $nidx (sort {$sort_idx{$b} <=> $sort_idx{$a}} keys %sort_idx) {
+    
+	push @edata, $entry_idx{$nidx};
+    }
+    if ($emptyfile == 0) {
+	return \@edata;
+    }
+}
+
+=head2 gff_typesplit
+
+  Usage: my \%types_aref = gff_typesplit($gff_aref);
+
+  Desc: It transforms $gff_aref (array ref. of gff lines) into a hash ref. 
+        where %types_aref = ( $gff_type => \@gff_aref );        
+
+  Ret: A hash ref. with the types as keys and gff aref. as values
+
+  Args: $gff_aref, a hashref of arrayref. of arrayrefs for gff3 file
+
+  Side_Effects: die if some parameters are not right
+
+  Example: my \%types_aref = gff_typesplit($gff_aref);
+
+=cut
+
+sub gff_typesplit {
+    my $gff_aref = shift ||
+	die("ERROR: No gff_aref was supplied to the function gff_typesplit");
+
+    if (ref($gff_aref) ne 'ARRAY') {
+	die("ERROR: gff_aref=$gff_aref supplied to gff_typesplit isnt aref");
+    }
+
+    my %types = ();
+
+    foreach my $gffline (@{$gff_aref}) {
+
+	my $type = $gffline->[2];
+	if ($type =~ m/cds/) {                ## exonerate annotate CDS as cds
+	    $type = 'CDS';
+	    $gffline->[2] = $type;
+	}
+ 		
+	if (exists $types{$type}) {
+	
+	    push @{$types{$type}}, $gffline;
+	}
+	else {
+	
+	    $types{$type} = [$gffline];
+	}
+    }
+	
+    return \%types;
+}
+
+=head2 create_mrna_feat
+
+  Usage: my $mrna_feat = create_mrna_feat($types_href);
+
+  Desc: It creates a mrna feat based in the types aref
+
+  Ret: A Bio::SeqFeature::Generic object where primary_tag is mRNA
+
+  Args: $types_href, a hash ref with keys=type and value=aref. of gff lines
+
+  Side_Effects: die if some parameters are not right
+
+  Example: my $mrna_feat = create_mrna_feat($types_href);
+
+=cut
+
+sub create_mrna_feat {
+    my $types_href = shift ||
+	die("ERROR: No Types Hashref. was supplied to create_mrna_feat");
+
+    if (ref($types_href) ne 'HASH') {
+	die("ERROR: $types_href supplied to create_mrna_feat is not a href");
+    }
+
+    my $exons_aref = $types_href->{'exon'};
+
+    if (defined $exons_aref) {
+	
+	my $mrna_st = $exons_aref->[0]->[3];
+	my $mrna_en = $exons_aref->[-1]->[4];
+
+	my $splitlocation = Bio::Location::Split->new();
+
+	my $mrna_feat = Bio::SeqFeature::Generic->new(
+	    -primary_tag => 'mRNA',
+	    -location    => $splitlocation,
+	    );
+
+	foreach my $exon (@{$exons_aref}) {
+		
+	    ## Add to the mRNA as sublocation
+		
+	    my $sublocation = Bio::Location::Simple->new(
+		-start         => $exon->[3],
+		-end           => $exon->[4],
+		-location_type => 'EXACT',
+		);
+	    $splitlocation->add_sub_Location($sublocation);
+	}
+	
+	return $mrna_feat;
+    }    
+}
+
+
+=head2 create_exon_feats
+
+  Usage: my @exon_feats = create_exon_feats($types_href);
+
+  Desc: It creates an array of exon feat based in the types aref
+
+  Ret: An array of Bio::SeqFeature::Generic object where primary_tag is exon
+
+  Args: $types_href, a hash ref with keys=type and value=aref. of gff lines
+
+  Side_Effects: die if some parameters are not right
+
+  Example: my @exon_feats = create_exon_feats($types_href);
+
+=cut
+
+sub create_exon_feats {
+    my $types_href = shift ||
+	die("ERROR: No Types Hashref. was supplied to create_exon_feat");
+
+    if (ref($types_href) ne 'HASH') {
+	die("ERROR: $types_href supplied to create_exon_feat is not a href");
+    }
+
+    ## Define the variable
+
+    my @exon_feats = ();
+
+    my $exons_aref = $types_href->{'exon'};
+
+    if (defined $exons_aref) {
+
+	my $exon_n = 1;
+
+	foreach my $exon (@{$exons_aref}) {
+		
+	    my $exon_feat =  Bio::SeqFeature::Generic->new(
+		-start       => $exon->[3],
+		-end         => $exon->[4],
+		-primary_tag => 'exon',
+		-tag         =>  { number => $exon_n },
+		);
+	
+	    push @exon_feats, $exon_feat;
+	    	    
+	    $exon_n++;
+	}
+    }
+    return @exon_feats;
+}
+
+=head2 create_intron_feats
+
+  Usage: my @intron_feats = create_intron_feats($types_href);
+
+  Desc: It creates an array of intron feat based in the types aref
+
+  Ret: An array of Bio::SeqFeature::Generic object where primary_tag is intron
+
+  Args: $types_href, a hash ref with keys=type and value=aref. of gff lines
+
+  Side_Effects: die if some parameters are not right
+
+  Example: my @intron_feats = create_intron_feats($types_href);
+
+=cut
+
+sub create_intron_feats {
+    my $types_href = shift ||
+	die("ERROR: No Types Hashref. was supplied to create_intron_feat");
+
+    if (ref($types_href) ne 'HASH') {
+	die("ERROR: $types_href supplied to create_intron_feat is not a href");
+    }
+
+    ## Define the variable
+
+    my @intron_feats = ();
+
+    my $exons_aref = $types_href->{'exon'};
+
+    if (defined $exons_aref) {
+
+	my $intron_n = 1;
+
+	foreach my $exon (@{$exons_aref}) {
+
+	    if ($intron_n < scalar(@{$exons_aref})) {
+		
+		my $intron_feat =  Bio::SeqFeature::Generic->new(
+		    -start       => $exon->[4] + 1,
+		    -end         => $exons_aref->[$intron_n]->[3] - 1,
+		    -primary_tag => 'intron',
+		    -tag         =>  { number => $intron_n },
+		    );
+	
+		push @intron_feats, $intron_feat;
+	    	    
+		$intron_n++;
+	    }
+	}
+    }
+    return @intron_feats;
+}
+
+
+
+=head2 create_5utr_feat
+
+  Usage: my $5utr_feat = create_5utr_feat($types_href);
+
+  Desc: It creates a utr5 feat based in the types aref
+
+  Ret: An object Bio::SeqFeature::Generic object where primary_tag is 5'UTR
+
+  Args: $types_href, a hash ref with keys=type and value=aref. of gff lines
+
+  Side_Effects: die if some parameters are not right
+
+  Example: my $5utr_feat = create_5utr_feat($types_href);
+
+=cut
+
+sub create_5utr_feat {
+     my $types_href = shift ||
+	die("ERROR: No Types Hashref. was supplied to create_5utr_feat");
+
+    if (ref($types_href) ne 'HASH') {
+	die("ERROR: $types_href supplied to create_5utr_feat is not a href");
+    }
+
+     ## First, find the first cds-exon match
+
+     my $exons_aref = $types_href->{'exon'};
+     my $cds_aref = $types_href->{'CDS'};
+
+    if (defined $exons_aref && defined $cds_aref) {
+
+	## declare the variable
+
+	my $utr5_feat;
+	my $exon_cds = 0;
+	my $e = 0;
+
+	foreach my $exon (@{$exons_aref}) {
+	    
+	    my @cds_f = @{$cds_aref->[0]};
+	    if ($cds_f[3] >= $exon->[3] && $cds_f[3] <= $exon->[4]) {
+		$exon_cds = $e;
+	    }	    
+	    $e++;
+	}
+     
+	## Now it will create the 5'UTR
+
+	if ($exon_cds == 0) {
+
+	    my $utr5_st = $exons_aref->[0]->[3];
+	    my $utr5_en = $cds_aref->[0]->[3] - 1;
+
+	    ## Add UTR if 5utr_st < 5utr_en
+
+	    if ($utr5_st < $utr5_en) {
+		
+		$utr5_feat =  Bio::SeqFeature::Generic->new(
+		    -start       => $utr5_st,
+		    -end         => $utr5_en,
+		    -primary_tag => "5'UTR",
+		    );
+	    }
+	}
+	else {
+		
+	    my $splitlocation = Bio::Location::Split->new();
+
+	    $utr5_feat = Bio::SeqFeature::Generic->new(
+		-primary_tag => "5'UTR",
+		-location    => $splitlocation,
+		);
+
+	    my $exon_c = 0;
+	    while($exon_c <= $exon_cds) {
+		    
+		my ($cds_st, $cds_en) = (0,0);
+		if ($exon_c < $exon_cds) {
+
+		    $cds_st = $exons_aref->[$exon_c]->[3];
+		    $cds_en = $exons_aref->[$exon_c]->[4];
+		}
+		else {
+		    $cds_st = $exons_aref->[$exon_c]->[3];
+		    $cds_en = $cds_aref->[0]->[3] - 1;
+		}
+		    
+		if ($cds_st < $cds_en) {
+		    my $sublocation = Bio::Location::Simple->new(
+			-start         => $cds_st,
+			-end           => $cds_en,
+			-location_type => 'EXACT',
+			);
+		    $splitlocation->add_sub_Location($sublocation);
+		}
+		    
+		$exon_c++;		    
+	    }
+	}
+	return $utr5_feat;
+    }
+}
+
+=head2 create_3utr_feat
+
+  Usage: my $3utr_feat = create_3utr_feat($types_href);
+
+  Desc: It creates a utr3 feat based in the types aref
+
+  Ret: An object Bio::SeqFeature::Generic object where primary_tag is 3'UTR
+
+  Args: $types_href, a hash ref with keys=type and value=aref. of gff lines
+
+  Side_Effects: die if some parameters are not right
+
+  Example: my $3utr_feat = create_3utr_feat($types_href);
+
+=cut
+
+sub create_3utr_feat {
+     my $types_href = shift ||
+	die("ERROR: No Types Hashref. was supplied to create_3utr_feat");
+
+    if (ref($types_href) ne 'HASH') {
+	die("ERROR: $types_href supplied to create_3utr_feat is not a href");
+    }
+
+     ## First, find the first cds-exon match
+
+     my $exons_aref = $types_href->{'exon'};
+     my $cds_aref = $types_href->{'CDS'};
+
+    if (defined $exons_aref && defined $cds_aref) {
+
+	## declare the variable
+
+	my $utr3_feat;
+	my $exon_cds = 0;
+	my $e = 0;
+
+	foreach my $exon (@{$exons_aref}) {
+	    
+	    my @cds_l = @{$cds_aref->[-1]};
+	    if ($cds_l[4] >= $exon->[3] && $cds_l[4] <= $exon->[4]) {
+		$exon_cds = $e;
+	    }	    
+	    $e++;
+	}
+     
+	## Now it will create the 5'UTR
+
+	if ($exon_cds + 1 == scalar(@{$exons_aref})) {
+
+	    my $utr3_en = $exons_aref->[-1]->[4];
+	    my $utr3_st = $cds_aref->[-1]->[4] + 1;
+
+	    ## Add UTR if 3utr_st < 3utr_en
+
+	    if ($utr3_st < $utr3_en) {
+		
+		$utr3_feat =  Bio::SeqFeature::Generic->new(
+		    -start       => $utr3_st,
+		    -end         => $utr3_en,
+		    -primary_tag => "3'UTR",
+		    );
+	    }
+	}
+	else {
+		
+	    my $splitlocation = Bio::Location::Split->new();
+
+	    $utr3_feat = Bio::SeqFeature::Generic->new(
+		-primary_tag => "3'UTR",
+		-location    => $splitlocation,
+		);
+
+	    my $exon_c = scalar(@{$exons_aref}) - 1;
+	    while($exon_c >= $exon_cds) {
+		    
+		my ($cds_st, $cds_en) = (0,0);
+		if ($exon_c > $exon_cds) {
+
+		    $cds_st = $exons_aref->[$exon_c]->[3];
+		    $cds_en = $exons_aref->[$exon_c]->[4];
+		}
+		else {
+		    $cds_en = $exons_aref->[$exon_c]->[4];
+		    $cds_st = $cds_aref->[-1]->[4] + 1;
+		}
+		    
+		if ($cds_st < $cds_en) {
+		    my $sublocation = Bio::Location::Simple->new(
+			-start         => $cds_st,
+			-end           => $cds_en,
+			-location_type => 'EXACT',
+			);
+		    $splitlocation->add_sub_Location($sublocation);
+		}
+		    
+		$exon_c--;		    
+	    }
+	}
+	return $utr3_feat;
+    }
+}
+
+=head2 create_cds_feat
+
+  Usage: my $cds_feat = create_cds_feat($types_href);
+
+  Desc: It creates a cds feat based in the types aref
+
+  Ret: An object Bio::SeqFeature::Generic object where primary_tag is CDS
+
+  Args: $types_href, a hash ref with keys=type and value=aref. of gff lines
+        $rseq, a Bio::Seq object
+
+  Side_Effects: die if some parameters are not right
+
+  Example: my $cds_feat = create_cds_feat($types_href);
+
+=cut
+
+sub create_cds_feat {
+     my $types_href = shift ||
+	die("ERROR: No Types Hashref. was supplied to create_cds_feat");
+     my $rseq = shift ||
+	 die("ERROR: no rseq (Bio::Seq) was supplied to create_cds_feat");
+
+     if (ref($types_href) ne 'HASH') {
+	 die("ERROR: $types_href supplied to create_cds_feat is not a href");
+     }
+    
+
+     if (defined $types_href->{'CDS'} && defined $types_href->{'exon'}) {
+     
+	 my @cds = @{$types_href->{'CDS'}};
+	 my @exons = @{$types_href->{'exon'}};
+
+	 my $cds_splitlocation = Bio::Location::Split->new();
+	    
+	 my $cds_feat =  Bio::SeqFeature::Generic->new(
+	     -location    => $cds_splitlocation,
+	     -primary_tag => 'CDS',
+	     -tag         =>  { codon_start => $cds[0]->[3] },
+	     );
+	
+	 my $cds_seq = '';
+
+	 foreach my $cds (@cds) {
+		
+	     ## It will add to the mRNA as sublocation
+		
+	     my $sublocation = Bio::Location::Simple->new(
+		 -start         => $cds->[3],
+		 -end           => $cds->[4],
+		 -location_type => 'EXACT',
+		 );
+	     $cds_splitlocation->add_sub_Location($sublocation);
+
+	     ## Aditionally it will retrieve the cds sequence
+		
+	     my $cdsobj = $rseq->trunc($cds->[3], $cds->[4]);
+	     $cds_seq .= $cdsobj->seq();	
+	 }
+
+	 ## It will add the protein sequence
+
+	 my $protseq = Bio::Seq->new(-seq => $cds_seq)->translate()->seq();
+	 
+	 $cds_feat->add_tag_value('translation', $protseq);
+
+	 return $cds_feat;
+     }
+}
+
+=head2 force_first_met
+
+  Usage: force_first_met($types_href, $rseq, $exon_switch, $seq_switch);
+
+  Desc: It check if the first codon is Met. 
+        If not, it will walk to the first exon (exon_switch enabled) or 
+        to the complete sequence as limit to find the first met.
+      
+  Ret: Nothing (it modify the type hashref)
+
+  Args: $types_href, a hash ref with keys=type and value=aref. of gff lines
+        $rseq, a Bio::Seq object
+        $exon_switch, 0 or 1
+        $seq_switch, 0 or 1
+
+  Side_Effects: die if some parameters are not right
+                modify type hashref
+                exon_switch enabled by default
+
+  Example: force_first_met($types_href, $rseq, $exon_switch, $seq_switch);
+
+=cut
+
+sub force_first_met {
+    my $types_href = shift ||
+	die("ERROR: No Types Hashref. was supplied to force_first_met");
+    my $rseq = shift ||
+	 die("ERROR: no rseq (Bio::Seq) was supplied to force_first_met");
+    my $exsw = shift || 1;                             ## enable by default
+    my $sqsw = shift || 0;                             ## disabled by default
+
+     if (ref($types_href) ne 'HASH') {
+	 die("ERROR: $types_href supplied to force_first_met is not a href");
+     }
+
+     if (defined $types_href->{'CDS'} && defined $types_href->{'exon'}) {
+     
+	 my @cds = @{$types_href->{'CDS'}};
+	 my @exons = @{$types_href->{'exon'}};
+	 
+	 my $cds_st = $cds[0]->[3];
+	 my $cds_en = $cds[-1]->[4];
+
+	 my $mrna_st = $exons[0]->[3];
+	 
+	 my $limit;
+	 if ($exsw == 1) {
+	     $limit = $mrna_st;
+	 }
+	 if ($sqsw == 1) {
+	     $limit = 1;
+	 }
+
+	 my $new_start = 0;
+	 my $cdsseq = $rseq->trunc($cds_st, $cds_en)->seq();
+
+	 if (defined $limit && $cdsseq !~ m/^ATG/i) {  ## It means no first met
+	
+	     my $first_codon = $cds_st - 3;
+
+	     while($first_codon >= $limit && $new_start == 0) {
+	     
+		 $cdsseq = $rseq->trunc($first_codon, $cds_en)->seq();
+
+		 if ($cdsseq =~ m/^ATG/i) { 
+		     $new_start = $first_codon;
+		 }
+		 else {
+		     $first_codon -= 3;
+		 }
+	     }
+	     
+	 }
+
+	 ## Now it will modify first cds depending if new_start != 0
+
+	 if ($new_start != 0) {
+	 
+	     $types_href->{'CDS'}->[0]->[3] = $new_start;
+
+	     ## If the sequence was used as limit and it has reach the
+	     ## first exon start it will change that too
+
+	     if ($new_start < $mrna_st) {
+	     
+		 $types_href->{'exon'}->[0]->[3] = $new_start;
+	     }
+
+	     ## And same thing for gene
+
+	     if ($new_start < $types_href->{gene}->[0]->[3]) {
+	     
+		 $types_href->{gene}->[0]->[3] = $new_start;
+	     }
+	 }
+     }
+}
+
+
+=head2 force_last_stop
+
+  Usage: force_last_met($types_href, $rseq, $exon_switch, $seq_switch);
+
+  Desc: It check if the last codon is Stop. 
+        If not, it will walk to the last exon (exon_switch enabled) or 
+        to the complete sequence as limit to find an stop codon.
+    
+  Ret: Nothing (it modify the type hashref)
+
+  Args: $types_href, a hash ref with keys=type and value=aref. of gff lines
+        $rseq, a Bio::Seq object
+        $exon_switch, 0 or 1
+        $seq_switch, 0 or 1
+
+  Side_Effects: die if some parameters are not right
+                modify type hashref
+                exon_switch enabled by default
+
+  Example: force_last_stop($types_href, $rseq, $exon_switch, $seq_switch);
+
+=cut
+
+sub force_last_stop {
+    my $types_href = shift ||
+	die("ERROR: No Types Hashref. was supplied to force_last_stop");
+    my $rseq = shift ||
+	 die("ERROR: no rseq (Bio::Seq) was supplied to force_last_stop");
+    my $exsw = shift || 1;                             ## enable by default
+    my $sqsw = shift || 0;                             ## disabled by default
+
+     if (ref($types_href) ne 'HASH') {
+	 die("ERROR: $types_href supplied to force_last_stop is not a href");
+     }
+
+     if (defined $types_href->{'CDS'} && defined $types_href->{'exon'}) {
+     
+	 my @cds = @{$types_href->{'CDS'}};
+	 my @exons = @{$types_href->{'exon'}};
+	 
+	 my $cds_st = $cds[0]->[3];
+	 my $cds_en = $cds[-1]->[4];
+
+	 my $mrna_en = $exons[-1]->[4];
+	 
+	 my $limit;
+	 if ($exsw == 1) {
+	     $limit = $mrna_en;
+	 }
+	 elsif ($sqsw == 1) {
+	     $limit = $rseq->length();
+	 }
+
+	 my $new_stop = 0;
+	 my $cdsseq = $rseq->trunc($cds_st, $cds_en)->seq();
+
+	 if (defined $limit && $cdsseq !~ m/(TGA|TAG|TAA)$/i) {        
+                                                       ## It means no last stop
+	
+	     my $last_codon = $cds_en + 3;
+
+	     while($last_codon <= $limit && $new_stop == 0) {
+	     
+		 $cdsseq = $rseq->trunc($cds_st, $last_codon)->seq();
+
+		 if ($cdsseq =~ m/(TGA|TAG|TAA)/i) { 
+		     $new_stop = $last_codon;
+		 }
+		 else {		     
+		     $last_codon += 3;
+		 }
+	     }
+	 }
+
+	 ## Now it will modify first cds depending if new_stop != 0
+
+	 if ($new_stop != 0) {
+	 
+	     $types_href->{'CDS'}->[-1]->[4] = $new_stop;
+
+	     ## If the sequence was used as limit and it has reach the
+	     ## first exon end it will change that too
+
+	     if ($new_stop > $mrna_en) {
+	     
+		 $types_href->{'exon'}->[-1]->[4] = $new_stop;
+	     }
+
+	     ## And same thing for gene
+
+	     if ($new_stop > $types_href->{gene}->[0]->[4]) {
+	     
+		 $types_href->{gene}->[0]->[4] = $new_stop;
+	     }
+	 }
+     }
+}
+
+
+
+
+
+
+
+
+####
+1; #
+####
