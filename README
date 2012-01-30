@@ -1,0 +1,6 @@
+GenoToolBox:
+============
+
+GenoToolBox is a collection of scripts used to manipulate genomic data from
+simple fasta sequences (for example fasta_extract) to create gene models based
+in a reference genome (for example genemodeler).
