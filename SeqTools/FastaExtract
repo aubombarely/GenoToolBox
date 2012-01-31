@@ -118,21 +118,20 @@ if ($opt_h) {
 ## Get the arguments and check them
 
 my $infasta_file = $opt_f || 
-    die("INPUT ARG. ERROR: -f <input_fasta_file> argument was not supplied.\n");
-
-my $id_file = $opt_i;
+    die("INPUT ARG. ERROR: -f <input_fastafile> argument was not supplied.\n");
+my $idfile = $opt_i;
 my $length_cf = $opt_l;
 my $regexp;
 if (defined $opt_r) {
     $regexp = qr/$opt_r/;
 }
 if ($opt_C) {
-    unless (defined $id_file) {
+    unless (defined $idfile) {
 	die("ERROR: -C option only can be used with -i option.\n");
     }
 }
 
-if (!$id_file && !$length_cf && !$regexp) {
+if (!$idfile && !$length_cf && !$regexp) {
     die("EXTRACTION ARG. ERROR: No extract options were used (-i,-l,-r)\n");
 }
 
@@ -142,14 +141,14 @@ my $out = $opt_o;
 
 my %ids;
 my %trims;
-my $trims_count = 0;
+my $trimsc = 0;
 
-if (defined $id_file) {
+if (defined $idfile) {
 
     print STDERR "\nEXTRACT BY IDS option [Enabled].\n";
 
-    open my $idfh, '<', $id_file || 
-	die("OPEN FILE ERROR: File=$id_file can not be openned (error:$!)\n");
+    open my $idfh, '<', $idfile || 
+	die("OPEN FILE ERROR: File=$idfile can not be openned (error:$!)\n");
 
     while (<$idfh>) {
 	chomp($_);
@@ -161,7 +160,7 @@ if (defined $id_file) {
 	## It will ignore the duplications overwritting the ids
 
 	$ids{$data[0]} = 1;
-	if (defined $data[1] && defined $data[2]) {
+	if ($opt_C && defined $data[1] && defined $data[2]) {
 	    if ($data[2] <= $data[1]) {
 		my $err = "ERROR: end trim coord:$data[2] should be lower ";
 		$err .= "than start trim coord:$data[1]\n";
@@ -176,12 +175,12 @@ if (defined $id_file) {
 	    else {
 		$trims{$data[0]} = [$coords_href];
 	    }
-	    $trims_count++;
+	    $trimsc++;
 	}
     }
 
     my $ids_count = scalar(keys %ids);
-    print STDERR "\t$ids_count ids ($trims_count) were parsed from $id_file.\n"
+    print STDERR "\t$ids_count ids ($trimsc trims) were parsed from $idfile\n";
 }
 
 ## Open the input and the output fasta file
@@ -226,7 +225,7 @@ while (my $seqobj = $inio->next_seq()) {
 
     my $sel = 0;
 	
-    if (defined $id_file) {
+    if (defined $idfile) {
 	if (exists $ids{$id}) {
 	    $sel = 1;
 	}
