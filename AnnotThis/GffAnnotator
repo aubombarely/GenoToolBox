@@ -1,0 +1,3284 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GffAnnotator
+ This script fix possible missing features in a gff3 file and add functional
+ annotations
+
+=cut
+
+=head1 SYPNOSIS
+
+ GffAnnotator [-h] -g <gff3_file>   [-a <annotation_file>] [-s <fasta_file>] 
+              [-r <reference_type>] [-o <so_obo>]          [-f <blast_filter>] 
+              [-i <ipr_raw_file>]   [-d <ipr_filter>] 
+              [-S] [-U] [-I] [-V]
+
+=head2 I<Flags:>
+
+=over
+
+	    ## Once it has catch the blast data it will synthesize a description
+	    ## using the synthesize_function
+
+	    my $func = synthesize_function(\@descrip);
+
+	    ## Now it will retrieve the gff line
+
+	    my $gffline = $gff{$feats{$qid}};
+	    if (defined $gffline) {
+	    
+		## get attributes
+		my $attr = $gffline->[8];
+		
+		if (scalar(@blasthits) > 0) {
+		
+		    $attr .= ';BlastHits=' . join(",", @blasthits);
+		}
+		if ($func =~ m/.+/) {
+		
+		    $attr .= ';FuncAnnotation="' . $func . '"';
+		}
+		
+		## it is an arrayref. so modifying that should be enough to 
+		## add it
+
+		$gffline->[8] = $attr;
+		$gff{$feats{$qid}} = $gffline;
+
+
+=item -g
+
+B<gff3_file>              gff3 file (mandatory)
+
+=item -a
+
+B<annotation_files>       blast m8 with an extra description column as 
+                          dbname=file separated by commas (optional)
+
+=item -i
+
+B<ipr_raw_file>           interpro results file in raw format (optional)
+
+=item -f
+
+B<blast_filter>           blast filter (by default 'evalue<1e-20')
+
+=item -d
+
+B<ipr_filter>             ipr filter (by default 'evalue<1e-5')
+
+=item -s
+
+B<seq_file>               sequence fastafile with reference sequence (optional)
+
+=item -r
+
+B<reference_type>         type for reference sequence ('chromosome' by default)
+
+=item -o
+
+B<so_obo>                 sequence ontology obo file (optional)
+
+=item -S
+
+B<synthesize_function>    enable synthesize function
+
+=item -U
+
+B<add_utr>                calculate and add UTR features
+
+=item -I
+
+B<add_introns>            calculate and add intron features
+
+=item -V
+
+B<be_verbose>             print status messages
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script has three functions: 
+
+ 1) Check that the gff3 has the right format according:
+    http://www.sequenceontology.org/gff3.shtml
+
+    It will check:
+
+     i)    9 columns format separated by tabs.
+     ii)   Reserved characters (';', '=', '%', '&' and ',') are used in the 
+           right fields.
+     iii)  Column1: "SeqID" only can contain [a-zA-Z0-9.:^*$@!+_?-|], no spaces
+     iv)   Column3: "Type" is a SOFA term (checked from so_obo file). Without
+           obo file it will use default terms.
+     v)    Column4 and 5: "start" and "end". Both fields are numeric, > 0 and
+           start will be <= than end.
+     vi)   Column6: "score", floating point number.
+     vii)  Column7: "strand", 4 characters are permited: '+', '-', '.' and '?'
+     viii) Column8: "phase", 4 characters are permited: '0', '1', '2' and '.'
+     ix)   Column9: "attributes", tag=value format separated by ';' between 
+           different tags and ',' between different values for the same tag 
+
+ 2) Complete missing features
+
+    By default it will check the following terms:
+    
+    + chromosome,ultracontig,supercontig,contig (mandatory, one of them to 
+      define the reference sequence)
+
+      If none of this terms is present, it will read the fasta file to
+      extract sequence length information. By default it will use chromosome
+      but it can be changed with the -r option.
+
+    + gene,mRNA,exon,CDS,polypeptide
+
+      'Exon' and 'CDS' are essential. If they are absent the script will report
+      missing 'exon' and 'cds'.
+      If 'gene' or/and 'mRNA' are absent it will be calculated as 
+      start-First.Exon to end-Last.Exon using the Parent attribute as ID.
+      If 'polypeptide' is absent it will be calculated as start-First.CDS and
+      end.Last.CDS
+
+    Using -I, it will calculate the 'intron' as end+1.Exon-X, start-1.Exon-X+1
+
+    Using -U, it will calculate the 'five_prime_UTR' and 'three_prime_UTR'
+    first, looking for the overlap between 'exon' and 'CDS' and taking
+    the 5' non-overlap regions for 'five_prime_UTR' and the 3' non-overlap
+    regions for 'three_prime_UTR'.
+
+ 3) Complete feature ID and Name
+
+    Feature:           Name                 ID
+    ==========================================================================
+    chromosome         SeqID                SeqID
+    ultracontig        SeqID                SeqID
+    supercontig        SeqID                SeqID
+    contig             SeqID                SeqID
+    gene               RootID.#V            gene:RootID.#V
+    mRNA               RootID.#V.#S         mRNA:RootID.#V.#S
+    exon               RootID.#V.#S.e#N     exon:RootID.#V.#S.#N
+    five_prime_UTR     RootID.#V.#S.u5      five_prime_UTR:RootID.#V.#S
+    intron             RootID.#V.#S.i#N     intron:RootID.#V.#S.#N
+    CDS                RootID.#V.#S.c#N     CDS:RootID.#V.#S.#N
+    three_prime_UTR    RootID.#V.#S.u3      three_prime_UTR:RootID.#V.#S
+    polypeptide        RootID.#V.#S.p       polypeptide:RootID.#V.#S 
+    polipeptide_domain RootID.#V.#S.d#N     polypeptide_domain:RootID.#V.#S.#N
+    ===========================================================================
+    #V = version number; #S = splicing form number; #N = position number
+
+    RootID will be: gene,ID => mRNA,ID => exon,Parent
+    RootID can be recalculated using the -R option as:
+    SeqIDgXXXXXX0 where XXXXXX will be the gene count for the SeqID
+
+ 4) Add new annotations and synthesize a new function based in these 
+    annotations
+
+    Blast can be filtered using the -f <blast_filter> option. It is used as 
+    tag,sign,value, separated by commas, for example: evalue<1e-10 or 
+    ident.percentage>80,align.length>100. 
+    Accepted tags are: 'ident.percentage','align.length', 'mismatches',
+                       'gaps.openings','evalue','bitscore'
+    Accepted signs are: '=', '>', '<'
+
+    It will compare the annotations for different blast matches and it will 
+    order them from higher to lower overlap score (OV = HL*(HP / 100)^2, where
+    OV=overlap.score, HL=hit.length and HP=hit.identity_percentage. 
+    
+    Example:
+
+    ===========================================================================
+    qID   sID                 HP     HL   Description                    OV
+    ===========================================================================
+    ID52  Solyc10g074500.1.1  86.06  373  Isocitrate dehydrogenase       276.26
+                                          (AHRD V1 ***- A3LYS8_PICST)
+    ID52  XP_002528761.1      93.28  372  isocitrate dehydrogenase,      323.68
+                                          putative [Ricinus communis]
+    ID52  Q8LFC0	      87.47  367  Isocitrate dehydrogenase [NAD] 280.79
+                                          regulatory subunit 1, 
+                                          mitochondrial OS=Arabidopsis   
+                                          thaliana GN=IDH1 PE=1 SV=2
+    ID52  AT4G35260.1	      87.47  367  Symbols: IDH1, IDH-I |         280.79
+                                          isocitrate dehydrogenase 1 | 
+                                          chr4:16774494-16776233 
+                                          REVERSE LENGTH=367
+    
+     It will be ordered as: XP_00252876.1, Q8LFC0, AT4G35260.1, Solyc10g074500
+     and it will look into the common words for them. It will ignore the 
+     following descriptions: 'hypothetical protein', 'unnamed protein product',
+     'conserved hypothetical protein', 'predicted protein', 'unknown', 
+     and 'uncharacterized protein'.
+     If there are not common words, it will get the description for the
+     highest OV and put them under the tag 'FuncAnnotation'
+
+     For the example: It will get FuncAnnotation="isocitrate dehydrogenase" 
+     as description. 
+
+     The hits will be keeped and added under the tag 'BlastHits' with the 
+     following format DB:Accession:Id:Length:Evalue, so for the example will be:
+     BlastHits="GB:XP_002528761.1:I93.28:L327:E0.0,
+                SWP:Q8LFC0:I87.47:L367:E4e-176"
+
+     Also if the -i <ipr_raw_file> is used it will parse the interpro result
+     file and it will add to the description. It can be filtered using the
+     -d <ipr_filter> argument. It will be added a new attribute as:
+     IprDomains="IPR:IPR000644|S:1|E:134|D:Cystathionine beta-synthase, core"
+     They will be separated by ';'.
+
+     Additionally GO terms will be added to the GO terms to 'Ontology_term' as
+     Ontology_term="GO:XXXXXXX" added to the gene.
+
+
+ Default SOFA terms used:
+ chromosome,ultracontig,supercontig,contig,gene,transcript,mRNA,exon,CDS,
+ polypeptide,polypeptide_domain,five_prime_UTR,three_prime_UTR,ncRNA,tRNA,
+ rRNA,miRNA,snoRNA,snRNA,pseudogene,pseudogenic_exon,pseudogenic_transcript,
+ repeat_region,match
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ GffAnnotator
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::SeqIO;
+
+our ($opt_g, $opt_a, $opt_i, $opt_f, $opt_d, $opt_s, $opt_r, $opt_o, $opt_S, 
+     $opt_U, $opt_I, $opt_V, $opt_h);
+
+getopts("g:a:i:f:d:s:r:o:SUIVh");
+
+if (!$opt_g && !$opt_a && !$opt_i && !$opt_s && !$opt_f && !$opt_d && !$opt_r 
+    && !$opt_o && !$opt_S && !$opt_U && !$opt_I && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Check variables.
+
+my $gff_file = $opt_g 
+    || die("DATA ARGUMENT -g <gff3_file> WAS NOT SUPPLIED.\n");
+
+
+## Print header
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GffAnnotator Starts ($date)     ##";
+print STDERR "\n############################################################\n";
+
+
+## STEP1: Parse Gff3 file ####################################################
+
+print_header("Step 1: Parse Gff3 file");
+
+my ($pos_gffhr, $dat_gffhr, $str_gffhr, $fea_gffhr) = parse_gff($gff_file);
+
+my %seqsizes = ();
+if ($opt_s) {
+
+    print STDERR "\n\tSequence Reference File Supplied. Parsing seqfile.\n";
+    my $seqio = Bio::SeqIO->new( -file => $opt_s, -format => 'fasta');
+    while(my $seq = $seqio->next_seq()) {
+    
+	my $id = $seq->id();
+	$seqsizes{$id} = $seq->length();
+	
+	if ($opt_V) {
+	    print STDERR "\tParsing seqid=$id         \r";
+	}
+    }
+    print STDERR "\n";
+}
+
+my %feat_papos = parse_gffstructure($dat_gffhr, $str_gffhr);
+
+
+## STEP2: Check Gff3 file ####################################################
+
+print_header("Step 2: Check Gff3 file");
+
+my $soterms_href;
+if ($opt_o) {
+
+    print STDERR "\n\tSO.obo file was supplied. Extracting SO terms.\n";
+    $soterms_href = parse_soobo($opt_o);
+}
+else {
+    
+    print STDERR "\n\tNo SO.obo file was supplied. Using default SO terms.\n";
+    $soterms_href = default_soterms();
+}
+
+if ($opt_r) {
+    unless (exists $soterms_href->{$opt_r}) {
+    
+	die("ERROR: -r $opt_r is not a valid SO term.");
+    }
+}
+
+validate_gff($dat_gffhr, $soterms_href);
+
+## STEP3: Complete Gff3 file ##################################################
+
+print_header("Step 3: Complete Gff3 file");
+ 
+($dat_gffhr, $fea_gffhr) = complete_gff($dat_gffhr, $fea_gffhr, \%seqsizes, 
+					\%feat_papos);
+
+
+## STEP3.1: Add Introns #######################################################
+
+if ($opt_I) {
+
+    print STDERR "\n\n\tAdd introns option -I [Enabled]. Adding introns\n";
+    ($dat_gffhr, $fea_gffhr) = add_introns($dat_gffhr, $fea_gffhr,$str_gffhr);
+}
+
+## STEP3.2: Add UTR    #######################################################
+
+if ($opt_U) {
+
+    print STDERR "\n\n\tAdd UTRs option -U [Enabled]. Adding UTRs\n";
+    ($dat_gffhr, $fea_gffhr) = add_utrs($dat_gffhr, $fea_gffhr,$str_gffhr);
+}
+
+
+if ($opt_V) {		    
+    print STDERR "\n\n\tDone.Gff3 have been complete with new features.\n";
+}
+
+## STEP4: Adding annotations ##################################################
+
+print_header("Step 4: Add Annotations");
+ 
+if ($opt_a) {
+    
+    my @apairs = split(/,/, $opt_a);
+    my %gblast_annot = ();
+
+    my %blastfilter = parse_blastfilter($opt_f);
+
+    foreach my $apair (@apairs) {
+    
+	if ($apair =~ m/^(.+)=(.+)$/) {
+	
+	    my $dbname = $1;
+	    my $filename  = $2;
+
+	    ## use parse annotation to convert blastfile into hash
+	    ## with key=id and value=hashref of data;
+
+	    my %blastannot = parse_blastfile($filename, \%blastfilter);
+	    my $A = scalar(keys %blastannot);
+	    my $a = 0;
+	    
+	    foreach my $qid (keys %blastannot) {
+
+		$a++;
+		if ($opt_V) {
+		    
+		    print STDERR "\tCollecting blast $dbname:$qid ($a of $A)\r";
+		}
+		
+		if (exists $gblast_annot{$qid}) {
+	
+		    $gblast_annot{$qid}->{$dbname} = $blastannot{$qid};
+		}
+		else {
+		    $gblast_annot{$qid} = {$dbname => $blastannot{$qid}};
+		}
+	    }
+	    if ($opt_V) {
+		
+		print STDERR "\n";
+	    }
+	}
+	else {
+	    print STDERR "\tWARNING: annotation doesnt have format pair=file\n";
+	}
+    }
+    
+    ## Now it will add the annotation to the gff3 file, asssociated with the
+    ## queryID contained into the blastfile. There are two new attributes
+    ## that will be added: 
+    ##  BlastHits="GB:XP_002528761.1:I93.28:L327:E0.0" where
+    ##             GB => dbname, XP_002528761.1 => target_id, 
+    ##             I93.28 => identity, L => alignment length and E => evalue
+    ##  FuncAnnotation="Function" extracted from the blast descriptions.
+
+    $dat_gffhr = add_blast_annotations($dat_gffhr, $fea_gffhr, \%gblast_annot);
+    
+
+} 
+else {
+    
+    print STDERR "\n\tNo annotation file was supplied. Skipping Step.\n";
+}
+
+if ($opt_i) {
+
+    ## First parse the filter
+
+    my $ipr_f = $opt_d || 'evalue<1e-5';
+
+    my %iprfilter = parse_iprfilter($ipr_f);
+    my %ipr_annot = parse_iprfile($opt_i, \%iprfilter);
+    $dat_gffhr = add_ipr_annotations($dat_gffhr, $fea_gffhr, \%ipr_annot);
+}
+else {
+    
+     print STDERR "\n\tNo InterPro file was supplied. Skipping Step.\n";
+}
+
+## STEP5: Creating new gff ##################################################
+
+print_header("Step 5: Create new gff3 file");
+ 
+my $filename = $gff_file . '.annotated.gff';
+create_new_gff($dat_gffhr, $filename);
+
+print STDERR "\n\n\tOUTPUT FILENAME:\n\t$filename\n";
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GffAnnotator Ends   ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+       
+      This script has three functions: 
+
+      1) Check that the gff3 has the right format according:
+         http://www.sequenceontology.org/gff3.shtml
+
+         It will check:
+
+         i)    9 columns format separated by tabs.
+         ii)   Reserved characters (';', '=', '%', '&' and ',') are used in the 
+               right fields.
+         iii)  Column1: "SeqID" only can contain [a-zA-Z0-9.:^*$@!+_?-|], no 
+               spaces
+         iv)   Column3: "Type" is a SOFA term (checked from so_obo file). 
+               Without obo file it will use default terms.
+         v)    Column4 and 5: "start" and "end". Both fields are numeric, > 0 
+               and start will be <= than end.
+         vi)   Column6: "score", floating point number.
+         vii)  Column7: "strand", 4 characters are permited: '+', '-', '.' and 
+               '?'
+         viii) Column8: "phase", 4 characters are permited: '0', '1', '2' and 
+               '.'
+         ix)   Column9: "attributes", tag=value format separated by ';' between 
+               different tags and ',' between different values for the same tag 
+
+       2) Complete missing features
+
+           By default it will check the following terms:
+    
+           + chromosome,ultracontig,supercontig,contig (mandatory, one of them 
+             to define the reference sequence)
+
+             If none of this terms is present, it will read the fasta file to
+             extract sequence length information. By default it will use 
+             chromosome but it can be changed with the -r option.
+
+           + gene,mRNA,exon,CDS,polypeptide
+
+             'Exon' and 'CDS' are essential. If they are absent the script 
+             will report missing 'exon' and 'cds'.
+             If 'gene' or\/and 'mRNA' are absent it will be calculated as 
+             start-First.Exon to end-Last.Exon using the Parent attribute as ID.
+             If 'polypeptide' is absent it will be calculated as 
+             start-First.CDS and end.Last.CDS
+
+             Using -I, it will calculate the 'intron' as end+1.Exon-X, 
+             start-1.Exon-X+1
+
+             Using -U, it will calculate the 'five_prime_UTR' and 
+             'three_prime_UTR' first, looking for the overlap between 'exon' 
+             and 'CDS' and taking the 5\' non-overlap regions for 
+             'five_prime_UTR' and the 3\' non-overlap regions for 
+             'three_prime_UTR'.
+
+         3) Complete feature ID and Name (incomplete feature)
+
+            Feature:           Name                 ID
+            ===================================================================
+            chromosome         SeqID                SeqID
+            ultracontig        SeqID                SeqID
+            supercontig        SeqID                SeqID
+            contig             SeqID                SeqID
+            gene               RootID.#V            gene:RootID.#V
+            mRNA               RootID.#V.#S         mRNA:RootID.#V.#S
+            exon               RootID.#V.#S.e#N     exon:RootID.#V.#S.#N
+            five_prime_UTR     RootID.#V.#S.u5      five_prime_UTR:RootID.#V.#S
+            intron             RootID.#V.#S.i#N     intron:RootID.#V.#S.#N
+            CDS                RootID.#V.#S.c#N     CDS:RootID.#V.#S.#N
+            three_prime_UTR    RootID.#V.#S.u3      three_prime_UTR:RootID.#V.#S
+            polypeptide        RootID.#V.#S.p       polypeptide:RootID.#V.#S 
+            ====================================================================
+            #V = version number; #S = splicing form number; #N = position number
+
+            RootID will be: gene,ID => mRNA,ID => exon,Parent
+            RootID can be recalculated using the -R option as:
+            SeqIDgXXXXXX0 where XXXXXX will be the gene count for the SeqID
+
+         4) Add new annotations and synthesize a new function based in these 
+            annotations
+
+            Blast can be filtered using the -f <blast_filter> option. It is 
+            used as tag,sign,value, separated by commas, for example: 
+            evalue<1e-10 or ident.percentage>80,align.length>100. 
+        
+             Accepted tags are: 'ident.percentage','align.length', 'mismatches',
+                                'gaps.openings','evalue','bitscore'
+             Accepted signs are: '=', '>', '<'
+    
+             It will ignore the following descriptions: 'hypothetical protein',
+             'unnamed protein product', 'conserved hypothetical protein', 
+             'predicted protein', 'unknown', and 'uncharacterized protein'.
+             If there are not common words, it will get the description for the
+             shortest description and put them under the tag 'FuncAnnotation'
+
+             For the example: It will get FuncAnnotation=
+             "isocitrate dehydrogenase" as description. 
+
+             The hits will be keeped and added under the tag 'BlastHits' with 
+             the following format DB:Accession:Id:Length:Evalue, so for the 
+             example will be: BlastHits="GB:XP_002528761.1:I93.28:L327:E0.0,
+                                         SWP:Q8LFC0:I87.47:L367:E4e-176"
+
+             Also if the -i <ipr_raw_file> is used it will parse the interpro 
+             result file and it will add to the description. It can be filtered
+             using the -d <ipr_filter> argument. It will be added a new 
+             attribute as: IprDomains="IPR:IPR000644|S:1|E:134|D:Cystathionine 
+             beta-synthase, core"
+             They will be separated by ';'.
+
+             Additionally GO terms will be added to the GO terms to 
+             'Ontology_term' as Ontology_term="GO:XXXXXXX" added to the gene.
+
+     Default SOFA terms used:
+     chromosome,ultracontig,supercontig,contig,gene,transcript,mRNA,exon,CDS,
+     polypeptide,polypeptide_domain,five_prime_UTR,three_prime_UTR,ncRNA,tRNA,
+     rRNA,miRNA,snoRNA,snRNA,pseudogene,pseudogenic_exon,pseudogenic_transcript,
+     repeat_region,match
+
+    Usage:
+     
+      GffAnnotator [-h] -g <gff3_file> [-a <annotation_file>] [-s <fasta_file>] 
+                   [-r <reference_type>] [-o <so_obo>] [-i <ipr_raw_file>]
+                   [-f <score_filter>] [-S] [-U] [-I] [-V]
+      
+    Flags:
+ 
+      -g <gff3_file>              gff3 file (mandatory)
+      -a <annotation_files>       blast m8 with an extra description column as 
+                                  dbname=file separated by commas (optional)
+      -i <ipr_raw_file>           interpro results file in raw format (optional)
+      -f <blast_filter>           blast filter (by default 'evalue<1e-20')
+      -d <ipr_filter>             ipr filter (by default 'evalue<1e-5')
+      -s <seq_file>               sequence fastafile with ref. seq. (optional)
+      -r <reference_type>         type for ref. sequence (default:'chromosome')
+      -o <so_obo>                 sequence ontology obo file (optional)
+      -S <synthesize_function>    enable synthesize function
+      -U <add_utr>                calculate and add UTR features
+      -I <add_introns>            calculate and add intron features
+                                  keeping oldID (if there is any) as Alias
+      -V <be_verbose>             print status messages
+      -h <help>                   print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+=head2 parse_gff
+
+  Usage: my ($position, $gffdata, $parent, $featid) = parse_gff($gff_file);
+
+  Desc: Parse the gff file and returns a hash ref. with the following structure
+        $position_href = { $seqid             => { $start => \@gffline_nr } }
+        $gffdata_href =  { $gffline_nr        => \@gff_line                 }
+        $parent_href =   { $gffline_parent_nr => {type => \@gffline_nr    } }
+        $featid_href =   { $featid            => $gffline_nr                }
+
+  Ret: 4 hashref (see Desc.)
+
+  Args: $gff_file, a scalar containing the filename
+
+  Side_Effects: Die if something is wrong.
+                Print status messages if verbose is enabled
+
+  Example: my ($position, $gffdata, $parent, $featid) = parse_gff($gff_file);
+
+=cut
+
+sub parse_gff {
+    my $gfffile = shift ||
+	die("ERROR: No gfffile was supplied to parse_gff() function.");
+
+    ## First, define variables
+
+    my $pos_href = {};
+    my $dat_href = {};
+    my $str_href = {};
+    my $fea_href = {};
+
+    ## Second, open file (if something is wrong, it will die with autodie)
+
+    open my $gff_fh, '<', $gfffile;
+
+    ## Third count lines
+
+    my $L = `cut -f1 $gfffile | wc -l`;
+    chomp($L);
+    my $l = 0;
+
+    if ($opt_V) {
+	print STDERR "\n\tGff file contains: $L lines, starting parsing.\n";
+    }
+
+    ## Fourth read the file to parse
+
+    my $fasta_section = 0;
+
+    while(<$gff_fh>) {
+	chomp($_);
+	$l++;
+
+	## If verbose is enabled print message
+
+	if ($opt_V) {
+	    
+	    my $fea_nr = scalar(keys %{$fea_href});
+	    print STDERR "\tParsing line=$l of $L ($fea_nr features added)  \r";
+	}
+
+
+	## Read only the non-comment lines or non-fasta lines
+
+	if ($_ =~ m/./ && $_ !~ m/^#/ && $fasta_section == 0) {
+
+	    ## Convert line into an array
+
+	    my @data = split(/\t/, $_);
+
+	    ## 1) Add the line to the data_href
+	    
+	    $dat_href->{$l} = \@data;
+
+	    ## 2) Add line nr. to the position_href
+
+	    if (exists $pos_href->{$data[0]}) {
+	    
+		if (exists $pos_href->{$data[0]}->{$data[3]}) {
+		
+		    push @{$pos_href->{$data[0]}->{$data[3]}}, $l;
+		}
+		else {
+		
+		    $pos_href->{$data[0]}->{$data[3]} = [$l];
+		}
+	    }
+	    else {
+		
+		$pos_href->{$data[0]} = { $data[3] => [$l] }
+	    }
+
+	    ## 3) Extract the FeatureID and add to the feat_href
+
+	    my @attrs = split(/;/, $data[8]);
+	    my ($feat_id, $parent_ids);
+	    foreach my $att (@attrs) {
+		
+		if ($att =~ m/^ID=(.+)$/) {
+		
+		    $feat_id = $1;
+		}
+		elsif ($att =~ m/^Parent=(.+)$/) {
+		    
+		    $parent_ids = $1;
+		}
+		elsif ($att =~ m/^Derives_from=(.+)$/) {  
+		
+		    $parent_ids = $1;  ## It will use derives_from as parent too
+		}
+	    }
+
+	    if (defined $feat_id) {
+	    
+		$fea_href->{$feat_id} = $l;
+	    }
+
+	    ## 4) Add the structural relations (parents or derives_from)
+
+	    if (defined $parent_ids) {
+	    
+		my @pa_ids = split(/,/, $parent_ids);
+		foreach my $pa_id (@pa_ids) {
+		
+		    if (exists $fea_href->{$pa_id}) {
+
+			my $p_ln = $fea_href->{$pa_id};
+			my $ctyp = $data[2];
+			my $pstr = $dat_href->{$p_ln}->[6];
+		    
+			if (exists $str_href->{$p_ln}) {
+			
+			    if (exists $str_href->{$p_ln}->{$ctyp}) {
+			    
+				if ($pstr eq '-') {
+				
+				    unshift(@{$str_href->{$p_ln}->{$ctyp}}, $l);
+				}
+				else {
+
+				    push(@{$str_href->{$p_ln}->{$ctyp}}, $l);
+				}
+			    }
+			    else {
+			    
+				$str_href->{$p_ln}->{$ctyp} = [$l];
+			    }
+			}
+			else {
+			
+			    $str_href->{$p_ln} = {$ctyp => [$l]};
+			}
+		    }
+		    else {
+			warn("WARNING: Parent=$pa_id hasnt been parsed (l:$l)");
+		    }
+		}
+	    }
+
+	}
+	elsif ($_ =~ m/^##FASTA/) {
+
+	    $fasta_section = 1;
+	}
+    }
+
+    if ($opt_V) {
+	print STDERR "\n\tDone. $l lines has been parsed.\n\n";
+    }
+
+    ## Finally return the variables
+
+    return ($pos_href, $dat_href, $str_href, $fea_href);
+}
+
+
+=head2 parse_blastfilter
+
+  Usage: my %blastfilter = parse_blastfilter($line);
+
+  Desc: Parse the blast filter line (<tag><sign><value>) and return
+        a hash with key=<tag>, value=[ <sign>, <value> ]
+
+  Ret: A hash
+
+  Args: $line, an scalar with the filter line
+
+  Side_Effects: Die if something is wrong, checking that the tag and the sign
+                are permitted.
+
+  Example: my %blastfilter = parse_blastfilter($line);
+
+=cut
+
+sub parse_blastfilter {
+    my $line = shift ||
+	die("ERROR: No blast filter line was supplied to parse_blastfilter");
+
+    my %blastfilter = ();
+
+    my %perm = (
+	'ident.percentage' => 1,
+	'align.length'     => 1, 
+	'mismatches'       => 1,
+	'gaps.openings'    => 1,
+	'evalue'           => 1,
+	'bitscore'         => 1
+	);
+
+    my @conds = split(/,/, $line);
+    foreach my $cond (@conds) {
+    
+	if ($cond =~ m/^(.+)(=|>|<)(.+)$/){
+	
+	    unless (exists $perm{$1}) {
+	    
+		die("ERROR: Tag=$1 for blastfilter isnt a permitted value.");
+	    }
+	    else {
+		$blastfilter{$1} = [$2, $3];
+	    }
+	}
+    }
+    return %blastfilter;
+}
+
+=head2 parse_blastfile
+
+  Usage: my %blastfile = parse_blastfile($file, \%filter);
+
+  Desc: Parse the blast file returning a hash with key=QueryID, 
+        Value=hashref with key=blastcolumn.name, value=value
+
+  Ret: A hash with key=queryid and value=blastfields
+
+  Args: $file, an scalar with the blast result filename
+        $blastdb, an scalar with the blastdb name
+        \%filter, a hashref. with key=field, value=aref. with sign and value
+
+  Side_Effects: Die if something is wrong
+
+  Example: my %blastfile = parse_blastfile($file, $blastdb, \%filter);
+
+=cut
+
+sub parse_blastfile {
+    my $file = shift ||
+	die("ERROR: No filename was supplied to parse_blastfile");
+    my $filterhref = shift ||
+	die("ERROR: No blast filter was supplied to parse_blastfile");
+
+    if (ref($filterhref) ne 'HASH') {
+	die("ERROR: Blastfilter href. supplied to parse_blastfile isnt href.");
+    }
+    
+    my %blast = ();
+    my $B = `cut -f1 $file | wc -l`;
+    chomp($B);
+    my $b = 0;
+    
+    if ($opt_V) {
+
+	print STDERR "\n\tParse blastfile:$file ($B lines)\n";
+    }
+
+    open my $bfh, '<', $file;
+    while(<$bfh>) {
+	chomp($_);
+	$b++;
+
+	if ($opt_V) {
+	
+	    print STDERR "\tParsing line $b of $B total lines     \r";
+	}
+	
+	my %data = ();
+	my @data = split(/\t/, $_);
+	my @fields = ('query.id',     'subject.id', 'ident.percentage',
+		      'align.length', 'mismatches', 'gaps.openings',
+		      'q.start',      'q.ends', '   t.start',          't.ends',
+		      'evalue',       'bitscore',   'description');
+	my $d = 0;
+	foreach my $field (@fields) {
+	    
+	    $data{$field} = $data[$d];
+	    $d++;
+	}
+ 
+	my $passfilter = 1;
+
+	## Use Math::BigInt to compare numbers
+	
+	foreach my $tag (keys %{$filterhref}) {
+
+	    my ($filsign, $filval) = @{$filterhref->{$tag}};
+	    my $filterval = Math::BigFloat->new($filval);
+	    my $dataval = Math::BigFloat->new($data{$tag});
+	    my $cmps = $dataval->bcmp($filterval);
+
+	    if ($filsign eq '>') {
+	    
+		unless ($cmps == 1) {
+		    $passfilter = 0;
+		}
+	    }
+	    elsif ($filsign eq '<') {
+		unless ($cmps == -1) {
+		    $passfilter = 0;
+		}
+	    }
+	    else {
+		unless ($cmps == 0) {
+		    $passfilter = 0;
+		}
+	    }
+	}
+
+	if ($passfilter == 1) {
+	    unless (exists $blast{$data{'query.id'}}) {
+		$blast{$data{'query.id'}} = \%data;
+	    }
+	}
+    }
+    if ($opt_V) {
+    
+	my $blns = scalar(keys(%blast));
+	print STDERR "\n\tDone. $blns blast lines have been collected.\n";
+    }
+
+    return %blast;
+}
+
+=head2 parse_iprfilter
+
+  Usage: my %iprfilter = parse_iprfilter($line);
+
+  Desc: Parse the IPR filter line (<tag><sign><value>) and return
+        a hash with key=<tag>, value=[ <sign>, <value> ]
+
+  Ret: A hash
+
+  Args: $line, an scalar with the filter line
+
+  Side_Effects: Die if something is wrong, checking that the tag and the sign
+                are permitted.
+
+  Example: my %iprfilter = parse_iprfilter($line);
+
+=cut
+
+sub parse_iprfilter {
+    my $line = shift ||
+	die("ERROR: No IPR filter line was supplied to parse_iprfilter");
+
+    my %iprfilter = ();
+
+    my %perm = (
+	'query.id'        => 1,
+	'crc64'           => 1,
+	'align.length'    => 1,
+	'method'          => 1,
+	'subject.id'      => 1,
+	'subject.descrip' => 1,
+	'q.start'         => 1,
+	'q.end'           => 1,
+	'evalue'          => 1,
+	'status'          => 1,
+	'date'            => 1,
+	'ipr.accession'   => 1,
+	'ipr.description' => 1,
+	'GO'              => 1,
+	);
+
+    my @conds = split(/,/, $line);
+    foreach my $cond (@conds) {
+    
+	if ($cond =~ m/^(.+)(!|=|>|<)(.+)$/){
+	
+	    unless (exists $perm{$1}) {
+	    
+		die("ERROR: Tag=$1 for blastfilter isnt a permitted value.");
+	    }
+	    else {
+		$iprfilter{$1} = [$2, $3];
+	    }
+	}
+    }
+    return %iprfilter;
+}
+
+
+=head2 parse_iprfile
+
+  Usage: my %iprfile = parse_iprfile($file, \%filter);
+
+  Desc: Parse the ipr file returning a hash with key=QueryID, 
+        Value=hashref with key=arrayref with hashrefs with
+        key=iprcolumn.name, value=value.
+        iprcolumn.name=query.id,crc64,align.length,method,subject.id,
+                       subject.descrip,q.start,q.end,evalue,status,
+                       date,ipr.accession,ipr.description,GO
+
+  Ret: A hash with key=queryid and value=ipr.fields
+
+  Args: $file, an scalar with the ipr result filename
+        \%filter, a hashref. with key=field, value=aref. with sign and value
+
+  Side_Effects: Die if something is wrong
+
+  Example: my %iprfile = parse_iprfile($file, \%filter);
+
+=cut
+
+sub parse_iprfile {
+   my $file = shift ||
+	die("ERROR: No filename was supplied to parse_iprfile");
+    my $filterhref = shift ||
+	die("ERROR: No blast filter was supplied to parse_iprfile");
+
+    if (ref($filterhref) ne 'HASH') {
+	die("ERROR: Blastfilter href. supplied to parse_iprfile isnt href.");
+    }
+    
+    my %ipr = ();
+    my $I = `cut -f1 $file | wc -l`;
+    chomp($I);
+    my $i = 0;
+    
+    if ($opt_V) {
+
+	print STDERR "\n\tParse iprfile:$file ($I lines)\n";
+    }
+
+    open my $ifh, '<', $file;
+    while(<$ifh>) {
+	chomp($_);
+	$i++;
+
+	if ($opt_V) {
+	
+	    print STDERR "\tParsing line $i of $I total lines     \r";
+	}
+	
+	my %data = ();
+	my @data = split(/\t/, $_);
+	my @fields = ('query.id',  'crc64',       'align.length', 
+		      'method',    'subject.id',  'subject.descrip', 
+		      'q.start',   'q.end',       'evalue',
+		      'status',    'date',        'ipr.accession',
+		      'ipr.descrip',              'GO');
+	my $d = 0;
+	foreach my $field (@fields) {
+	    
+	    $data{$field} = $data[$d];
+	    $d++;
+	}
+ 
+	my $passfilter = 1;
+
+	## Use Math::BigInt to compare numbers
+	
+	foreach my $tag (keys %{$filterhref}) {
+
+	    my ($filsign, $filval) = @{$filterhref->{$tag}};
+
+	    unless (Math::BigFloat->new($filval)->is_nan()) {
+
+		if ($data{$tag} ne 'NA') {
+
+		    my $filterval = Math::BigFloat->new($filval);
+		    my $dataval = Math::BigFloat->new($data{$tag});
+		    my $cmps = $dataval->bcmp($filterval);
+
+		    if (defined $cmps) {
+			if ($filsign eq '>') {
+			    
+			    unless ($cmps == 1) {
+				$passfilter = 0;
+			    }
+			}
+			elsif ($filsign eq '<') {
+			    unless ($cmps == -1) {
+				$passfilter = 0;
+			    }
+			}
+			else {
+			    unless ($cmps == 0) {
+				$passfilter = 0;
+			    }
+			}
+		    }
+		    else {
+			$passfilter = 0;
+			if ($opt_V) {
+		    
+			    print STDERR "\n\tWARNING: Comparison filtervalue=";
+			    print STDERR "$filval, datavalue=$data{$tag} for ";
+			    print STDERR "line=$i was not possible.\n"
+			}
+		    }
+		}
+	    }
+	    else {
+		if ($filsign eq '!') {
+	    
+		    unless ($data{$tag} ne $filval) {
+			$passfilter = 0;
+		    }
+		}
+		else {
+		    unless ($data{$tag} eq $filval) {
+			$passfilter = 0;
+		    }
+		}		
+	    } 
+	
+	    if ($passfilter == 1) {
+		unless (exists $ipr{$data{'query.id'}}) {
+
+		    $ipr{$data{'query.id'}} = [\%data];
+		}
+		else {
+
+		    push @{$ipr{$data{'query.id'}}}, \%data;
+		}
+	    }
+	}	
+    }
+   
+   if ($opt_V) {
+    
+       my $iprns = scalar(keys(%ipr));
+       print STDERR "\n\tDone. $iprns IPR lines have been collected.\n";
+   }
+
+
+   return %ipr;
+}
+
+
+
+=head2 default_soterms
+
+  Usage: my $soterms_href = default_soterms();
+
+  Desc: Return the default SO terms stored in this script for gff validation
+
+  Ret: A hashref. with key=SOterm, value=SOaccession
+
+  Args: None
+
+  Side_Effects: None
+
+  Example: my $soterms_href = default_soterms();
+
+=cut
+
+sub default_soterms {
+   
+    ## These SO terms come from the SO version 1.319 (2012-02-08)
+
+    my $soterms_href = {
+	chromosome             => 'SO:0000340',
+	ultracontig            => 'SO:0000719',
+	supercontig            => 'SO:0000148',
+	contig                 => 'SO:0000149',
+	gene                   => 'SO:0000704',
+	transcript             => 'SO:0000673',
+	mRNA                   => 'SO:0000234',
+	exon                   => 'SO:0000147',
+	CDS                    => 'SO:0000316',
+	polypeptide            => 'SO:0000104',
+	polypeptide_domain     => 'SO:0000417',
+	five_prime_UTR         => 'SO:0000204',
+	three_prime_UTR        => 'SO:0000205',  
+	ncRNA                  => 'SO:0000655',
+	tRNA                   => 'SO:0000253', 
+	rRNA                   => 'SO:0000252',
+	miRNA                  => 'SO:0000276',
+	snoRNA                 => 'SO:0000275',
+	snRNA                  => 'SO:0000274',
+	pseudogene             => 'SO:0000336',
+	pseudogenic_exon       => 'SO:0000507', 
+	pseudogenic_transcript => 'SO:0000516',
+	repeat_region          => 'SO:0000657',
+	match                  => 'SO:0000343',
+    };
+
+    return $soterms_href;
+}
+
+=head2 parse_soobo
+
+  Usage: my $soterms_href = parse_soobo($obo_file);
+
+  Desc: Parse the obo file and return a hashref with key=SOterm, 
+        value=SOaccession
+
+  Ret: A hashref. with key=SOterm, value=SOaccession
+
+  Args: $obo_file, an scalar with the obo filename
+
+  Side_Effects: Die if the file doesnt exists
+
+  Example: my $soterms_href = parse_soobo($obo_file);
+
+=cut
+
+sub parse_soobo {
+    my $obofile = shift ||
+	die("ERROR: No obofile was supplied to parse_soobo() function.");
+
+    ## First, define variables
+
+    my $so_href = {};
+
+    ## Second, open file (if something is wrong, it will die with autodie)
+
+    open my $obo_fh, '<', $obofile;
+
+    ## Third count lines
+
+    my $O = `cut -f1 $obofile | wc -l`;
+    chomp($O);
+    my $o = 0;
+
+    if ($opt_V) {
+	print STDERR "\n\tObo file contains: $O lines, starting parsing.\n";
+    }
+
+    ## Fourth read the file to parse
+
+    my ($obo_term, $obo_accs);
+    my $new_term = 0;
+
+    while(<$obo_fh>) {
+	chomp($_);
+	$o++;
+
+	## If verbose is enabled print message
+
+	if ($opt_V) {
+	    
+	    my $obo_nr = scalar(keys %{$so_href});
+	    print STDERR "\tParsing line=$o of $O ($obo_nr terms added)  \r";
+	
+	    if ($_ =~ m/^\[Term\]/) {
+		$new_term = 1;
+		
+		## Clean for incomplete entries
+		undef($obo_term);
+		undef($obo_accs);
+	    }
+
+	    if ($new_term == 1) {
+		if (!$obo_term && $_ =~ m/^name:\s+(.+)/) {
+		
+		    $obo_term = $1;
+		}
+		if (!$obo_accs && $_ =~ m/^id:\s+(.+)/) {
+		
+		    $obo_accs = $1;
+		}
+		if (defined $obo_term && defined $obo_accs) {
+	    
+		    $so_href->{$obo_term} = $obo_accs;
+		    $new_term = 0;
+		    undef($obo_term);
+		    undef($obo_accs);
+		}
+	    }
+	}
+    }
+
+    if ($opt_V) {
+	print STDERR "\n\tDone. $O lines has been parsed.\n\n";
+    }
+    
+
+    return $so_href;
+}
+
+=head2 validate_gff
+
+  Usage: validate_gff($data_gffhref, $soterms_href);
+
+  Desc: Validate the data contained in the data_hashref (Hash with key=line_nr
+        and value=arrayref. with gff data). It will validate the following
+        data:
+
+        Error 1) 9 columns
+        Error 2) "SeqID" = [a-zA-Z0-9.:^*$@!+_?-|], no spaces
+        Error 3) "Type" is a SOFA term.
+        Error 4) "Start" and "End" are numeric.
+        Error 5) "Start" <= "End"
+        Error 6) "Score" is floating point number.
+        Error 7) "Strand" =~ m/^(\+|-|\.|\?)$/
+        Error 8) "Phase" =~ m/^(0|1|2|\.)/
+        Error 9) "Attributes", tag=value format separated by ';' between 
+                 different tags and ',' between different values for the 
+                 same tag 
+         
+  Ret: None (It will print the results)
+
+  Args: $data_gffhref, a hashref. with key=line_nr, value=arrayref.gffline
+        $soterms_href, a hashref with key=SOTerm and value=SOAccession        
+
+  Side_Effects: If it has error_nr > 0, create a gff_validation_error.log file
+                and die.
+
+  Example: validate_gff($data_gffhref, $soterms_href);
+
+=cut
+
+sub validate_gff {
+    my $gffhref = shift ||
+	die("ERROR: No data gffhref argument was supplied to validate_gff()");
+    my $soterm_href = shift ||
+	die("ERROR: No SO term href. was supplied to validate_gff()");
+
+    if (ref($gffhref) ne 'HASH') {
+	
+	die("ERROR: data gffhref supplied to validate_gff() is not hashref.");
+    }
+    if (ref($soterm_href) ne 'HASH') {
+	
+	die("ERROR: soterm href supplied to validate_gff() is not hashref.");
+    }
+
+    my $err_n = 0;
+    my %errors = ( 
+	1 => [],  ## Column number 
+	2 => [],  ## Wrong SeqID
+	3 => [],  ## Type is not a SO Term
+	4 => [],  ## Start or End are not numeric
+	5 => [],  ## End is bigger than Start
+	6 => [],  ## Score is not a floating point number
+	7 => [],  ## Strand is not +,-,. or ?
+	8 => [],  ## Phase is not 0,1,2 or .
+	9 => [],  ## Attributes arent tag=value separated 
+                  ## by inter ';' or intra ','
+	);
+    
+    my %gff = %{$gffhref};
+
+    if ($opt_V) {
+
+	my $ln = scalar(keys %gff);
+	print STDERR "\n\tGff parsing contains: $ln lines to validate.\n";
+    }
+
+
+    foreach my $line (sort {$a <=> $b} keys %gff) {
+    
+	if ($opt_V) {
+
+	    print STDERR "\tValidating line=$line ($err_n errors)\r";
+	}
+    
+	## 1) column number
+
+	my $coln = scalar(@{$gff{$line}});
+	if ($coln != 9) {
+	
+	    push @{$errors{1}}, "$line\t$coln columns";
+	    $err_n++;
+	}
+
+	## 2) SeqID, permited characters are [a-zA-Z0-9.:^*$@!+_?-|]
+
+	my @chars = split(//, $gff{$line}->[0]);
+	my $c = 0;
+	my @char_err = (); 
+	foreach my $char (@chars) {
+	    
+	    $c++;
+	    if ($char =~ m/^(\s|#|%|&|\(|\)|;|"|'|<|>|,\/|\\)$/) {
+	    
+		push @char_err, "Character Number:$c ($char) is non permited";
+	    }
+	}
+	if (scalar(@char_err) > 0) {
+	    
+	    my $err_line = join(',', @char_err);
+	    push @{$errors{2}}, "$line\t$err_line";
+	    $err_n++;
+	}
+
+	## 3) Check that exists SO term
+
+	my $soterm = $gff{$line}->[2];
+	unless (exists $soterm_href->{$soterm}) {
+	
+	    push @{$errors{3}}, "$line\t$soterm is a non-valid SO Term";
+	    $err_n++;
+	}
+
+	## 4) Start or End are not numeric
+
+	if ($gff{$line}->[3] !~ m/^\d+$/ && $gff{$line}->[4] !~ m/^\d+$/) {
+	
+	    push @{$errors{4}}, "$line\tstart and/or end are not numeric";
+	    $err_n++;
+	}
+	else {   ## 5) Start > End (it needs to be numeric)
+	    
+	    if ($gff{$line}->[3] > $gff{$line}->[4]) {
+	
+		push @{$errors{5}}, "$line\tstart > end";
+		$err_n++;
+	    }
+	}
+	
+	## 6) Score is not a floating point number
+	
+	my $score = $gff{$line}->[5];
+	if ($score ne '.' && Math::BigFloat->new($score)->is_nan()) {
+	
+	    push @{$errors{6}}, "$line\tscore=$score is not floating point n.";
+	    $err_n++;
+	}
+
+	## 7) Strand is not +,-,. or ?
+
+	my $strand = $gff{$line}->[6];
+	if ($strand !~ m/^(\+|-|\.|\?)$/) {
+	
+	    push @{$errors{7}}, "$line\tstrand=$strand is not '+','-','.','?'";
+	    $err_n++
+	}
+
+	## 8) Phase is not 0,1,2 or .
+	
+	my $phase = $gff{$line}->[7];
+	if ($phase !~ m/^(0|1|2|\.)$/) {
+	    
+	    push @{$errors{8}}, "$line\tphase=$phase is not '0','1','2' or '.'";
+	    $err_n++
+	}
+
+	## 9) Attributes arent tag=value separated by inter ';' or intra ','
+
+	my @attrs = split(/;/, $gff{$line}->[8]); 
+	foreach my $attr (@attrs) {
+	
+	    if ($attr =~ m/(.+)=(.*)/) {
+	    
+		my $tag = $1;
+		my $val = $2;
+		
+		if ($tag =~ m/=/) {
+
+		    push @{$errors{9}}, "$line\t$attr=attr has an extra '='";
+		    $err_n++
+		}
+	    }
+	    else {
+		
+		push @{$errors{9}}, "$line\t$attr=$attr has not '=' char";
+		$err_n++
+	    }
+	}
+    }
+
+    ## Now errors should be stored, it will create a gff_validation_error.log
+    ## with them
+
+    if ($err_n > 0) {
+    
+	open my $err_fh, '>', 'gff_validation_error.log';
+	print STDERR "\n\n\n\t==========================================\n";
+	print STDERR "\tSOME ERRORS HAVE BEEN FOUND FOR GFF3 FILE:\n";
+	print STDERR "\t==========================================\n";
+
+	foreach my $err_type (sort {$a <=> $b} %errors) {
+
+	    if (defined $errors{$err_type}) {
+
+		my $count = scalar(@{$errors{$err_type}});
+		print STDERR "\t\tERROR $err_type:\t$count lines\n";
+	
+		if ($count > 0) {
+		    
+		    my $lines = join("\n", @{$errors{$err_type}});
+		    print $err_fh "## ERROR $err_type\tLINES:\n$lines\n";
+		}
+	    }
+	}
+	print STDERR "\t==========================================\n";
+	die("\ngff_validation_error.log has been created with error lines\n\n");
+    }
+    else {
+    
+	print STDERR "\n\tDone. gff3 file has been validated.\n";
+    }
+}
+
+=head2 complete_gff
+
+  Usage: my ($newgff, $newfeat) = complete_gff($dat_gffh, $fea_gffh, $seq_gffh,
+                                               $papos_gffh);
+
+  Desc: This function do several things:
+
+        1) Check that CDS and exon exists for each gene model, if they dont
+           it just die with a nice error message
+
+        2) Check that CDS and exon has a Parent attribute and it has the
+           feature type 'mRNA', if they don't it just die
+
+        3) Check that mRNA type has an ID attribute, if they don't it just
+           die.
+
+        4) Check that mRNA type has a Parent attribute, if they don't it will
+           create a gene type with an ID and it will add a Parent attribute
+           to the mRNA type.
+
+        5) Check that a polypeptide feature exists with a Derives_from 
+           attribute, it will create a polypeptide feature.
+
+                  [-]==> die()         
+                 /                     
+   {CDS:Parent}==                      [-]==> die()
+                 \                    /
+                  [+]=={exon:Parent}==                  [-]==> die()
+                                      \                /
+                                       [+]=={mRNA:ID}==   
+                                                       \        
+                                                        [+]=={mRNA:Parent}
+                                                                        / \
+     [+]------{polypeptide:ID}=={gene:ID}== create_gene_feature() <==[-]   [+] 
+              /              \          \_________________________________/
+             /                \ 
+          [-]==> create_polypeptide_feature()
+
+
+  Ret: $data_gffhref, a hashref. with key=line_nr*100, value=arrayref.gffline 
+       $feat_gffhref, a hashref with key=featID, value=new_line
+
+  Args: $data_gffhref, a hashref. with key=line_nr, value=arrayref.gffline 
+        $featid_href, a hashref with key=feature_id and value=line_nr
+        $seqsz_href, a hashref with key=seqid and value=seq.length
+        $papos_href, a hashref with key=line and value=hashref with 
+                     key=parent.ln and value=position.
+
+  Side_Effects: Multiply lines * 10 to be able to fit new features such as
+                gene, protein and chromosomes.
+                Use of create_gene_feature() function
+                Use of create_polypeptide_feature() function
+                Die if something is wrong.
+
+  Example: my ($newgff, $newfeat) = 
+               complete_gff($dat_gffh, $fea_gffh, $seqsize_gffh, $papos_gffh);
+
+=cut
+
+sub complete_gff {
+    my $gffhref = shift ||
+	die("ERROR: No data gffhref argument was supplied to complete_gff()");
+    my $feahref = shift ||
+	die("ERROR: No data feahref argument was supplied to complete_gff()");
+    my $seqsz_href = shift ||
+	die("ERROR: No seqsizes href argument was supplied to complete_gff()");
+    my $papos_href = shift ||
+	die("ERROR: No parent pos. href arg. was supplied to complete_gff()");
+    
+    if (ref($gffhref) ne 'HASH') {
+	
+	die("ERROR: data gffhref supplied to complete_gff() isnt hashref.");
+    }
+    if (ref($seqsz_href) ne 'HASH') {
+	
+	die("ERROR: seq.sizes href supplied to complete_gff() isnt hashref.");
+    }
+    if (ref($feahref) ne 'HASH') {
+	
+	die("ERROR: feature href supplied to complete_gff() isnt hashref.");
+    }
+    if (ref($papos_href) ne 'HASH') {
+	
+	die("ERROR: parent pos. href supplied to complete_gff() isnt hashref.");
+    }
+    
+
+    ## Define variables:
+
+    my %gff = %{$gffhref};
+    my %features = %{$feahref};
+    my %papos = %{$papos_href};
+    my %newgff = ();
+    my %newfeat = ();
+    
+    if ($opt_V) {
+
+	my $ln_count = scalar(keys %gff);
+	print STDERR "\n\tGff parsing contains: $ln_count lines.\n";
+    }
+
+    ## It will scan the lines per parent-children structure
+
+    my $newft = 0;
+
+    foreach my $ln (sort {$a <=> $b} keys %gff) {
+	
+	my %gffln = convert_gffline($gff{$ln});
+
+	if ($opt_V) {
+
+	    print STDERR "\tChecking line=$ln ($newft new features have ";
+	    print STDERR "been added)\r";
+	}
+	
+	## Check if exists ref.seq
+
+	unless (exists $features{$gffln{seqid}}) {
+	
+	    if (exists $seqsz_href->{$gffln{seqid}}) {
+
+		my $length = $seqsz_href->{$gffln{seqid}};
+
+		my $seqref_ln = $ln * 100 - 20;
+		my $reftype = $opt_r || 'chromosome';
+	    
+		$newgff{$seqref_ln} = [
+		    $gffln{seqid}, $gffln{source}, $reftype, 1, $length,
+		    '.', '.', '.', "ID=$gffln{seqid};Name=$gffln{seqid}"
+		    ];
+		$features{$gffln{seqid}} = $seqref_ln;
+		$newft++;
+	    }
+	}
+
+	## The starting point will be CDS
+	## CDS  => mRNA => transcript => gene
+	## Exon => transcript => gene
+	## transcript is_a mRNA so, exon could have mRNA as parent too
+		
+	my $type = $gffln{type} ||
+	    die("ERROR: line=$ln ($gff{$ln}) doesnt have defined type.\n");
+
+	my $featID;
+	if (exists $gffln{attributes}->{ID}) {
+	    $featID = $gffln{attributes}->{ID}->[0];
+	}
+
+	if ($type eq 'CDS' || $type eq 'exon') {
+
+	    unless (exists $gffln{attributes}->{Parent}) {
+		
+		die("ERROR: $gffln{type} feat doesnt have Parent (line:$ln)");
+	    }
+	    else {
+
+		## Also it can create the featID for CDS/exon based in the
+		## position for the Parent feature
+
+	    
+		my @pIDs = @{$gffln{attributes}->{Parent}};
+
+		my ($mRNA_parent, $gene_parent) = ('', '');  ## Define switches
+
+		## It can have more than one parent (gene and mRNA/transcript)
+		## So in that case it will check first, what it has
+
+		foreach my $pID (@pIDs) {
+
+		    unless (exists $features{$pID}) {		
+		    
+			die("ERROR: ParentFeatID=$pID doesnt exist (line:$ln)");
+		    }
+		
+		    my %pgffln = convert_gffline($gff{$features{$pID}});
+		    
+		    unless (defined $featID) {
+			if (exists $papos{$ln}) {
+			    my $ftpos = $papos{$ln}->{$features{$pID}};
+			    if (defined $ftpos) {
+		       
+				$featID = $type . ':' . $pID . '.' . $ftpos;
+				$gffln{attributes}->{ID} = [$featID];
+			    }
+			}
+		    }
+
+		    my $ptype = $pgffln{type};
+		    if ($ptype eq 'mRNA' || $ptype eq 'transcript') {
+		    
+			$mRNA_parent = $features{$pID};
+		    }
+		    elsif ($ptype eq 'gene') {
+		    
+			$gene_parent = $features{$pID};
+		    }
+		    elsif ($ptype eq 'protein') {
+		    
+			## Ignore just for now
+		    }
+		    else {
+		    
+			my $permpar = 'gene/mRNA/transcript/protein';
+			my $er = "$type FeatLine=$ln parent isnt $permpar";
+			die("ERROR: $type for ParentType=$ptype\n");
+		    }
+		}
+
+		if ($mRNA_parent =~ m/^\d+$/ && $gene_parent =~ m/^\d+$/) {
+		
+		    ## It has both nowthing to change because mRNA and gene
+		    ## exists, just add to the new_gff file, defining new line
+
+		    my $newln = 100 * $ln;
+		    unless (exists $newgff{$newln}) {
+		    
+			$newgff{$newln} = linearize_gffhash(\%gffln);
+		    }
+		    unless (exists $newfeat{$featID}) {
+			
+			$newfeat{$featID} = $newln;
+		    }
+		}
+		elsif ($mRNA_parent =~ m/^\d+$/) {
+		    
+		    ## just mRNA exists as parent, and it is okay, so now
+		    ## it will check if mRNA has as parent a gene
+		    
+		    my %pgffln = convert_gffline($gff{$mRNA_parent});
+		    my $gene_pp = '';
+		    if (exists $pgffln{attributes}->{Parent}) {
+		    
+			foreach my $ppID (@{$pgffln{attributes}->{Parent}}) {
+			
+			    unless (exists $features{$ppID}) {		
+		    
+				my $err = "ParentFeatID=$ppID doesnt exist";
+				die("ERROR: $err (line:$ln)");
+			    }
+		
+			    my $pp_gff_line = $gff{$features{$ppID}};
+			    my %pp_gffln = convert_gffline($pp_gff_line);
+
+			    my $ptype = $pp_gffln{type};
+			    if ($pp_gffln{type} eq 'gene') {
+		    
+				$gene_pp = $features{$ppID};
+			    }
+			}			
+		    }
+		    
+		    unless ($gene_pp =~ m/^\d+$/) {       
+
+			## There are not gene, so it will create a new one
+			## based in the mRNA data
+			
+			my %gffgene = create_new_feature([\%pgffln], 'mRNA', 
+							 'gene');
+			
+			my $geneid = $gffgene{attributes}->{ID}->[0];
+			
+			## 1) Add gene parent, to the mRNA feature
+
+			if (exists $pgffln{attributes}->{Parent}) { 
+			
+			    push @{$pgffln{attributes}->{Parent}}, $geneid;
+			}
+			else {
+			    $pgffln{attributes}->{Parent} = [$geneid];
+			}
+
+			my $new_mrnaln = 100 * $mRNA_parent;
+  
+			## It will overwrite the old mRNA
+
+			$newgff{$new_mrnaln} = linearize_gffhash(\%pgffln);
+
+			## 2) Add new gene to the gff and features
+			## As a line it will use the new mRNA line - 10
+
+			my $newgene_ln = 100 * $mRNA_parent - 10;
+
+			unless (exists $newfeat{$geneid}) {		
+			    
+			    $newfeat{$geneid} = $newgene_ln;
+			    $newft++;
+			}
+			$newgff{$newgene_ln} = linearize_gffhash(\%gffgene);
+			
+		    }
+		
+		    ## 3) Add the CDS/exon feature if it has not been added
+			
+		    my $newln = 100 * $ln;			
+		    $newgff{$newln} = linearize_gffhash(\%gffln);
+		    
+		    if (defined $featID) {
+			unless (exists $newfeat{$featID}) {
+			    
+			    $newfeat{$featID} = $newln;
+			}
+		    }
+		}
+		elsif ($gene_parent =~ m/^\d+$/) {
+		
+		    my %pgffln = convert_gffline($gff{$gene_parent});
+
+		    ## It means that there are gene, but not mRNA
+		    ## (or not linked with these features)
+		    ## so it would add a mRNA, with Parent=GeneID and
+		    ## change the exon/CDS to add this mRNA as parent
+		    
+		    my %gffmrna = create_new_feature([\%pgffln], 'gene', 
+						     'mRNA');
+
+		    my $mrnaid = $gffmrna{attributes}->{ID}->[0];
+		    
+		    ## 1) Add a new mRNA to the gff file
+
+		    my $newmRNA_ln = 100 * $gene_parent + 10;
+
+		    unless (exists $newfeat{$mrnaid}) {		
+			
+			$newfeat{$mrnaid} = $newmRNA_ln;
+			$newft++;
+		    }
+		    $newgff{$newmRNA_ln} = linearize_gffhash(\%gffmrna);
+
+		    ## 2) Modify CDS/Exon
+
+		    if (exists $gffln{attributes}->{Parent}) { 
+			
+			    push @{$gffln{attributes}->{Parent}}, [$mrnaid];
+		    }
+		    else {
+			
+			$gffln{attributes}->{Parent} = [$mrnaid];
+		    }
+
+		    my $new_ln = 100 * $ln;			
+		    $newgff{$new_ln} = linearize_gffhash(\%gffln);
+		    $newfeat{$featID} = $new_ln;		
+		}	    
+	    }
+	}
+	else {
+	
+	    ## If the feature is not an exon or CDS it will be added anyway
+
+	    my $new_ln = 100 * $ln;		
+	    $newgff{$new_ln} = linearize_gffhash(\%gffln);
+	    
+	    unless (exists $newfeat{$featID}) {
+		
+		$newfeat{$featID} = $new_ln;
+	    }	    
+	}
+    }
+
+    return(\%newgff, \%newfeat);
+}
+
+
+=head2 convert_gffline
+
+  Usage: my %gffline = convert_gffline($line);
+
+  Desc: Structure the gff line (9 columns, where 9th is the attributes) in a
+        hash with the following structure:
+        ( seqid => value1, source => value2, type   => value3, start => value4,
+          end   => value5, score  => value6, strand => value7, phase => value8,
+          attributes => { tag => \@attr_values }
+        )
+
+  Ret: A hash (see Desc.)
+
+  Args: $line separated by tab. 9th column tag=value; format
+
+  Side_Effects: None
+
+  Example: my %gffline = convert_gffline($line);
+
+=cut
+
+sub convert_gffline {
+    my $gffline = shift ||
+	die("ERROR: No gffline argument was supplied to convert_gffline()");
+    
+    if (ref($gffline) ne 'ARRAY') {
+	die("ERROR: line=$gffline supplied to convert_gffline isnt arrayref");
+    }
+    
+    my %gffline = ();
+    my @fields = ('seqid', 'source', 'type', 'start', 'end', 'score', 'strand',
+		  'phase', 'attributes');
+
+    my $a = 0;
+    foreach my $val (@{$gffline}) {
+    
+	if ($a < 8) {
+
+	    $gffline{$fields[$a]} = $val;
+	}
+	else {
+	
+	    my %attr = ();
+	    my @pairs = split(/;/, $val);
+	    foreach my $pair (@pairs) {
+		
+		if ($pair =~ m/(.+)=(.*)/) {
+	
+		    my $tag = $1;
+		    my $attrval = $2;
+		    if (defined($attrval) && $attrval =~ m/./) {
+			
+			if ($attrval !~ m/^("|')/) {
+		    
+			    my @attrvalues = split(/,/, $attrval);
+			    $attr{$tag} = \@attrvalues;
+			}
+			else {
+			    
+			    $attr{$tag} = [$attrval];
+			}
+		    }
+		    else {
+		    
+			$attr{$tag} = [];
+		    }
+		}
+	    }
+	    
+	    $gffline{$fields[$a]} = \%attr;
+	}
+	$a++;
+    }
+    
+    return %gffline;
+}
+
+=head2 linearize_gffhash 
+
+  Usage: my $line = linearize_gffhash(\%hash);
+
+  Desc: Linearize a gff hash into a line with 9 columns
+        Structure the gff line (9 columns, where 9th is the attributes) in a
+        hash with the following structure:
+        ( seqid => value1, source => value2, type   => value3, start => value4,
+          end   => value5, score  => value6, strand => value7, phase => value8,
+          attributes => { tag => \@attr_values }
+        )
+
+  Ret: $line separated by tab. 9th column tag=value; format
+
+  Args: A hash ref.(see Desc.)
+
+  Side_Effects: None
+
+  Example: my $line = linearize_gffhash(\%hash);
+
+=cut
+
+sub linearize_gffhash {
+    my $gffhash = shift ||
+	die("ERROR: No gff href argument was supplied to linearize_gffhash()");
+
+    if (ref($gffhash) ne 'HASH') {
+
+	die("ERROR: $gffhash supplied to linearize_gffhash is not hashref.");
+    }
+
+    my %gff = %{$gffhash};
+
+    ## Keys are: 'seqid', 'source', 'type', 'start', 'end', 'score', 'strand',
+    ## 'phase', 'attributes';
+    ## It will skip the attributes to give the right format
+
+    my @line = ();
+    my @reg_cols = ('seqid', 'source', 'type', 'start', 'end', 'score', 
+		    'strand', 'phase');
+    foreach my $col (@reg_cols) {
+	
+	push @line, $gff{$col}; 
+    }
+
+    ## Now it will add attributes, usually ordered alphab. but with 
+    ## ID, Parent in the first positions (if exists)
+
+    my @attr = ();
+    my %attr = %{$gff{attributes}};
+    if (exists $attr{ID}) {
+    
+	push @attr, 'ID=' . join(",", @{$attr{ID}});
+    }
+    if (exists $attr{Parent}) {
+    
+	push @attr, 'Parent=' . join(",", @{$attr{Parent}});
+    }
+    foreach my $key (sort {$a cmp $b} keys %attr) {
+    
+	if ($key !~ m/^(ID|Parent)$/) {
+	
+	    push @attr, $key . '=' . join(",", @{$attr{$key}});
+	}
+    }
+    
+    push @line, join(";", @attr);
+
+    return \@line;
+}
+
+=head2 create_new_feature
+
+  Usage: my %new_gffline = create_feature(\@base_gffline, $basetype, $type);
+
+  Desc: Create a new feature using an old one as base.
+        
+        For example, if the base feature is: 
+        ID  src  type     start  end  score  strand  phase  attributes
+        
+        The new feature will be:
+        ID  src  newtype  start  end  score  strand  phase  new_attributes
+
+        if more than one gffline is used it will get the lower start and the
+        upper end, for example:
+
+        ID  src  CDS          start1  end1  score  strand  phase  attributes
+        ID  src  CDS          start2  end2  score  strand  phase  attributes
+        ID  src  CDS          start3  end3  score  strand  phase  attributes
+
+        ID  src  polypeptide  start1  end3  score  strand  phase  attributes
+
+        There are several permited types: gene, mRNA and polypeptide
+
+  Ret: A hash with the new gff line data
+
+  Args: \%base_gffline, an array ref. of hashrefs (see Desc.)
+        $type, a new type
+
+  Side_Effects: Die if the base hashrefs don't have the same parent of the
+                same type.
+
+  Example: my %new_gffline = create_feature(\@base_gfflines, $basetype, $type);
+
+=cut
+
+sub create_new_feature {
+    my $basegffline = shift ||
+	die("ERROR: No base gffline aref. was supplied to create_new_feature");
+    my $basetype = shift ||
+	die("ERROR: No basetype was supplied to create_new_feature");
+     my $type = shift ||
+	die("ERROR: No type was supplied to create_new_feature");
+
+    ## Check input
+
+    if (ref($basegffline) ne 'ARRAY') {
+    
+	die("ERROR: $basegffline supplied to create_new_feature isnt arrayref");
+    }
+    else {
+
+	foreach my $gffhref (@{$basegffline}) {
+
+	    my $parent;
+	    if (ref($gffhref) ne 'HASH') {
+		
+		die("ERROR: $gffhref supplied to create_new_feature isnt href");
+	    }
+	    else {
+
+		unless (defined $parent) {
+		
+		    $parent = $gffhref->{attributes}->{Parent};
+		}
+		else {
+		
+		    if ($parent ne $gffhref->{attributes}->{Parent}) {
+		    
+			die("ERROR: base gff href doesnt have same Parent");
+		    }
+		}
+		
+		if ($basetype ne $gffhref->{type}) {
+		    
+		    die("ERROR: type for gff href isnt $basetype");
+		}
+	    }
+	}
+    }
+      
+    ## define the permitted types (it will growth with the use)
+    
+    my %pmtypes = (
+	gene        => {'mRNA' => 1, 'exon' => 1},
+	mRNA        => {'gene' => 1, 'exon' => 1},
+	polypeptide => {'CDS'  => 1},
+	);
+
+    unless (exists $pmtypes{$type}) {
+    
+	my $perm_types = join(',', keys %pmtypes);
+	die("ERROR: type=$type is not a permited type ($perm_types)");
+    }
+    else {
+    
+	my %exp_basetypes = %{$pmtypes{$type}};
+	unless (exists $exp_basetypes{$basetype}) {
+	    
+	    die("ERROR: $type cannt be used with $basetype to createnewfeature")
+	}	
+    }
+    
+    ## Transfer the simple data
+    my %newgff = %{$basegffline->[0]};
+    
+    ## Modify start and end
+
+    $newgff{start} = $basegffline->[0]->{start};
+    $newgff{end} = $basegffline->[-1]->{end};
+
+    ## Modify type
+    $newgff{type} = $type;
+
+    ## And create the new attributes
+    
+    my %newattr = ();
+
+    ## 1) ID
+
+    my ($base_id) = $basegffline->[0]->{attributes}->{ID}->[0];
+    $base_id =~ s/^$type://;
+    my $new_id = $type . ':' . $base_id;
+    $newattr{ID} = [$new_id];
+    
+    ## 2) Parent
+
+    if ($basegffline->[0]->{type} eq 'gene' && $type eq 'mRNA') {
+	
+	$newattr{Parent} = [$basegffline->[0]->{attributes}->{ID}->[0]];	
+    }
+    elsif ($basegffline->[0]->{type} eq 'CDS' && $type eq 'polypeptide') {
+    
+	$newattr{Derives_from} = [
+	    $basegffline->[0]->{attributes}->{Parent}->[0]
+	    ];
+    }
+
+    $newgff{attributes} = \%newattr;
+
+    return %newgff;
+}
+
+
+=head2 parse_gffstructure
+
+  Usage: my %pos = parse_gffstructure(\%gff_data, \%gff_structure)
+
+  Desc: Get the position for a feature refering to the Parent, for example:
+        ln xxa: ID1   src   mRNA   5  200   .   0   +   ID=mRNA:00001
+        ln xxx: ID1   src   CDS   10   60   .   0   +   Parent=mRNA:00001 
+        ln xxy: ID1   src   CDS   80  110   .   0   +   Parent=mRNA:00001 
+        ln xxz: ID1   src   CDS  150  180   .   0   +   Parent=mRNA:00001 
+
+        It will return for xxx, pos=1; xxy, pos=2; and xxz, pos=3 in a hashref
+
+  Ret: A hash as: key=line, value=hashref with key=p_line
+       and value=position (referred to the parent)
+
+  Args: \%gff_data, a hashref with key=line, value=gffline_aref
+        \%gff_structure, a hashref with key=parent.line, value=aref. of lines
+
+  Side_Effects: Die if something is wrong
+
+  Example: my %pos = parse_gffstructure(\%gff_data, \%gff_structure)
+
+=cut
+
+sub parse_gffstructure {
+    my $gff_href = shift ||
+	die("ERROR: No gff href. argument was supplied to parse_gffstructure");
+    my $struc_href = shift ||
+	die("ERROR: No struct href. arg. was supplied to parse_gffstructure");
+
+    if (ref($gff_href) ne 'HASH') {
+	die("ERROR: $gff_href supplied to parse_gffstructure isnt a hashref.");
+    }
+    if (ref($struc_href) ne 'HASH') {
+	die("ERROR: $struc_href supplied to parse_gffstructure isnt a hashref");
+    }
+
+    my %gff = %{$gff_href};
+    my %struc = %{$struc_href};
+    my $P = scalar(keys %struc);
+
+    if ($opt_V) {
+	
+	print STDERR "\n\tGff parsing contains: $P parental lines.\n";
+    }
+
+
+    ## Once all the relations are there it will count and add to the position
+    ## hash
+
+    my %pos = ();
+    foreach my $p_ln (keys %struc) {
+    
+	foreach my $type (keys %{$struc{$p_ln}}) {
+	
+	    my $ps = 0;
+	    foreach my $c_ln (@{$struc{$p_ln}->{$type}}) {
+		
+		$ps++;
+		if (exists $pos{$c_ln}) {
+		    
+		    $pos{$c_ln}->{$p_ln} = $ps;
+		}
+		else {
+		    $pos{$c_ln} = { $p_ln => $ps };
+		}
+		
+		if ($opt_V) {
+		    
+		     print STDERR "\tAnalyzing position for line:$c_ln ($ps)\r";
+		 }
+	    }
+	}
+    }
+    if ($opt_V) {
+	print STDERR "\n\tDone. Structure parsed.\n";
+    }
+
+    return %pos;
+}
+
+
+=head2 create_new_gff
+
+  Usage: create_new_gff($dat_gffhr, $filename);
+
+  Desc: creates a new gff file with name=filename
+
+  Ret: None
+
+  Args: \%gff, a hash ref. with key=line and value=gffline
+        $filename, a name for new file
+
+  Side_Effects: Die if something is wrong
+
+  Example: create_new_gff($dat_gffhr, $filename);
+
+=cut
+
+sub create_new_gff {
+    my $gff_href = shift ||
+	die("ERROR: No gff href. argument was supplied to create_new_gff()");
+    my $filename = shift ||
+	die("ERROR: No filename argument was supplied to create_new_gff()");
+
+    if (ref($gff_href) ne 'HASH') {
+	die("ERROR: $gff_href supplied to create_new_gff isnt a hashref.");
+    }
+
+    my %gff = %{$gff_href};
+
+    my $L = scalar(keys %gff);
+    if ($opt_V) {
+	
+	print STDERR "\n\tGff data contains $L lines\n";
+    }
+    
+    open my $ofh, '>', $filename;
+
+    ## First, print the headers
+
+    print $ofh "##gff-version 3\n";
+    my $l = 0;
+
+    foreach my $ln (sort {$a <=> $b} keys %gff) {
+	$l++;
+	my @line = @{$gff{$ln}};
+
+	if ($opt_V) {
+	    print STDERR "\tPrinting line=$ln ($l of $L)   \r";
+	}
+
+	if ($line[8] =~ m/ID=$line[0];Name=$line[0]/) {  ## Sequence feature
+	
+	    print $ofh "##sequence-region $line[0] 1 $line[4]\n";
+	}
+	my $p_line = join("\t", @line);
+	print $ofh "$p_line\n";
+    }
+}
+    
+=head2 add_introns
+
+  Usage: my ($dat_gffhr, $fea_gffhr) = add_introns($data, $feats ,$papos);
+
+  Desc: calculate the space between two exons and create an intron as a new
+        feature.
+
+  Ret: Two hashrefs, $dat_gffhr with key=line, value=arrayref. with gffline
+       and $fea_gffhr, a hashref. with key=featID, value=line
+
+  Args: $data, a hashref. with key=line, value=arrayref. with gffline.
+        $feats, a hashref. with key=featID, value=line
+        $struc, a hashref. with key=parent.line, value=hashref. with 
+        key=type and value=arrayref. with lines
+
+  Side_Effects: Die if something is wrong
+
+  Example: my ($dat_gffhr, $fea_gffhr) = add_introns($data, $feats ,$struc);
+
+=cut
+
+sub add_introns {
+    my $gffhref = shift ||
+	die("ERROR: No data gffhref argument was supplied to add_introns()");
+    my $feahref = shift ||
+	die("ERROR: No data feahref argument was supplied to add_introns()");
+    my $struchref = shift ||
+	die("ERROR: No structure href arg. was supplied to add_introns()");
+    
+    ## Check
+
+    if (ref($gffhref) ne 'HASH') {
+	
+	die("ERROR: data gffhref supplied to add_introns() isnt hashref.");
+    }
+    if (ref($feahref) ne 'HASH') {
+	
+	die("ERROR: feature href supplied to add_introns() isnt hashref.");
+    }
+    if (ref($struchref) ne 'HASH') {
+	
+	die("ERROR: struct. href supplied to add_introns() isnt hashref.");
+    }
+
+    ## Define the variables
+
+    my %gff = %{$gffhref};
+    my %feats = %{$feahref};
+    my %struc = %{$struchref};
+
+    my $in_c = 0;
+    my $par_c = scalar(keys %struc);
+
+    if ($opt_V) {
+	
+	print STDERR "\n\tGff data contains $par_c parental feats\n";
+    }
+
+    foreach my $p_ln (keys %struc) {
+
+	my $corr_p_ln = $p_ln * 100;
+	my %p_gff = convert_gffline($gff{$corr_p_ln});
+
+	foreach my $c_type (keys %{$struc{$p_ln}}) {
+
+	    if ($c_type eq 'exon') {           ## Only exons can produce introns
+	
+		my @exons_ln = @{$struc{$p_ln}->{$c_type}};
+		my $exon_c = scalar(@exons_ln);
+
+		if ($exon_c > 1) {              ## Just ignore 1 exons
+
+		    my $e = 0;
+		    foreach my $exon_ln (@exons_ln) {
+		    
+			if ($e + 1 < $exon_c) {  ## It means, it is not the last
+			
+			    my $curr = $exon_ln * 100;
+			    my $next = $exons_ln[$e+1] * 100;
+
+			    my %c_gff = convert_gffline($gff{$curr});
+			    my %n_gff = convert_gffline($gff{$next});
+
+			    ## Intron will have same seqid and source than the
+			    ## parent.
+			    
+			    my @new_gff = ($p_gff{seqid}, $p_gff{source});
+			    
+			    ## It will have intron as type
+
+			    push @new_gff, 'intron';
+
+			    ## It will have as start=curr_end+1 and as end
+			    ## next_start-1
+
+			    push @new_gff, ($c_gff{end} +1, $n_gff{start} -1 );
+			    
+			    ## It is an intron, so it will not have score, 
+			    ## strand or phase
+
+			    push @new_gff, ('.', $p_gff{strand}, '.');
+
+			    ## It will have Parent and ID
+			    ## As ID it will take the current exon adding type
+			    ## intron and removing exon, if it exists
+			    
+			    my $c_id = $c_gff{attributes}->{ID}->[0];
+			    my $inID = 'intron:' .  $c_id;
+			    $inID =~ s/exon://;
+			    
+			    my $p_id = $p_gff{attributes}->{ID}->[0];
+			    my $inPar = 'Parent=' . $p_id;
+
+			    push @new_gff, 'ID=' . $inID . ';' . $inPar;
+
+			    ## Finally it will add a new feature and a new
+			    ## gffline. The number will be:
+
+			    my $base = $next;
+			    if ($curr > $next) {
+				$base = $curr
+			    }
+
+			    my $new_ln = $base - 5;
+			    $gff{$new_ln} = \@new_gff;
+			    $feats{$inID} = $new_ln;
+			    $in_c++;
+
+			    if ($opt_V) {
+			    
+				print STDERR "\tAnalyzing exon:$curr. $in_c ";
+				print STDERR "introns have been added     \r";
+			    }
+			}
+			$e++;
+		    }
+		}
+	    }
+	}
+    }
+    return (\%gff, \%feats);
+}
+
+=head2 add_utrs
+
+  Usage: my ($dat_gffhr, $fea_gffhr) = add_utrs($data, $feats ,$struc);
+
+  Desc: calculate the space between the utrs and add them to the gff hashref.
+
+  Ret: Two hashrefs, $dat_gffhr with key=line, value=arrayref. with gffline
+       and $fea_gffhr, a hashref. with key=featID, value=line
+
+  Args: $data, a hashref. with key=line, value=arrayref. with gffline.
+        $feats, a hashref. with key=featID, value=line
+        $struc, a hashref. with key=parent.line, value=hashref. with 
+        key=type and value=arrayref. with lines
+
+  Side_Effects: Die if something is wrong
+
+  Example: my ($dat_gffhr, $fea_gffhr) = add_utrs($data, $feats ,$struc);
+
+=cut
+
+sub add_utrs {
+    my $gffhref = shift ||
+	die("ERROR: No data gffhref argument was supplied to add_utrs()");
+    my $feahref = shift ||
+	die("ERROR: No data feahref argument was supplied to add_utrs()");
+    my $struchref = shift ||
+	die("ERROR: No structure href arg. was supplied to add_utrs()");
+    
+    ## Check
+
+    if (ref($gffhref) ne 'HASH') {
+	
+	die("ERROR: data gffhref supplied to add_utrs() isnt hashref.");
+    }
+    if (ref($feahref) ne 'HASH') {
+	
+	die("ERROR: feature href supplied to add_utrs() isnt hashref.");
+    }
+    if (ref($struchref) ne 'HASH') {
+	
+	die("ERROR: struct. href supplied to add_utrs() isnt hashref.");
+    }
+
+    ## Define the variables
+
+    my %gff = %{$gffhref};
+    my %feats = %{$feahref};
+    my %struc = %{$struchref};
+
+    my $par_c = scalar(keys %struc);
+    if ($opt_V) {
+	
+	print STDERR "\n\tGff data contains $par_c parental feats\n";
+    }
+
+    my ($t5utr_c, $t3utr_c) = (0, 0);
+
+    foreach my $p_ln (keys %struc) {
+
+	my $corr_p_ln = $p_ln * 100;
+	my %p_gff = convert_gffline($gff{$corr_p_ln});
+	my $p_strand = $p_gff{strand};
+	my $p_id = $p_gff{attributes}->{ID}->[0];
+
+	## It will get exon and CDS, if some of this is not present it will
+	## skip this step
+
+	my $exon_aref = $struc{$p_ln}->{exon};
+	my $cds_aref = $struc{$p_ln}->{CDS};
+
+	if (defined $exon_aref && defined $cds_aref) {
+
+	    my @exons_ln = @{$exon_aref};
+	    my $exon_c = scalar(@exons_ln);
+	    my @cds_ln = @{$cds_aref};
+	    my $cds_c = scalar(@cds_ln);
+
+	    ## Now it will run each exon to find a coordinate overlap between
+	    ## exons and cds
+
+	    my ($utr5_c, $utr3_c) = (0, 0);          ## UTR counters
+	    my ($complete5, $complete3) = (0, 0);    ## Complete UTR switch
+	    my ($add5, $add3) = (0, 0);              ## Add UTR switch
+
+	    foreach my $exon_ln (@exons_ln) {
+	    
+		my $corr_exon_ln = $exon_ln * 100;
+		my $e_st = $gff{$corr_exon_ln}->[3];
+		my $e_en = $gff{$corr_exon_ln}->[4];
+		my $exonadded = 0;
+		
+		my $firstcds = $cds_ln[0];
+		my $lastcds = $cds_ln[-1];
+
+		if ($opt_V) {
+		    
+		    print STDERR "\tAnalyzing exon:$exon_ln for ";
+		    print STDERR "1st.CDS:$firstcds and Last.CDS:$lastcds.";
+		    print STDERR "$t5utr_c 5UTRs and $t3utr_c have been added";
+		    print STDERR "    \r";
+		}
+		
+		my $f_corr_cds_ln = $firstcds * 100;
+		my $fc_st = $gff{$f_corr_cds_ln}->[3];
+		my $fc_en = $gff{$f_corr_cds_ln}->[4];
+		
+		my $l_corr_cds_ln = $lastcds * 100;
+		my $lc_st = $gff{$l_corr_cds_ln}->[3];
+		my $lc_en = $gff{$l_corr_cds_ln}->[4];
+
+		## Define coords variables
+		my ($start5, $end5, $start3, $end3) = (0, 0, 0, 0);
+		
+		if ($complete5 == 0 && $exonadded == 0) {
+		    if ($p_strand eq '-') {
+			if ($e_st == $fc_st && $e_en < $fc_en) {
+				
+			    $complete5 = 1;
+			    $add5 = 1;
+			    $start5 = $fc_en + 1;
+			    $end5 = $e_en;
+			    
+			}
+			elsif ($e_st == $fc_st && $e_en == $fc_en) {
+				
+			    $complete5 = 1;
+			}
+			elsif ($e_st > $fc_st && $e_en > $fc_en){
+				
+			    $add5 = 1;
+			    $start5 = $e_st;
+			    $end5 = $e_en;
+			}
+
+		    }
+		    else {
+			if ($e_st < $fc_st && $e_en == $fc_en) {
+			    
+			    $complete5 = 1;
+			    $add5 = 1;
+			    $start5 = $e_st;
+			    $end5 = $fc_st - 1;			    
+			}
+			elsif ($e_st == $fc_st && $e_en == $fc_en) {
+			    
+			    $complete5 = 1;
+			}
+			elsif ($e_st < $fc_st && $e_en < $fc_en){
+			
+			    $add5 = 1;
+			    $start5 = $e_st;
+			    $end5 = $e_en;
+			}
+		    }
+		}
+		if ($complete3 == 0 && $exonadded == 0) {
+		    if ($p_strand eq '-') {
+			if ($e_st < $lc_st && $e_en == $lc_en) {
+				
+			    $complete3 = 1;
+			    $add3 = 1;
+			    $start3 = $e_st;
+			    $end3 = $lc_st - 1;			    
+			}
+			elsif ($e_st == $lc_st && $e_en == $lc_en) {
+				    
+			    $complete3 = 1;
+			}
+			elsif ($e_st < $lc_st && $e_en < $lc_en){
+				
+			    $add3 = 1;
+			    $start3 = $e_st;
+			    $end3 = $e_en;
+			}			    
+		    }
+		    else {
+			if ($e_st == $lc_st && $e_en > $lc_en) {
+				    
+			    $complete3 = 1;
+			    $add3 = 1;
+			    $start3 = $lc_en + 1;
+			    $end3 = $e_en;			    
+			}
+			elsif ($e_st == $lc_st && $e_en == $lc_en) {
+				    
+			    $complete3 = 1;
+			}
+			elsif ($e_st > $lc_st && $e_en > $lc_en){
+			    
+			    $add3 = 1;
+			    $start3 = $e_st;
+			    $end3 = $e_en;
+			}
+		    }
+			    
+		    ## So if $add5 == 1 it will add a new 5UTR
+		    if ($add5 == 1) {
+			$utr5_c++;
+
+			my $id = 'five_prime_utr:' . $p_id . '.' . $utr5_c;
+			my $parent = $p_id;
+			my $attr = "ID=$id;Parent=$parent";
+			    
+			## It is an UTR before the CDS
+			## Create the gff line
+			my @gffln = (
+			    $p_gff{seqid}, $p_gff{source}, 'five_prime_utr',
+			    $start5,       $end5,          '.',
+			    $p_strand,     '.',            $attr
+			    );
+			
+			## Add to the gff file after the exon, before
+			## the cds (after the possible introns as -5)
+				
+			my $new_ln = $corr_exon_ln + 3;
+			$gff{$new_ln} = \@gffln;
+			$feats{$id} = $new_ln;
+			
+			## And add another count for UTR
+			$t5utr_c++;
+			$add5 = 0;
+			$exonadded = 1;
+		    }
+		    ## Same thing for UTR3
+		    if ($add3 == 1) {
+			$utr3_c++;
+
+			my $id = 'three_prime_utr:' . $p_id . '.' . $utr3_c;
+			my $parent = $p_id;
+			my $attr = "ID=$id;Parent=$parent";
+			
+			## It is an UTR before the CDS
+			## Create the gff line
+			my @gffln = (
+			    $p_gff{seqid}, $p_gff{source},'three_prime_utr',
+			    $start3,       $end3,           '.',
+			    $p_strand,     '.',             $attr
+			    );
+			
+			## Add to the gff file after the exon, before
+			## the cds (after the possible introns as -5)
+			
+			my $new_ln = $corr_exon_ln + 3;
+			$gff{$new_ln} = \@gffln;
+			$feats{$id} = $new_ln;
+			
+			## And add another count for UTR			
+			$t3utr_c++;
+			$add3 = 0;
+			$exonadded = 1;
+		    }
+		}
+	    }
+	}
+    }
+    return (\%gff, \%feats);
+}
+
+
+=head2 add_blast_annotations
+
+  Usage: $dat_gffhr = add_blast_annotations($dat_gffhr, 
+                                            $fea_gffhr, 
+                                            $gblast_annot_hr);
+
+  Desc: Add two different blast annotation lines to the features where
+        ID attribute = queryID:
+        BlastHits="GB:XP_002528761.1:I93.28:L327:E0.0" where
+                   GB => dbname, XP_002528761.1 => target_id, 
+                   I93.28 => identity, L => alignment length and E => evalue
+        FuncAnnotation="Function" extracted from the blast descriptions.
+
+  Ret: A hashref. where key=line and value= arrayref of gffline
+
+  Args: $dat_gffhr, a hashref. with key=line, value=arrayref. with gffline.
+        $fea_gffhr, a hashref with key=ID, value=line
+        $gblast_annot_hr, hashref with key=queryID and value=hashref with
+        key=dbname and value=hashref with blast field-value pairs
+        
+  Side_Effects: Die if something is wrong
+
+  Example: $dat_gffhr = add_blast_annotations($dat_gffhr, 
+                                            $fea_gffhr, 
+                                            $gblast_annot_hr);
+
+=cut
+
+sub add_blast_annotations {
+    my $gffhref = shift ||
+	die("ERROR: No data gffhref. was supplied to add_blast_annotation()");
+    my $feahref = shift ||
+	die("ERROR: No feats href. was supplied to add_blast_annotation()");
+    my $gblasthref = shift ||
+	die("ERROR: No blast href. was supplied to add_blast_annotation()");
+    
+    ## Check
+
+    if (ref($gffhref) ne 'HASH') {
+	
+	die("ERROR: data gffhref supplied to add_blast_annotation() isnt href");
+    }
+    if (ref($feahref) ne 'HASH') {
+	
+	die("ERROR: feats href supplied to add_blast_annotation() isnt href.");
+    }
+    if (ref($gblasthref) ne 'HASH') {
+	
+	die("ERROR: blast href supplied to add_blast_annotation() isnt href.");
+    }
+
+    ## Define the variables
+
+    my %gff = %{$gffhref};
+    my %feats = %{$feahref};
+    my %blast = %{$gblasthref};
+
+    my $B = scalar(keys %blast);
+    
+    ## Scan by blast
+
+    if ($opt_V) {
+    
+	print STDERR "\n\tProcessing blast annotations ($B)\n";
+    }
+
+    my $b = 0;
+    foreach my $qid (keys %blast) {
+    
+	## If there is no feat for this qid it doesn't have much sense
+	## continue
+
+	my @blasthits = ();
+	my @descrip = ();
+
+	if (exists $feats{$qid}) {
+	    
+	    foreach my $dbname (keys %{$blast{$qid}}) {
+		
+		my %bdata = %{$blast{$qid}->{$dbname}};
+		
+		## First, synthesize the BlastHits 
+
+		## It will edit the subject_id when they are xx|sss|accession
+
+		if ($bdata{'subject.id'} =~ m/\|/) {
+		
+		    $bdata{'subject.id'} =~ s/\|$//;
+		    my @accs = split(/\|/, $bdata{'subject.id'});
+		    $bdata{'subject.id'} = $accs[-1];
+		}
+
+		my $blhit = $dbname . ':' . $bdata{'subject.id'} . ':I' .
+		            $bdata{'ident.percentage'} . ':L' . 
+			    $bdata{'align.length'} . ':E' . $bdata{'evalue'};
+
+		push @blasthits, $blhit;
+
+		## Second, add description to the array
+		if (exists $bdata{description} && $bdata{description} =~ /.+/) {
+		 
+		    push @descrip, $bdata{description};
+		}
+	    }
+
+	    ## Once it has catch the blast data it will synthesize a description
+	    ## using the synthesize_function
+
+	    my $func = '';
+	    if ($opt_S) {
+		$func = synthesize_function(\@descrip);
+	    }
+
+	    ## Now it will retrieve the gff line
+
+	    my $gffline = $gff{$feats{$qid}};
+	    if (defined $gffline) {
+	    
+		## get attributes
+		my $attr = $gffline->[8];
+		
+		if (scalar(@blasthits) > 0) {
+		
+		    $attr .= ';BlastHits=' . join(",", @blasthits);
+		}
+		if ($func =~ m/.+/) {
+		
+		    $attr .= ';FuncAnnotation="' . $func . '"';
+		}
+		
+		## it is an arrayref. so modifying that should be enough to 
+		## add it
+
+		$gffline->[8] = $attr;
+		$gff{$feats{$qid}} = $gffline;
+	    }
+	}
+    }
+
+    return \%gff;
+}
+
+=head2 synthesize_function
+
+  Usage: my $function = synthesize_function(\@descriptions);
+
+  Desc: Search for a possible function between all the descriptions supplied.
+        It will ignore the following descriptions: 'hypothetical protein', 
+        'unnamed protein product', 'conserved hypothetical protein', 
+        'predicted protein', 'unknown', and 'uncharacterized protein'.
+        
+  Ret: $function, an scalar with the synthesized function
+
+  Args: \@descriptions, an arrayref. with descriptions
+        
+  Side_Effects: Die if something is wrong
+
+  Example: my $function = synthesize_function(\@descriptions);
+
+=cut
+
+sub synthesize_function {
+    my $descr_aref = shift ||
+	die("ERROR: No descript. aref was supplied to synthesize_function.");
+
+    if (ref($descr_aref) ne 'ARRAY') {
+	die("ERROR: arrayref supplied to syntheize_function isnt arrayref");
+    }
+
+    my %ignored = (
+	'hypothetical protein'           => 1, 
+        'unnamed protein product'        => 1, 
+	'conserved hypothetical protein' => 1, 
+        'predicted protein'              => 1, 
+	'unknown'                        => 1, 
+	'uncharacterized protein'        => 1
+	);
+
+    ## First it will take a base as description, the shorter description.
+    ## If there are any redundancy it will be removed in the hash
+    
+    my %lengths = ();
+    foreach my $desc (@{$descr_aref}) {
+
+	## Different databases will have different description lines
+	## this will clean some of them (GenBank NR, Swissprot, TAIR10 and
+	## ITAG2.3 for now)
+
+	if ($desc =~ m/.+functional_description:"(.+)"/) {       ## ITAG2.3
+	    $desc = $1;
+	    $desc =~ s/\(AHRD.+\)//i;
+	}
+	elsif ($desc =~ m/Symbols.+\|(.+)\| chr.+$/) {           ## TAIR10
+	    $desc = $1;
+	}
+	elsif ($desc =~ m/^(.+)\s+OS=.+$/) {                     ## Swissprot
+	    $desc = $1;
+	    $desc =~ s/\s+at\dg\d{4,6}//i;
+	}
+	elsif ($desc =~ m/^(.+)\s+\[.+\]$/) {                    ## GenBank
+	    $desc = $1;
+	    
+	    ## GenBank can have PREDICTED tag
+	    $desc =~ s/^PREDICTED:\s+//i;
+	}
+
+	## Aditional cleanings
+	$desc =~ s/-like//i;
+	$desc =~ s/acyl-/acyl/i;
+	$desc =~ s/\// /;
+	$desc =~ s/,\s+/ /;
+
+	## Now it should be cleaner
+	my $ignored = 0;
+	foreach my $ig (keys %ignored) {
+	    if ($desc =~ m/$ig/) {
+		
+		$ignored = 1;
+	    }
+	}
+    
+	if ($ignored == 0) {
+	    $lengths{$desc} = length($desc);
+	}
+    }
+    
+    my @desc = sort {$lengths{$a} <=> $lengths{$b}} keys %lengths;
+    my $desc_count = scalar(@desc);
+
+    ## Declare variable
+    my $func = '';
+
+    my $test = join(";", @desc);
+
+    if ($desc_count > 0) {
+    
+	my $base = shift(@desc);
+
+	## Now it will get the common words between all the descriptions, using
+	## base as initial construction.
+
+	my %words = ();
+	my %phrase = ();
+	my $n = 0;
+	foreach my $baseword (split(/\s+/, $base)) {
+    
+	    $words{lc($baseword)} = 1;
+	    $phrase{lc($baseword)} = $n;
+	    $n++;
+	}
+        
+	foreach my $descp (@desc) {
+
+	    foreach my $d_word (split(/\s+/, $descp)) {
+
+		if (exists $words{lc($d_word)}) {
+		    
+		    $words{lc($d_word)}++;
+		}
+	    }
+	}
+
+	## Finally it will build the function with the common words
+
+	my @function = ();
+	foreach my $ord_word (sort {$phrase{$a} <=> $phrase{$b}} keys %phrase) {
+    
+	    if ($words{lc($ord_word)} + 1 >= $desc_count) {
+		push @function, $ord_word;
+	    }
+	}
+
+    
+	if (scalar(@function) > 1) {
+	
+	    $func = ucfirst(join(" ", @function));
+	}
+	elsif (scalar(@function) == 1 && $function[0] ne 'protein') {
+	
+	    $func = ucfirst($function[0]);
+	}
+	else {                                  ## By default it will use base
+	    $func = ucfirst($base);
+	}
+	$func =~ s/^\s+//;
+    }    
+ 
+    return $func;
+}
+
+=head2 add_ipr_annotations
+
+  Usage: $dat_gffhr = add_ipr_annotations($dat_gffhr, 
+                                          $fea_gffhr, 
+                                          $ipr_annot_hr);
+
+  Desc: Add two different blast annotation lines to the features where
+        ID attribute = queryID:
+        IprDomains="IPR:IPR000644|S:1|E:134|D:Cystathionine beta-synthase, core"
+        Ontology_term="GO:XXXXXXX"        
+
+  Ret: A hashref. where key=line and value= arrayref of gffline
+
+  Args: $dat_gffhr, a hashref. with key=line, value=arrayref. with gffline.
+        $fea_gffhr, a hashref with key=ID, value=line
+        $ipr_annot_hr, hashref with key=queryID and value=hashref with ipr 
+        field-value pairs
+        
+  Side_Effects: Die if something is wrong
+
+  Example: $dat_gffhr = add_ipr_annotations($dat_gffhr, 
+                                            $fea_gffhr, 
+                                            $gblast_annot_hr);
+
+=cut
+
+sub add_ipr_annotations {
+    my $gffhref = shift ||
+	die("ERROR: No data gffhref. was supplied to add_ipr_annotation()");
+    my $feahref = shift ||
+	die("ERROR: No feats href. was supplied to add_ipr_annotation()");
+    my $giprhref = shift ||
+	die("ERROR: No ipr href. was supplied to add_ipr_annotation()");
+    
+    ## Check
+
+    if (ref($gffhref) ne 'HASH') {
+	
+	die("ERROR: data gffhref supplied to add_ipr_annotation() isnt href");
+    }
+    if (ref($feahref) ne 'HASH') {
+	
+	die("ERROR: feats href supplied to add_ipr_annotation() isnt href.");
+    }
+    if (ref($giprhref) ne 'HASH') {
+	
+	die("ERROR: blast href supplied to add_ipr_annotation() isnt href.");
+    }
+
+    ## Define the variables
+
+    my %gff = %{$gffhref};
+    my %feats = %{$feahref};
+    my %ipr = %{$giprhref};
+
+    my $I = scalar(keys %ipr);
+    
+    ## Scan by blast
+
+    if ($opt_V) {
+    
+	print STDERR "\n\tProcessing InterPro annotations ($I)\n";
+    }
+
+    my $i = 0;
+    foreach my $qid (keys %ipr) {
+    
+	## If there is no feat for this qid it doesn't have much sense
+	## continue
+
+	my %goterms = ();
+	my @iprhits = ();
+
+	if (exists $feats{$qid}) {
+	    
+	    foreach my $iprhit (@{$ipr{$qid}}) {
+
+		## First create the IprDomains attribute
+
+		my $ipracc = $iprhit->{'ipr.accession'};
+		if (defined $ipracc && $ipracc ne 'NULL') {
+		    
+		    my $iprln = '"IPR:' . $ipracc . '|S:' . $iprhit->{'q.start'}
+		    . '|E:' . $iprhit->{'q.end'}
+		    . '|D:' . $iprhit->{'ipr.descrip'} . '"';
+		    
+		    push @iprhits, $iprln;
+		}
+
+		## Second, add the goterms
+
+		my $goln = $iprhit->{'GO'};
+		if (defined $goln) {
+		
+		    ## Some GO definitions can have commas, so it will replace
+		    ## ), by ),|, to let split in the right way
+
+		    $goln =~ s/\), /\),\|, /g;
+		    my @goes = split(/,\|, /, $goln);
+		
+		    foreach my $goel (@goes) {
+		  
+			my @tp = ('Biological Process', 'Molecular Function',
+				     'Cellular Component' );
+			
+			if ($goel =~ m/($tp[0]|$tp[1]|$tp[2]):\s(.+)\((.+)\)/) {
+			
+			    my $gotype = $1;
+			    my $descri = $2;
+			    my $goterm = $3;
+			
+			    $goterms{$goterm} = $descri; 
+			}
+		    }
+		}		
+	    }
+
+	    ## now it will get the line to add the new attributes
+
+	    my $gffln = $gff{$feats{$qid}};
+	    my $attr = $gffln->[8];
+
+	    if (scalar(@iprhits) > 0) {
+	    
+		my $ipr_attr = ";IprDomains=" . join(",", @iprhits);
+		$attr .= $ipr_attr;
+	    }
+	    
+	    if (scalar(keys %goterms) > 0) {
+	    
+		## It will need to get GO Terms from attributes, just to add
+		## new ones and not to replace them.
+
+		my %attr = ();
+		my @ord_attr = ();
+		foreach my $at (split(/;/, $attr)) {
+		
+		    my ($tag, $val) = split(/=/, $at);
+		    push @ord_attr, $tag;
+		    
+		    if (defined $val) {
+			foreach my $el (split(/,/, $val)) {
+			    
+			    if (exists $attr{$tag}) {
+				$attr{$tag}->{$el} = 1;
+			    }
+			    else {
+				$attr{$tag} = {$el => 1};
+			    }
+			}
+		    }
+		    else {
+		    
+			if ($opt_V) {
+			
+			    print STDERR "\n\tWARNING: attr=$at does have tag=";
+			    print STDERR "val pair. for line=$feats{$qid}\n";
+			}
+		    }
+		}
+
+		## Now it will check if there are any ontology term
+
+		if (exists $attr{'Ontology_term'}) {
+
+		    ## it will add the attributes back in the same order
+		    ## adding new Ontology_term if they dont exists
+
+		    my %go = %{$attr{'Ontology_term'}};
+		    foreach my $newgo (sort {$a <=> $b} keys %goterms) {
+		    
+			$go{$newgo} = 1;
+		    }
+
+		    ## Now it will order them and create a line
+		    
+		    my $goln = join(',', sort {$a <=> $b} keys %go);
+
+		    ## it will create the attribute line following the order
+		    
+		    my @attr_lm = ();
+		    foreach my $ord_at (@ord_attr) {
+		    
+			if ($ord_at ne 'Ontology_term') {
+			    
+			    my @vals = sort {$a <=> $b} keys %{$attr{$ord_at}};
+			    
+			    push @attr_lm, $ord_at . '=' . join(",", @vals);
+			}
+			else {
+			
+			    push @attr_lm, 'Ontology_term=' . $goln; 
+			}
+		    }
+
+		    my $newattr = join(";", @attr_lm);
+		    $attr = $newattr;
+		}
+		else {
+		
+		    ## it just will add the ontologies to the end of the 
+		    ## attributes
+
+		    my $goln = ';Ontology_term=' . join(',', keys %goterms);
+		    $attr .= $goln;
+		}
+	    }
+
+	    ## now it will add the new attributes to the arrayref
+
+	    $gffln->[8] = $attr;
+	    $gff{$feats{$qid}} = $gffln;
+	}
+    }
+
+    return \%gff;
+}
+
+
+
+
+
+
+
+
+
+####
+1; #
+####
