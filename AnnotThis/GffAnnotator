@@ -584,20 +584,20 @@ sub help {
              'unnamed protein product', 'conserved hypothetical protein', 
              'predicted protein', 'unknown', and 'uncharacterized protein'.
              If there are not common words, it will get the description for the
-             shortest description and put them under the tag 'FuncAnnotation'
+             shortest description and put them under the tag 'func_annotation'
 
-             For the example: It will get FuncAnnotation=
+             For the example: It will get func_annotation=
              "isocitrate dehydrogenase" as description. 
 
              The hits will be keeped and added under the tag 'BlastHits' with 
              the following format DB:Accession:Id:Length:Evalue, so for the 
-             example will be: BlastHits="GB:XP_002528761.1:I93.28:L327:E0.0,
+             example will be: blast_hits="GB:XP_002528761.1:I93.28:L327:E0.0,
                                          SWP:Q8LFC0:I87.47:L367:E4e-176"
 
              Also if the -i <ipr_raw_file> is used it will parse the interpro 
              result file and it will add to the description. It can be filtered
              using the -d <ipr_filter> argument. It will be added a new 
-             attribute as: IprDomains="IPR:IPR000644|S:1|E:134|D:Cystathionine 
+             attribute as: ipr_domains="IPR:IPR000644|S:1|E:134|D:Cystathionine 
              beta-synthase, core"
              They will be separated by ';'.
 
@@ -2771,10 +2771,10 @@ sub add_utrs {
 
   Desc: Add two different blast annotation lines to the features where
         ID attribute = queryID:
-        BlastHits="GB:XP_002528761.1:I93.28:L327:E0.0" where
+        blast_hits="GB:XP_002528761.1:I93.28:L327:E0.0" where
                    GB => dbname, XP_002528761.1 => target_id, 
                    I93.28 => identity, L => alignment length and E => evalue
-        FuncAnnotation="Function" extracted from the blast descriptions.
+        func_annotation="Function" extracted from the blast descriptions.
 
   Ret: A hashref. where key=line and value= arrayref of gffline
 
@@ -2886,11 +2886,11 @@ sub add_blast_annotations {
 		
 		if (scalar(@blasthits) > 0) {
 		
-		    $attr .= ';BlastHits=' . join(",", @blasthits);
+		    $attr .= ';blast_hits=' . join(",", @blasthits);
 		}
 		if ($func =~ m/.+/) {
 		
-		    $attr .= ';FuncAnnotation="' . $func . '"';
+		    $attr .= ';func_annotation="' . $func . '"';
 		}
 		
 		## it is an arrayref. so modifying that should be enough to 
@@ -3061,7 +3061,8 @@ sub synthesize_function {
 
   Desc: Add two different blast annotation lines to the features where
         ID attribute = queryID:
-        IprDomains="IPR:IPR000644|S:1|E:134|D:Cystathionine beta-synthase, core"
+        ipr_domains="IPR:IPR000644|S:1|E:134|D:Cystathionine beta-synthase, 
+                    core"
         Ontology_term="GO:XXXXXXX"        
 
   Ret: A hashref. where key=line and value= arrayref of gffline
@@ -3177,7 +3178,7 @@ sub add_ipr_annotations {
 
 	    if (scalar(@iprhits) > 0) {
 	    
-		my $ipr_attr = ";IprDomains=" . join(",", @iprhits);
+		my $ipr_attr = ";ipr_domains=" . join(",", @iprhits);
 		$attr .= $ipr_attr;
 	    }
 	    
