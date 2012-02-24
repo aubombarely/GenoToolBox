@@ -3048,6 +3048,16 @@ sub synthesize_function {
 	    $func = ucfirst($base);
 	}
 	$func =~ s/^\s+//;
+
+	## Finally, it will clean the function of reserved characters such as
+	## , = or ;, changing them with escape sign
+
+	while ($func =~ m/(,|=|;)/ && $func !~ m/\\(,|=|;)/) {
+	
+	    $func =~ s/,/%2C/;
+	    $func =~ s/=/%3D/;
+	    $func =~ s/;/%3B/;
+	}
     }    
  
     return $func;
