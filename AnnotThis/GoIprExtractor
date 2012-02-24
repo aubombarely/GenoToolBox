@@ -1,0 +1,244 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GoIprExtractor
+ Script extract GO terms from an InterPro raw result file
+
+=cut
+
+=head1 SYPNOSIS
+
+ GoIprExtractor [-h][-V] -i <ipr_result> [-o <output>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<ipr_result>                   InterPro raw result file (mandatory)
+
+=item -o
+
+B<output>                       Output filename (by default STDOUT)
+
+=item -V
+
+B<be_verbose>                   be verbose (print status and warnings)
+
+=item -h
+
+B<help>                         print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script extraxt GO terms from a InterPro results raw file, producing
+ an output with column_1=ID, column_2=GOTerm, column_3=GODescription and
+ column_4=Type (BP=Biological process; CC=Cellular Component; MF=Molecular
+ Function)
+
+ To remove the redundancy, the following combination can be used:
+ 
+ GoIprExtractor -i <ipr_result> | sort -u > output 
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ GoIprExtractor
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+
+
+our ($opt_i, $opt_o, $opt_V, $opt_h);
+getopts("i:o:Vh");
+
+if (!$opt_i && !$opt_o && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+my $input = $opt_i ||
+    die("\nERROR: -i <ipr_result> was not supplied to the script.\n\n");
+
+my $I = `cut -f1 $input | wc -l`;
+chomp($I);
+
+if ($opt_V) {
+    print STDERR "\n\nProcessing $input with $I lines\n";
+}
+
+my $i = 0;
+open my $ifh, '<', $input;
+
+my $ofh;
+if ($opt_o) {
+
+    open $ofh, '>', $opt_o;
+}
+
+my ($goline_c, $go_c, $nogo_c) = (0, 0, 0);
+
+while(<$ifh>) {
+    $i++;
+    chomp($_);
+    $_ =~ s/\s+$//;
+
+    if ($opt_V) {
+    
+	print STDERR "\tProcessing Line:$i of $I lines            \r";
+    }
+
+    my @data = split(/\t/, $_);
+    my $coln = scalar(@data);
+
+    if ($coln < 13 && $coln > 14) {
+    
+	if ($opt_V) {
+	    
+	    print STDERR "\nWARNING: $i line doesnt have 13 or 14 columns ";
+	    print STDERR "($coln). Skipping Line.\n";
+	}
+    }
+    else {
+    
+	my $id = $data[0];
+	my $goline = $data[13];
+
+	if (defined $goline) {
+	
+	    $goline_c++;
+
+	    ## Go terms can have commas inside the description so
+	    ## it will replace ,Biological Process ,Cellular Component or
+	    ## ,Molecular Function for \tBP=, \tCC= or \tMF.
+	    $goline =~ s/,\s+Biological Process:/\tBP=/g;
+	    $goline =~ s/,\s+Cellular Component:/\tCC=/g;
+	    $goline =~ s/,\s+Molecular Function:/\tMF=/g;
+
+	    ## Also it will replace the first term
+	    $goline =~ s/^Biological Process:/BP=/g;
+	    $goline =~ s/^Cellular Component:/CC=/g;
+	    $goline =~ s/^Molecular Function:/MF=/g;
+
+	    my @go = split(/\t/, $goline);
+
+	    foreach my $go (sort @go) {
+	    
+		## Each go term will have the format
+		## AA=Description (GO:XXXXXXX)
+
+		if ($go =~ m/^(..)=\s+(.+)\s+\((GO:\d+)\)$/) {
+
+		    my $gotype = $1;
+		    my $godesc = $2;
+		    my $goterm = $3;
+		    $go_c++;
+		
+		    if (defined $ofh) {
+		
+			print $ofh "$id\t$goterm\t$godesc\t$gotype\n";
+		    }
+		    else {
+		    
+			print STDOUT "$id\t$goterm\t$godesc\t$gotype\n";
+		    }
+		}
+		else {
+		
+		    if ($opt_V) {
+			print STDERR "\nWARNING: Line=$i, has not GO term in ";
+			print STDERR "right format (AA=Description ";
+			print STDERR "(GO:XXXXXXXX)) ($go)\n\n";
+		    }
+		}
+	    }
+	}
+	else {
+	
+	    $nogo_c++;
+	}
+    }
+}
+if ($opt_V) {
+    print STDERR "\n\nStats:\n\tLines GO Terms:\t\t$goline_c\n";
+    print STDERR "\tGO Terms Printed:\t$go_c\n";
+    print STDERR "\tLines without GO Terms:\t$nogo_c";
+    print STDERR "\nDone !\n\n";
+}
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+       This script extraxt GO terms from a InterPro results raw file, producing
+     an output with column_1=ID, column_2=GOTerm, column_3=GODescription and
+     column_4=Type (BP=Biological process; CC=Cellular Component; MF=Molecular
+     Function)
+
+       To remove the redundancy, the following combination can be used:
+ 
+          GoIprExtractor -i <ipr_result> | sort -u > output 
+
+    Usage:
+      
+        GoIprExtractor [-h][-V] -i <ipr_result> [-o <output>]
+      
+    Flags:
+
+      -i <ipr_result>                   InterPro raw result file (mandatory)
+      -o <output>                       Output filename (by default STDOUT)
+      -V <be_verbose>                   be verbose (print status and warnings)
+      -h <help>                         print the help
+
+EOF
+exit (1);
+}
+
+
+
+
+
+
+
+
+
+####
+1; #
+####
