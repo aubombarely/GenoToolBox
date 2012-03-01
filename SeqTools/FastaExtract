@@ -12,7 +12,7 @@
  FastaExtract.pl [-h] -f <input_fasta_file> [-o output_basename]
                        [-i <extract_by_id>] [-l <extract_by_length>] 
                        [-r <extract_by_regexp>]
-                       [-v] [-C] [-R]
+                       [-v] [-C] [-R] [-S]
 
 =head2 I<Flags:>
 
@@ -48,6 +48,10 @@ B<cut_sequence>           cut a part of the sequence extracted (coordinates)
 
 B<revcom>                 return reverse complemetary of the sequence
 
+=item -S
+
+B<one_file_per_read>      split the output to one file per read
+
 =item -v
 
 B<invert_selection>       invert the selection
@@ -82,6 +86,9 @@ B<help>                   print the help
 
       fasta_extract.pl -f test.fasta -r 'AAAAAAAAAA$' > seq_with_poliA.fasta
 
+   To create one file per read, use -S option, in this case -o will be 
+   overwrite with sequence id name
+
 =cut
 
 =head1 AUTHORS
@@ -104,10 +111,11 @@ use warnings;
 use Getopt::Std;
 use Bio::SeqIO;
 
-our ($opt_f, $opt_o, $opt_i, $opt_l, $opt_r, $opt_v, $opt_C, $opt_R, $opt_h);
-getopts("f:o:i:l:r:vCRh");
+our ($opt_f, $opt_o, $opt_i, $opt_l, $opt_r, $opt_v, $opt_C, $opt_R, $opt_S, 
+     $opt_h);
+getopts("f:o:i:l:r:vCRSh");
 if (!$opt_f && !$opt_o && !$opt_i && !$opt_l && !$opt_r && !$opt_v && !$opt_C 
-    && !$opt_R && !$opt_h) {
+    && !$opt_R && !$opt_S && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -159,23 +167,25 @@ if (defined $idfile) {
 
 	## It will ignore the duplications overwritting the ids
 
-	$ids{$data[0]} = 1;
-	if ($opt_C && defined $data[1] && defined $data[2]) {
-	    if ($data[2] <= $data[1]) {
-		my $err = "ERROR: end trim coord:$data[2] should be lower ";
-		$err .= "than start trim coord:$data[1]\n";
-		die($err);
-	    }
-
-	    my $coords_href = { start => $data[1], end => $data[2] };
-	    if (exists $trims{$data[0]}) {
+	if (defined $data[0]) {
+	    $ids{$data[0]} = 1;
+	    if ($opt_C && defined $data[1] && defined $data[2]) {
+		if ($data[2] <= $data[1]) {
+		    my $err = "ERROR: end trim coord:$data[2] should be lower ";
+		    $err .= "than start trim coord:$data[1]\n";
+		    die($err);
+		}
 		
-		push @{$trims{$data[0]}}, $coords_href;
+		my $coords_href = { start => $data[1], end => $data[2] };
+		if (exists $trims{$data[0]}) {
+		    
+		    push @{$trims{$data[0]}}, $coords_href;
+		}
+		else {
+		    $trims{$data[0]} = [$coords_href];
+		}
+		$trimsc++;
 	    }
-	    else {
-		$trims{$data[0]} = [$coords_href];
-	    }
-	    $trimsc++;
 	}
     }
 
@@ -199,17 +209,19 @@ my $inio = Bio::SeqIO->new(
 ## It will print the sequences in STDOUT by default
 
 my $outio;
-if (defined $out) {
+unless (defined $opt_S) {
+    if (defined $out) {
 
-    my $outfasta = $out . '.fasta';
-
-    $outio = Bio::SeqIO->new( 
-	                      -file   => ">$outfasta",
-	                      -format => 'fasta'
-	                    );	
-}
-else {
-    $outio = Bio::SeqIO->new( -format => 'fasta' );
+	my $outfasta = $out;
+	
+	$outio = Bio::SeqIO->new( 
+	    -file   => ">$outfasta",
+	    -format => 'fasta'
+	    );	
+    }
+    else {
+	$outio = Bio::SeqIO->new( -format => 'fasta' );
+    }
 }
 
 my $s = 0;
@@ -272,7 +284,23 @@ while (my $seqobj = $inio->next_seq()) {
 		    if ($opt_R) {
 			$newseq = $newseq->revcom();
 		    }
-		    $outio->write_seq($newseq);
+
+		    if ($opt_S) {
+		    
+			my $outs_fasta = $id . '.fasta';
+			if (defined $out) {
+			    $outs_fasta = $out . '.' . $id . '.fasta';
+			}
+			my $s_outio = Bio::SeqIO->new( 
+			    -file   => ">$outs_fasta",
+			    -format => 'fasta'
+			    );
+			$s_outio->write_seq($newseq);
+		    }
+		    else {
+		    
+			$outio->write_seq($newseq);
+		    }
 		    $c++;
 		}
 	    }
@@ -282,7 +310,23 @@ while (my $seqobj = $inio->next_seq()) {
 	    if ($opt_R) {
 		$seqobj = $seqobj->revcom();
 	    }
-	    $outio->write_seq($seqobj);
+
+	    if ($opt_S) {
+		    
+		my $outs_fasta = $id . '.fasta';
+		if (defined $out) {
+		    $outs_fasta = $out . '.' . $id . '.fasta';
+		}
+		my $s_outio = Bio::SeqIO->new( 
+		    -file   => ">$outs_fasta",
+		    -format => 'fasta'
+		    );
+		$s_outio->write_seq($seqobj);
+	    }
+	    else {
+
+		$outio->write_seq($seqobj);
+	    }
 	    $c++;
 	}
     }
@@ -321,11 +365,14 @@ sub help {
 
           3) As regular expression to match with the id (-r <regexp>)
 
+       To create one file per read, use -S option, in this case -o will be 
+       overwrite with sequence id name
+
     Usage:
      
       FastaExtract.pl [-h] -f <input_fasta_file> [-o <output_basename>] 
                        [-i <filter_by_id>] [-l <filter_by_length>] 
-	               [-r <filter_by_regexp>] [-v] [-C]
+	               [-r <filter_by_regexp>] [-v] [-C] [-S]
       
     Examples:
 
@@ -340,12 +387,14 @@ sub help {
     Flags:
 
       -f <input_fasta_file>       input fasta file (mandatory)
-      -o <output_basename>        output basename (by default it will printed as stdout)
+      -o <output_basename>        output basename (by default it will printed 
+                                  as stdout)
       -i <extract_by_id>          filename to extract sequences by id
       -l <extract_by_length>      integer to extract sequences by length     
       -r <regexp>                 regular expression to extract the sequences
       -C <enable_trimming>        trim seqs according -i file.
       -R <revcom>                 get reverse complementary
+      -S <onefile_per_read>       split the output as one file per read
       -v <invert_selection>       invert the selection
       -h <help>                   print the help
      
