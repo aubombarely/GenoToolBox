@@ -163,25 +163,25 @@ my $max = $length{$ord_ids[0]};
 my $min = $length{$ord_ids[-1]};
 my $avg = $total_length / $total_seq;
 
-print STDERR "\n\n==========================================================";
-print STDERR "\n= REPORT:                                                =\n";
-print STDERR "==========================================================\n";
-print STDERR "Sequence Count:\t$total_seq sequences\n";
-print STDERR "Total Length:\t$total_length bp\n";
-print STDERR "Longest sequence:\t$max bp\t(ID = $ord_ids[0])\n";
-print STDERR "Shortest sequence:\t$min bp\t\t(ID = $ord_ids[-1])\n";
-print STDERR "Average length:\t$avg bp\n";
-print STDERR "N95 length:\t$N95l bp\n";
-print STDERR "N95 index:\t$N95i sequences\n";
-print STDERR "N90 length:\t$N90l bp\n";
-print STDERR "N90 index:\t$N90i sequences\n";
-print STDERR "N75 length:\t$N75l bp\n";
-print STDERR "N75 index:\t$N75i sequences\n";
-print STDERR "N50 length:\t$N50l bp\n";
-print STDERR "N50 index:\t$N50i sequences\n";
-print STDERR "N25 length:\t$N25l bp\n";
-print STDERR "N25 index:\t$N25i sequences\n";
-print STDERR "==========================================================\n";
+print STDOUT "\n\n==========================================================";
+print STDOUT "\n= REPORT:                                                =\n";
+print STDOUT "==========================================================\n";
+print STDOUT "Sequence Count:\t$total_seq sequences\n";
+print STDOUT "Total Length:\t$total_length bp\n";
+print STDOUT "Longest sequence:\t$max bp\t(ID = $ord_ids[0])\n";
+print STDOUT "Shortest sequence:\t$min bp\t\t(ID = $ord_ids[-1])\n";
+print STDOUT "Average length:\t$avg bp\n";
+print STDOUT "N95 length:\t$N95l bp\n";
+print STDOUT "N95 index:\t$N95i sequences\n";
+print STDOUT "N90 length:\t$N90l bp\n";
+print STDOUT "N90 index:\t$N90i sequences\n";
+print STDOUT "N75 length:\t$N75l bp\n";
+print STDOUT "N75 index:\t$N75i sequences\n";
+print STDOUT "N50 length:\t$N50l bp\n";
+print STDOUT "N50 index:\t$N50i sequences\n";
+print STDOUT "N25 length:\t$N25l bp\n";
+print STDOUT "N25 index:\t$N25i sequences\n";
+print STDOUT "==========================================================\n";
 
 
 if (defined $out) {
