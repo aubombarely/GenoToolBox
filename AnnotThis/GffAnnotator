@@ -241,7 +241,7 @@ B<help>                   print the help
  chromosome,ultracontig,supercontig,contig,gene,transcript,mRNA,exon,CDS,
  polypeptide,polypeptide_domain,five_prime_UTR,three_prime_UTR,ncRNA,tRNA,
  rRNA,miRNA,snoRNA,snRNA,pseudogene,pseudogenic_exon,pseudogenic_transcript,
- repeat_region,match
+ repeat_region,match,match_part
 
 =cut
 
@@ -608,7 +608,7 @@ sub help {
      chromosome,ultracontig,supercontig,contig,gene,transcript,mRNA,exon,CDS,
      polypeptide,polypeptide_domain,five_prime_UTR,three_prime_UTR,ncRNA,tRNA,
      rRNA,miRNA,snoRNA,snRNA,pseudogene,pseudogenic_exon,pseudogenic_transcript,
-     repeat_region,match
+     repeat_region,match,match_part
 
     Usage:
      
@@ -1255,6 +1255,7 @@ sub default_soterms {
 	pseudogenic_transcript => 'SO:0000516',
 	repeat_region          => 'SO:0000657',
 	match                  => 'SO:0000343',
+	match_part             => 'SO:0000039',
     };
 
     return $soterms_href;
