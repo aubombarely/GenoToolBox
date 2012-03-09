@@ -241,7 +241,8 @@ B<help>                   print the help
  chromosome,ultracontig,supercontig,contig,gene,transcript,mRNA,exon,CDS,
  polypeptide,polypeptide_domain,five_prime_UTR,three_prime_UTR,ncRNA,tRNA,
  rRNA,miRNA,snoRNA,snRNA,pseudogene,pseudogenic_exon,pseudogenic_transcript,
- repeat_region,match,match_part
+ repeat_region,match,match_part,expressed_sequence_match,protein_match,
+ translated_nucleotide_match
 
 =cut
 
@@ -608,7 +609,8 @@ sub help {
      chromosome,ultracontig,supercontig,contig,gene,transcript,mRNA,exon,CDS,
      polypeptide,polypeptide_domain,five_prime_UTR,three_prime_UTR,ncRNA,tRNA,
      rRNA,miRNA,snoRNA,snRNA,pseudogene,pseudogenic_exon,pseudogenic_transcript,
-     repeat_region,match,match_part
+     repeat_region,match,match_part,expressed_sequence_match,protein_match,
+     translated_nucleotide_match
 
     Usage:
      
@@ -1231,31 +1233,34 @@ sub default_soterms {
     ## These SO terms come from the SO version 1.319 (2012-02-08)
 
     my $soterms_href = {
-	chromosome             => 'SO:0000340',
-	ultracontig            => 'SO:0000719',
-	supercontig            => 'SO:0000148',
-	contig                 => 'SO:0000149',
-	gene                   => 'SO:0000704',
-	transcript             => 'SO:0000673',
-	mRNA                   => 'SO:0000234',
-	exon                   => 'SO:0000147',
-	CDS                    => 'SO:0000316',
-	polypeptide            => 'SO:0000104',
-	polypeptide_domain     => 'SO:0000417',
-	five_prime_UTR         => 'SO:0000204',
-	three_prime_UTR        => 'SO:0000205',  
-	ncRNA                  => 'SO:0000655',
-	tRNA                   => 'SO:0000253', 
-	rRNA                   => 'SO:0000252',
-	miRNA                  => 'SO:0000276',
-	snoRNA                 => 'SO:0000275',
-	snRNA                  => 'SO:0000274',
-	pseudogene             => 'SO:0000336',
-	pseudogenic_exon       => 'SO:0000507', 
-	pseudogenic_transcript => 'SO:0000516',
-	repeat_region          => 'SO:0000657',
-	match                  => 'SO:0000343',
-	match_part             => 'SO:0000039',
+	chromosome                  => 'SO:0000340',
+	ultracontig                 => 'SO:0000719',
+	supercontig                 => 'SO:0000148',
+	contig                      => 'SO:0000149',
+	gene                        => 'SO:0000704',
+	transcript                  => 'SO:0000673',
+	mRNA                        => 'SO:0000234',
+	exon                        => 'SO:0000147',
+	CDS                         => 'SO:0000316',
+	polypeptide                 => 'SO:0000104',
+	polypeptide_domain          => 'SO:0000417',
+	five_prime_UTR              => 'SO:0000204',
+	three_prime_UTR             => 'SO:0000205',  
+	ncRNA                       => 'SO:0000655',
+	tRNA                        => 'SO:0000253', 
+	rRNA                        => 'SO:0000252',
+	miRNA                       => 'SO:0000276',
+	snoRNA                      => 'SO:0000275',
+	snRNA                       => 'SO:0000274',
+	pseudogene                  => 'SO:0000336',
+	pseudogenic_exon            => 'SO:0000507', 
+	pseudogenic_transcript      => 'SO:0000516',
+	repeat_region               => 'SO:0000657',
+	match                       => 'SO:0000343',
+	match_part                  => 'SO:0000039',
+	expressed_sequence_match    => 'SO:0000102',
+	protein_match               => 'SO:0000349',
+	translated_nucleotide_match => 'SO:0000181',
     };
 
     return $soterms_href;
