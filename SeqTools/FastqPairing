@@ -1,0 +1,322 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ FastqPairing.pl
+ Tool to pair two fastq files
+
+=cut
+
+=head1 SYPNOSIS
+
+ FastqPairing.pl [-h] -a <first_fastq_file> -b <second_fastq_file>
+                      -o <output_basename> [-V]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -a
+
+B<first_fastq_file>       1st fastq file (mandatory)
+
+=item -b
+
+B<second_fastq_file>      2nd fastq file (mandatory)
+
+=item -o
+
+B<output_basename>        output basename (mandatory)  
+
+=item -V
+
+B<be_verbose>             print status messages
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script syncronize two fastq file checking ids and producing three
+ files:
+
+  + output.pair1, with the pair1 paired sequences
+  + output.pair2, with the pair2 paired sequences
+  + output.single, with the unpaired sequences
+
+ The script parse first the first file, getting the IDs and removing the pair
+ tag based in fastq Illumina format:
+
+ * Cassava1.7 or lower:
+   @HWUSI-EAS100R:6:73:941:1973#0/1
+   @HWUSI-EAS100R:6:73:941:1973
+ 
+ * Cassava1.8
+   @EAS139:136:FC706VJ:2:2104:15343:197393 1:Y:18:ATCACG
+   @EAS139:136:FC706VJ:2:2104:15343:197393
+
+ After that it will parse the second file adding the matched IDs to
+ output.pair2 and the unmatched sequences to the output.single. It will keep
+ the ids to run the same process with the first file adding the matched 
+ sequences to the output.pair1 and the unmatched to the output.single file.
+
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ FastqPairing.pl
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Bio::SeqIO;
+
+our ($opt_a, $opt_b, $opt_o, $opt_V, $opt_h);
+getopts("a:b:o:Vh");
+if (!$opt_a && !$opt_b && !$opt_o && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Get the arguments and check them
+
+my $fastq_a = $opt_a || 
+    die("INPUT ARG. ERROR: -a <first_fastq> argument was not supplied.\n");
+my $fastq_b = $opt_b || 
+    die("INPUT ARG. ERROR: -b <second_fastq> argument was not supplied.\n");
+my $outbase = $opt_o || 
+    die("INPUT ARG. ERROR: -o <output_basename> argument was not supplied.\n");
+
+
+## 1) Extract the IDs from the first file
+
+if ($opt_V) {
+    my $date = `date`;
+    chomp($date);
+    print STDERR "\n\n";
+    print STDERR "############################################################";
+    print STDERR "\n## Starting FastqPairing ($date) ##\n";
+    print STDERR "############################################################";
+    print STDERR "\n\n1) Sequence ID extraction\n\n";
+}
+ 
+
+open my $ifh, '<', $fastq_a;
+my $A = 0;
+if ($opt_V) {
+
+    $A = `grep -c "@" $fastq_a`;
+    chomp($A);
+}
+
+my $a = 0;
+my %ids = ();
+while (<$ifh>) {
+
+    chomp($_);
+    $a++;
+    if ($opt_V) {
+	print STDERR "\tExtracting ID for line $a of $A               \r";
+    }
+
+    if ($_ =~ m/^@/) {
+	if ($_ =~ m/^@(.+?)#.+$/) {                ## Cassava1.7 of lower
+	    $ids{$1} = 1;
+	}
+	elsif ($_ =~ m/^@(.+?)\s+.+$/) {           ## Cassava1.8
+	    $ids{$1} = 1;
+	}
+	else {
+	    $ids{$_} = 1;
+	}
+    }
+}
+
+if ($opt_V) {
+    
+    my $a_count = scalar(keys %ids);
+    print STDERR "\n\n\t$a_count IDs were extracted from $fastq_a file\n\n";
+}
+
+## 2) Check the second file and add the sequences to the different files
+
+my $seqio_b = Bio::SeqIO->new( -file   => $fastq_b, -format => 'fastq' );
+my $B = 0;
+if ($opt_V) {
+
+    $B = `grep -c "@" $fastq_b`;
+    chomp($B);
+    print STDERR "\n\n2) Second pair file parsing\n\n";
+}
+
+my $outpair1 = $outbase . '.pair1.fq';
+my $outpair2 = $outbase . '.pair2.fq';
+my $outsingle = $outbase . '.single.fq';
+
+my $seqio_p1 = Bio::SeqIO->new( -file   => ">$outpair1", -format => 'fastq' );
+my $seqio_p2 = Bio::SeqIO->new( -file   => ">$outpair2", -format => 'fastq' );
+my $seqio_sg = Bio::SeqIO->new( -file   => ">$outsingle", -format => 'fastq' );
+
+my $b = 0;
+my %pair_ids = ();
+while ( my $seqobj = $seqio_b->next_seq() ) {
+
+    $b++;
+    if ($opt_V) {
+	print STDERR "\tParsing sequence $b of $B               \r";
+    }
+
+    my $id = $seqobj->id();
+    my $trimid = $id;
+    if ($id =~ m/^(.+?)#.+$/) {                ## Cassava1.7 of lower
+	$trimid = $1;
+    }
+    elsif ($id =~ m/^(.+?)\s+.+$/) {           ## Cassava1.8
+	$trimid = $1;
+    }
+
+    if (exists $ids{$trimid}) {
+    
+	$seqio_p2->write_seq($seqobj);
+	$pair_ids{$trimid} = 1;
+    }
+    else {
+	$seqio_sg->write_seq($seqobj);
+    }
+}
+
+if ($opt_V) {
+    
+    my $p2_count = scalar(keys %pair_ids);
+    print STDERR "\n\n\t$p2_count sequences were added to pair2 file\n\n";
+}
+
+## 3) Check the first file and get the sequences
+
+my $seqio_a = Bio::SeqIO->new( -file   => $fastq_a, -format => 'fastq' );
+if ($opt_V) {
+
+    print STDERR "\n\n3) First pair file parsing\n\n";
+}
+
+my ($c, $c_count) = (0, 0);
+while ( my $seqobj = $seqio_a->next_seq() ) {
+
+    $c++;
+    if ($opt_V) {
+	print STDERR "\tParsing sequence $c of $A               \r";
+    }
+
+    my $id = $seqobj->id();
+    my $trimid = $id;
+    if ($id =~ m/^(.+?)#.+$/) {                ## Cassava1.7 of lower
+	$trimid = $1;
+    }
+    elsif ($id =~ m/^(.+?)\s+.+$/) {           ## Cassava1.8
+	$trimid = $1;
+    }
+
+    if (exists $pair_ids{$trimid}) {
+    
+	$seqio_p1->write_seq($seqobj);
+	$c_count++;
+    }
+    else {
+	$seqio_sg->write_seq($seqobj);
+    }
+}
+
+if ($opt_V) {
+    
+    print STDERR "\n\n\t$c_count sequences were added to pair1 file\n\n";
+    my $date = `date`;
+    chomp($date);
+    print STDERR "\n\n";
+    print STDERR "############################################################";
+    print STDERR "\n## Finished FastqPairing ($date) ##\n";
+    print STDERR "############################################################";
+    print STDERR "\n\n";
+}
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+     This script syncronize two fastq file checking ids and producing three
+     files:
+
+     + output.pair1, with the pair1 paired sequences
+     + output.pair2, with the pair2 paired sequences
+     + output.single, with the unpaired sequences
+
+     The script parse first the first file, getting the IDs and removing the 
+     pair tag based in fastq Illumina format:
+
+      * Cassava1.7 or lower:
+        '\@HWUSI-EAS100R:6:73:941:1973#0/1'
+        '\@HWUSI-EAS100R:6:73:941:1973'
+ 
+      * Cassava1.8
+        '\@EAS139:136:FC706VJ:2:2104:15343:197393 1:Y:18:ATCACG'
+        '\@EAS139:136:FC706VJ:2:2104:15343:197393'
+
+     After that it will parse the second file adding the matched IDs to
+     output.pair2 and the unmatched sequences to the output.single. It will keep
+     the ids to run the same process with the first file adding the matched 
+     sequences to the output.pair1 and the unmatched to the output.single file.
+
+    Usage:
+     
+      FastqPairing.pl [-h] -a <first_fastq_file> -b <second_fastq_file>
+                           -o <output_basename> [-V]
+
+    Flags:
+
+      -a <first_fastq_file>       1st fastq file (mandatory)
+      -b <second_fastq_file>      2nd fastq file (mandatory)
+      -o <output_basename>        output basename (mandatory)  
+      -V <be_verbose>             print status messages
+      -h <help>                   print the help
+     
+
+EOF
+exit (1);
+}
+
