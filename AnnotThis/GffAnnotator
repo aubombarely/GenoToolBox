@@ -385,8 +385,9 @@ if ($opt_a) {
     my @apairs = split(/,/, $opt_a);
     my %gblast_annot = ();
 
+    my $blastfilter = $opt_f || 'evalue<1e-20';
     my %blastfilter = parse_blastfilter($opt_f);
-
+    
     foreach my $apair (@apairs) {
     
 	if ($apair =~ m/^(.+)=(.+)$/) {
