@@ -110,6 +110,7 @@ use threads;
 
 use File::Basename;
 use File::Spec;
+use File::Path qw(remove_tree);
 use Getopt::Std;
 use Math::BigFloat;
 use Bio::SeqIO;
@@ -166,6 +167,9 @@ else {
 our $blat_exec = $ENV{BLAT_EXEC} || 'blat';
 
 my $blat_h = `$blat_exec`;
+my @blatopt = ();
+my $outtype = 'psl';                          ## By default the format is psl
+my $noheader = 0;
 
 unless (defined $blat_h) {
     die("ERROR: No blat executable was accessible.More info at -h argument.\n");
@@ -203,6 +207,10 @@ else {
 		unless (exists $blat_args{$1}) {
 		    die("ERROR: $1 is not a blat valid option.\n");
 		}
+
+		if ($1 eq '-out') {                     ## Catch the format
+		    $outtype = $2;
+		}
 	    }
 	    else {
 		
@@ -212,7 +220,13 @@ else {
 		if ($blat_args{$blat_arg} ne 1) {
 		    die("ERROR: $blat_arg doesnt have format $blat_arg=val.\n");
 		}
+
+		if ($blat_arg eq '-noHead') {           ## Switch noheader var.
+		    $noheader = 1;
+		}
 	    }
+
+	    push @blatopt, $blat_arg;
 	}
 	print STDERR "\tBlat options:\t\tOk\n";
     }
@@ -270,6 +284,7 @@ my $max_j = scalar(@dbfilelist) * scalar(@qufilelist);
 
 my @packages = ();
 my @jobs = ();
+my @outfiles = ();
 
 my ($j, $v) = (0, 0);
 
@@ -281,6 +296,8 @@ foreach my $dbfile (@dbfilelist) {
 	my $outfile = File::Spec->catfile($batchdir, $outbase);
 	my @files = ($dbfile, $qufile, $outfile);
 	push @jobs, \@files;
+	push @outfiles, $outfile;
+
 	$j++;
 
 	if ($v + 1 == $max_j || $j == $threads) {        ## It is the last job
@@ -297,8 +314,6 @@ foreach my $dbfile (@dbfilelist) {
 my $pcks = scalar(@packages);
 print STDERR "\tBatches have been organized in $pcks packages and $v jobs\n";
 
-
-
 my $j_exec = 0;
 my $p = 0;
 
@@ -314,9 +329,18 @@ foreach my $pack (@packages) {
 
     while($n < $threads && $j_exec <= $v && $j_run < $all_j)  {	
 
+	my @runblatopt = @blatopt;
+
+	if ($opt_H && $j_run > 0) {     ## Means that it is not the first job
+
+	    if ($outtype =~ m/^psl/ && $noheader == 0) {   ## Out=psl or pslx
+	    
+		push @runblatopt, '-noHead';
+	    }
+	}
 	$j_run++;
 	my @jobfiles = @{$exjobs[$n]};
-	my $th_proc = threads->create(\&run_batchblat, @jobfiles, $opt_b);
+	my $th_proc = threads->create(\&run_batchblat, @jobfiles, \@runblatopt);
 	push @th_procs, $th_proc;
 	$n++;
     }
@@ -336,6 +360,33 @@ foreach my $pack (@packages) {
 
 print STDERR "\t$j_exec jobs have been executed in $p packages.\n";
 
+print STDERR "\n\n4) Joining the batch jobs results\n\n";
+
+my $f_outfile = $outbase . '.blatresult.' . $outtype;
+
+## It will simply concatenate the files.
+
+my $cat_cmd = 'cat ' . join(" ", @outfiles) . " > $f_outfile";
+system($cat_cmd);
+
+print STDERR "\tOutfile:\t$f_outfile\n";
+
+unless ($opt_K) {
+
+    remove_tree($batchdir, { verbose => 0, safe => 1 });
+    print STDERR "\tBatch files have been removed\n";
+}
+else {
+    print STDERR "\tKeep batch files:\tEnabled\n";
+    print STDERR "\tBatch files stored at: $batchdir\n";
+}
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n#########################################################\n";
+print STDERR "## End of the MultiThreadBlat execution                ##\n";
+print STDERR "## $date                        ##\n";
+print STDERR "#########################################################\n\n";
 
 =head2 help
 
@@ -436,7 +487,7 @@ sub create_batches {
     }
     else {
 
-	my ($s, $b) = (0, 0);
+	my ($s, $b) = (1, 1);
 	my $basenm = basename($seqfile);
 	
 	my $outseq_io = '';
@@ -444,13 +495,14 @@ sub create_batches {
 	while(my $seq_o = $seq_io->next_seq() ) {
 
 	    ## Three posibilities:
-	    ## 1) SeqN == 0, create a new file
+	    ## 1) SeqN == 1, create a new file
 	    ## 2) SeqN < BatchSize, add sequences to the batch
 	    ## 3) SeqN == BatchSize, add the last sequence if is not the last
 	    ##    batch and set SeqN to zero to create a new file in th next
 	    ##    iteraction.
 
-	    if ($s == 0 ) {
+	    
+	    if ($s == 1 ) {
 	
 		my $newseqfile = File::Spec->catfile($dir, $basenm .'_sub'. $b);
 		$outseq_io = Bio::SeqIO->new( 
@@ -462,6 +514,11 @@ sub create_batches {
 		
 		push @seq_batch, $newseqfile;
 		print STDERR "\tCreated file batch: $newseqfile\n";
+
+		if ($batch_size == 1) {
+		    $s = 1;
+		    $b++;
+		}
 	    }
 	    elsif ($s < $batch_size) {
 		
@@ -473,7 +530,7 @@ sub create_batches {
 		$outseq_io->write_seq($seq_o);
 		
 		if ($b < $batches) {
-		    $s = 0;
+		    $s = 1;
 		}
 		$b++;
 	    }
@@ -504,13 +561,14 @@ sub run_batchblat {
 	die("ERROR: No qufile was supplied to run_batchblat");
     my $outfile = shift ||
 	die("ERROR: No outfile was supplied to run_batchblat");
-    my $arg = shift;
+    my $argaref = shift;
 
     my $cmd = "$blat_exec $dbfile $qufile";
     
-    if (defined $arg) {
-	$arg =~ s/,/ /g;
-	$cmd .= " $arg";
+    if (defined $argaref && ref($argaref) eq 'ARRAY') {
+
+	my $blatopts = join(" ", @{$argaref});
+	$cmd .= " $blatopts";
     }
     
     $cmd .= " $outfile";
@@ -518,6 +576,5 @@ sub run_batchblat {
     #print STDERR "\tRunning: $cmd\n";
     system($cmd);
  
-    #sleep(30);
     return 1;
 }
