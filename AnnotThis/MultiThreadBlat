@@ -1,0 +1,523 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ MultiThreadBlat
+ Script to split and run multiple blat process.
+
+=cut
+
+our $VERSION = '0.1';
+$VERSION = eval $VERSION;
+
+=head1 SYPNOSIS
+
+ MultiThreadBlat [-h] -d <database> -q <query> [-t <threads>] [-o <output>]
+                      [-b <blat_arguments>]
+                      [-x <database_batch>]
+                      [-y <query_batch>]
+                      [-K] [-H]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -d
+
+B<database>                     database sequence fasta file (mandatory)
+
+=item -q                        
+
+B<query>                        query sequence fasta file (mandatory)
+
+=item -t
+
+B<threads>                      number of threads (2 by default)
+
+=item -o
+
+B<output>                       output basename (multithread.blat by default)
+
+=item -b
+
+B<blat_arguments>               blat argument separated by commas
+
+=item -x
+
+B<database_batch>               number of batches for database (0 by default)
+
+=item -y
+
+B<query_batch>                  number of batched for query (-t by default)
+
+=item -K
+
+B<keep_all_files>               do not delete the batch files
+
+=item -H
+
+B<single_header>                run the first batch with header option (psl)
+
+=item -h
+
+B<help>                         print the help
+
+=item -v
+
+B<version>                      print version
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script run blat program splitting the query and database files in batches
+ using different threads.
+
+ Once blat is finished it joins all the results files and delete the batch
+ files if -K option is not used.
+
+ If -H option is used it will run the first batch with a header and the rest 
+ of the batches without (only for .psl output).
+
+ Note: Blat executable have to be in the system path. Alternatively the
+       $BLAT_EXEC environment variable can be used.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ MultiThreadBlat
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Config;
+use threads;
+
+use File::Basename;
+use File::Spec;
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::SeqIO;
+
+
+our ($opt_d, $opt_q, $opt_t, $opt_o, $opt_b, $opt_x, $opt_y, $opt_K, $opt_H,
+     $opt_h, $opt_v);
+getopts("d:q:t:o:b:x:y:KHhv");
+
+$Config{useithreads} or 
+    die('THREAD ERROR: Recompile Perl with threads to run this program.');
+
+if (!$opt_d && !$opt_q && !$opt_t && !$opt_o && !$opt_b && !$opt_x && !$opt_y 
+    && !$opt_K && !$opt_H && !$opt_h && !$opt_v) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+elsif ($opt_h) {
+    help();
+}
+elsif ($opt_v) {
+    print STDERR "\nMultiThreadBlat version: $VERSION\n\n";
+    exit(1);
+}
+
+my $date = `date`;
+chomp($date);
+
+print STDERR "\n\n#########################################################\n";
+print STDERR "## MultiThreadBlat version:$VERSION                         ##\n";
+print STDERR "## $date                        ##\n";
+print STDERR "#########################################################\n\n";
+
+## First argument checking
+
+print STDERR "0) Argument validation\n\n";
+
+my $dbseq = $opt_d;
+if (defined $dbseq) {
+    print STDERR "\tDatabase:\t\t$dbseq\n";
+}
+else {
+    die("ERROR: No -d <database> mandatory argument was supplied.\n\n");
+}
+
+my $quseq = $opt_q;
+if (defined $quseq) {
+    print STDERR "\tQuery:\t\t\t$quseq\n";
+}
+else {
+    die("ERROR: No -q <query> mandatory argument was supplied.\n\n");
+}
+
+our $blat_exec = $ENV{BLAT_EXEC} || 'blat';
+
+my $blat_h = `$blat_exec`;
+
+unless (defined $blat_h) {
+    die("ERROR: No blat executable was accessible.More info at -h argument.\n");
+}
+else {
+    print STDERR "\tBlat executable:\tOk\n";
+
+    ## Use the blat help to retrieve the options and check the arguments
+
+    if ($opt_b) {
+
+	my @blathelp = split(/\n/, $blat_h);
+	my %blat_args = ();
+	my $opt = 0;
+
+	foreach my $blat_hline (@blathelp) {
+	    
+	    if ($blat_hline =~ /options:/) {
+		$opt = 1;
+	    }
+	    	    
+	    if ($opt == 1 && $blat_hline =~ m/(\-\w+)=(.+?)\s+/) {
+		$blat_args{$1} = $2;
+	    }
+	    elsif ($opt == 1 && $blat_hline =~ m/(\-\w+?)\s+/) {
+		$blat_args{$1} = 1;
+	    }
+	}
+
+	my @blat_args = split(/,/, $opt_b);
+	foreach my $blat_arg (@blat_args) {
+	    
+	    if ($blat_arg =~ m/^(.+?)=(.+)$/) {
+
+		unless (exists $blat_args{$1}) {
+		    die("ERROR: $1 is not a blat valid option.\n");
+		}
+	    }
+	    else {
+		
+		unless (exists $blat_args{$blat_arg}) {
+		    die("ERROR: $blat_arg is not a blat valid option.\n");
+		}
+		if ($blat_args{$blat_arg} ne 1) {
+		    die("ERROR: $blat_arg doesnt have format $blat_arg=val.\n");
+		}
+	    }
+	}
+	print STDERR "\tBlat options:\t\tOk\n";
+    }
+    else {
+	print STDERR "\tBlat options:\t\tDefault\n";
+    }
+}
+
+my $threads = $opt_t || 2;
+if ($threads !~ m/^\d+$/) {
+    die("ERROR: -t <threads> is not an integer.\n");
+}
+else {
+    print STDERR "\tThreads:\t\t$threads\n";
+}
+
+my $outbase = $opt_o || 'multithread.blat';
+print STDERR "\tOutbase:\t\t$outbase\n";
+
+my $dbbch = $opt_x || 1;
+if ($dbbch !~ m/^\d+$/) {
+    die("ERROR: -x <database_batch> is not an integer.\n");
+}
+else {
+    print STDERR "\tdatabase batch:\t\t$dbbch\n";
+}
+
+my $qubch = $opt_y || 2;
+if ($qubch !~ m/^\d+$/) {
+    die("ERROR: -y <query_batch> is not an integer.\n");
+}
+else {
+    print STDERR "\tquery batch:\t\t$qubch\n";
+}
+
+my $batchdir = $outbase . '.batch';
+mkdir($batchdir);
+
+print STDERR "\n\n1) Creating database sequence batches\n\n";
+
+my @dbfilelist = create_batches($batchdir, $dbseq, $dbbch);
+
+print STDERR "\n\n2) Creating query sequence batches\n\n";
+
+my @qufilelist = create_batches($batchdir, $quseq, $qubch);
+
+print STDERR "\n\n3) Running the batch jobs\n\n";
+
+
+## It will divide the jobs in packages
+## based in the number of threads
+## It will be as many jobs in a package as threads have been especified.
+
+my $max_j = scalar(@dbfilelist) * scalar(@qufilelist);
+
+my @packages = ();
+my @jobs = ();
+
+my ($j, $v) = (0, 0);
+
+foreach my $dbfile (@dbfilelist) {
+    
+    foreach my $qufile (@qufilelist) {
+    
+	my $outbase = basename($dbfile).'.blat.'.basename($qufile).'.job'.$j;
+	my $outfile = File::Spec->catfile($batchdir, $outbase);
+	my @files = ($dbfile, $qufile, $outfile);
+	push @jobs, \@files;
+	$j++;
+
+	if ($v + 1 == $max_j || $j == $threads) {        ## It is the last job
+
+	    my @pack_jobs = @jobs;
+	    push @packages, \@pack_jobs;
+	    $j = 0;
+	    @jobs = ();
+	}
+	$v++;
+    }
+}
+
+my $pcks = scalar(@packages);
+print STDERR "\tBatches have been organized in $pcks packages and $v jobs\n";
+
+
+
+my $j_exec = 0;
+my $p = 0;
+
+foreach my $pack (@packages) {
+
+    $p++;
+    my @exjobs = @{$pack};
+    my ($n, $j_run) = (0, 0);
+    my @th_procs = ();
+
+    my $all_j = scalar(@exjobs);
+    print STDERR "\n\tRunning package $p ($threads threads)\n";
+
+    while($n < $threads && $j_exec <= $v && $j_run < $all_j)  {	
+
+	$j_run++;
+	my @jobfiles = @{$exjobs[$n]};
+	my $th_proc = threads->create(\&run_batchblat, @jobfiles, $opt_b);
+	push @th_procs, $th_proc;
+	$n++;
+    }
+
+    foreach my $th (@th_procs) {
+	my $th_id = $th->tid();
+	my $th_res = $th->join();
+
+	unless (defined($th_res)) {
+	    warning("\tExecution error for thread $th_id\n");
+	    my $error = $th->error();
+	    print "\n===== ERROR $th_id =====\n$error\n===================\n";
+	}
+	$j_exec++;
+    }
+}
+
+print STDERR "\t$j_exec jobs have been executed in $p packages.\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+      This script run blat program splitting the query and database files in 
+     batches using different threads.
+
+      Once blat is finished it joins all the results files and delete the batch
+     files if -K option is not used.
+
+      If -H option is used it will run the first batch with a header and the 
+     rest of the batches without (only for .psl output).
+
+    Note: 
+       
+      Blat executable have to be in the system path. Alternatively the
+      \$BLAT_EXEC environment variable can be used.
+
+    Usage:
+      
+       MultiThreadBlat [-h] -d <database> -q <query> 
+                       [-t <threads>] [-o <output>] [-b <blat_arguments>] 
+                       [-x <database_batch>] [-y <query_batch>] [-K] [-H]
+    Flags:
+     -d <database>              database sequence fasta file (mandatory)
+     -q <query>                 query sequence fasta file (mandatory)
+     -t <threads>               number of threads (2 by default)
+     -o <output>                output basename (multithread.blat by default)
+     -b <blat_arguments>        blat argument separated by commas
+     -x <database_batch>        number of batches for database (0 by default)
+     -y <query_batch>           number of batched for query (-t by default)
+     -K <keep_all_files>        do not delete the batch files
+     -H <single_header>         run the first batch with header option (psl)
+     -h <help>                  print this help
+     -v <version>               print the script version
+
+EOF
+exit (1);
+}
+
+=head2 create_batches
+
+  Usage: my @filelist = create_batches($dir, $seqfile, $batches)
+  Desc: create batch for a sequence file
+  Ret: an array with the list of subfiles
+  Args: $dir, dir to create the files
+        $seqfile, file to split
+        $batches, number of batches to create.
+  Side_Effects: die of something is wrong
+  Example: my @qufilelist = create_batches($batchdir, $quseq, $qubch);
+
+=cut
+
+sub create_batches {
+
+    my $dir = shift || 
+	die("ERROR: No dir was supplied to create_batches function.\n");
+    my $seqfile = shift ||
+	die("ERROR: No seqfile was supplied to create_batches function.\n");
+    my $batches = shift ||
+	die("ERROR: No batches was supplied to create_batches function.\n");
+
+    ## Check that the file exists with Bioperl and count seq
+
+    my $seq_io = Bio::SeqIO->new( -file => $seqfile, -format => 'fasta');
+    my $seqcount = `grep -c '^>' $seqfile`;
+    chomp($seqcount);
+
+    ## Calculate the size of the batch
+
+    my $batch_size = Math::BigFloat->new($seqcount / $batches)->bfround(0);
+    print STDERR "\tBatch size:\t$batch_size sequences\n";
+
+    ## Declare variables used in the batch
+
+    my @seq_batch = ();
+
+    if ($batches == 1) {
+
+	push @seq_batch, $seqfile;
+	print STDERR "\tNo batch requested for $seqfile\n";
+    }
+    else {
+
+	my ($s, $b) = (0, 0);
+	my $basenm = basename($seqfile);
+	
+	my $outseq_io = '';
+
+	while(my $seq_o = $seq_io->next_seq() ) {
+
+	    ## Three posibilities:
+	    ## 1) SeqN == 0, create a new file
+	    ## 2) SeqN < BatchSize, add sequences to the batch
+	    ## 3) SeqN == BatchSize, add the last sequence if is not the last
+	    ##    batch and set SeqN to zero to create a new file in th next
+	    ##    iteraction.
+
+	    if ($s == 0 ) {
+	
+		my $newseqfile = File::Spec->catfile($dir, $basenm .'_sub'. $b);
+		$outseq_io = Bio::SeqIO->new( 
+		    -file   => ">$newseqfile", 
+		    -format => 'fasta'
+		    );
+		$outseq_io->write_seq($seq_o);
+		$s++;
+		
+		push @seq_batch, $newseqfile;
+		print STDERR "\tCreated file batch: $newseqfile\n";
+	    }
+	    elsif ($s < $batch_size) {
+		
+		$outseq_io->write_seq($seq_o);
+		$s++;
+	    }
+	    else {
+		
+		$outseq_io->write_seq($seq_o);
+		
+		if ($b < $batches) {
+		    $s = 0;
+		}
+		$b++;
+	    }
+	}
+    }
+    return @seq_batch;    
+}
+
+=head2 run_batchblat
+
+  Usage: run_batchblat($dbfile, $qufile, $oufile, $arguments);
+  Desc: run blat with the specified parameters
+  Ret: nothing
+  Args: $dbfile, database filename
+        $qufile, query filename
+        $outfile, name for the outputfile
+        $arguments, as string separated by commas
+  Side_Effects: die of something is wrong
+  Example: run_batchblat($dbfile, $qufile, $oufile, $arguments);
+
+=cut
+
+sub run_batchblat {
+    
+    my $dbfile = shift ||
+	die("ERROR: No dbfile was supplied to run_batchblat");
+    my $qufile = shift ||
+	die("ERROR: No qufile was supplied to run_batchblat");
+    my $outfile = shift ||
+	die("ERROR: No outfile was supplied to run_batchblat");
+    my $arg = shift;
+
+    my $cmd = "$blat_exec $dbfile $qufile";
+    
+    if (defined $arg) {
+	$arg =~ s/,/ /g;
+	$cmd .= " $arg";
+    }
+    
+    $cmd .= " $outfile";
+
+    #print STDERR "\tRunning: $cmd\n";
+    system($cmd);
+ 
+    #sleep(30);
+    return 1;
+}
