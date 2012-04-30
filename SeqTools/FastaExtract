@@ -284,7 +284,7 @@ while (my $seqobj = $inio->next_seq()) {
 	    $sel = 1;
 	}
     }
-    if (scalar(keys %seqcond) > 0) {
+    if (scalar(keys %seqcond) > 0 && $lg > 0) {
     
 	my %seqcomp = ();
 
@@ -300,13 +300,16 @@ while (my $seqobj = $inio->next_seq()) {
 	    }
 	}
 
-	foreach my $chq (keys %seqcomp) {
+	my @composition = ();
+	foreach my $chq (sort {$a cmp $b} keys %seqcomp) {
 	    
 	    $seqcomp{$chq} = $seqcomp{$chq} * 100 / $lg;
+	    push @composition, $chq . '=' . $seqcomp{$chq};
 	}
 
 	my $cond_n = scalar(keys %seqcond);
 	my $cond_t = 0;
+
 	foreach my $cond (sort {$a cmp $b} keys %seqcond) {
 	
 	    my $sumval = 0;
@@ -325,6 +328,9 @@ while (my $seqobj = $inio->next_seq()) {
 	if ($cond_t == $cond_n) {
 	    $sel = 1;
 	}
+
+	#my $test = join(",", @composition);
+	#print STDERR "\nTESTCOMP (SEL:$sel): $id\t$test\n";
     }
 
     if ($opt_v) {
