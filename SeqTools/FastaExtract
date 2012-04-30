@@ -12,6 +12,7 @@
  FastaExtract.pl [-h] -f <input_fasta_file> [-o output_basename]
                        [-i <extract_by_id>] [-l <extract_by_length>] 
                        [-r <extract_by_regexp>]
+                       [-c <extract_by_composition>]
                        [-v] [-C] [-R] [-S]
 
 =head2 I<Flags:>
@@ -38,6 +39,10 @@ B<extract_by_length>      integer to extract sequences by length
 =item -r
 
 B<regexp>                 regular expression to extract the sequences
+
+=item -c
+
+B<extract_by_composition> by nucleotide content (for example: GC=50)
 
 =item -C
 
@@ -76,6 +81,8 @@ B<help>                   print the help
 
    3) As regular expression to match with the id (-r <regexp>)
 
+   4) By minimum nucleotide/aminoacid content in percentage (-c <composition>)
+
    Examples:
 
       fasta_extract.pl -f test.fasta -i id_file.txt > extract.fasta
@@ -85,6 +92,10 @@ B<help>                   print the help
       fasta_extract.pl -f test.fasta -r 'Sl' > sl_seq.fasta
 
       fasta_extract.pl -f test.fasta -r 'AAAAAAAAAA$' > seq_with_poliA.fasta
+
+      fasta_extract.pl -f test.fasta -c GC=50 > seq_GC50_omore.fasta
+
+      fasta_extract.pl -f test.fasta -c N=100 -v > seq_with_noNs.fasta
 
    To create one file per read, use -S option, in this case -o will be 
    overwrite with sequence id name
@@ -110,12 +121,14 @@ use warnings;
 
 use Getopt::Std;
 use Bio::SeqIO;
+use Bio::SeqUtils;
+use Bio::Tools::IUPAC;
 
-our ($opt_f, $opt_o, $opt_i, $opt_l, $opt_r, $opt_v, $opt_C, $opt_R, $opt_S, 
-     $opt_h);
-getopts("f:o:i:l:r:vCRSh");
-if (!$opt_f && !$opt_o && !$opt_i && !$opt_l && !$opt_r && !$opt_v && !$opt_C 
-    && !$opt_R && !$opt_S && !$opt_h) {
+our ($opt_f, $opt_o, $opt_i, $opt_l, $opt_c, $opt_r, $opt_v, $opt_C, $opt_R, 
+     $opt_S, $opt_h);
+getopts("f:o:i:l:c:r:vCRSh");
+if (!$opt_f && !$opt_o && !$opt_i && !$opt_l && !$opt_c && !$opt_r && !$opt_v 
+    && !$opt_C && !$opt_R && !$opt_S && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -139,8 +152,21 @@ if ($opt_C) {
     }
 }
 
-if (!$idfile && !$length_cf && !$regexp) {
-    die("EXTRACTION ARG. ERROR: No extract options were used (-i,-l,-r)\n");
+my %seqcond = ();
+if (defined $opt_c) {
+
+    my @conds = split(/,/, $opt_c);
+    foreach my $cond (@conds) {
+    
+	if ($cond =~ m/^(\w+)=(\d+)$/) {
+	
+	    $seqcond{$1} = $2;
+	}
+    }
+}
+
+if (!$idfile && !$length_cf && !$regexp && scalar(keys(%seqcond)) == 0) {
+    die("EXTRACTION ARG. ERROR: No extract options were used (-i,-l,-r,-c)\n");
 }
 
 my $out = $opt_o;
@@ -192,6 +218,9 @@ if (defined $idfile) {
     my $ids_count = scalar(keys %ids);
     print STDERR "\t$ids_count ids ($trimsc trims) were parsed from $idfile\n";
 }
+
+
+
 
 ## Open the input and the output fasta file
 
@@ -252,6 +281,48 @@ while (my $seqobj = $inio->next_seq()) {
 	    $sel = 1;
 	}
 	elsif ($seqobj->seq() =~ $regexp) {
+	    $sel = 1;
+	}
+    }
+    if (scalar(keys %seqcond) > 0) {
+    
+	my %seqcomp = ();
+
+	foreach my $ch (split(//, $seqobj->seq())) {
+	    
+	    if (exists $seqcomp{uc($ch)}) {
+	    
+		$seqcomp{uc($ch)}++;
+	    }
+	    else {
+	    
+		$seqcomp{uc($ch)} = 1;
+	    }
+	}
+
+	foreach my $chq (keys %seqcomp) {
+	    
+	    $seqcomp{$chq} = $seqcomp{$chq} * 100 / $lg;
+	}
+
+	my $cond_n = scalar(keys %seqcond);
+	my $cond_t = 0;
+	foreach my $cond (sort {$a cmp $b} keys %seqcond) {
+	
+	    my $sumval = 0;
+	    my @sumcond = split(//, $cond);
+	    foreach my $singcond (@sumcond) {
+		
+		if (exists $seqcomp{uc($singcond)}) {
+		    $sumval += $seqcomp{uc($singcond)};
+		}
+	    }
+	    if ($sumval >= $seqcond{$cond}) {
+		
+		$cond_t++;
+	    }	
+	}
+	if ($cond_t == $cond_n) {
 	    $sel = 1;
 	}
     }
@@ -365,6 +436,9 @@ sub help {
 
           3) As regular expression to match with the id (-r <regexp>)
 
+          4) By minimum nucleotide/aminoacid content in percentage 
+             (-c <composition>)
+
        To create one file per read, use -S option, in this case -o will be 
        overwrite with sequence id name
 
@@ -383,6 +457,10 @@ sub help {
       fasta_extract.pl -f test.fasta -r 'Sl' > sl_seq.fasta
 
       fasta_extract.pl -f test.fasta -r 'AAAAAAAAAA$' > seq_with_poliA.fasta
+ 
+      fasta_extract.pl -f test.fasta -c GC=50 > seq_GC50_omore.fasta
+
+      fasta_extract.pl -f test.fasta -c N=100 -v > seq_with_noNs.fasta
 
     Flags:
 
@@ -391,6 +469,7 @@ sub help {
                                   as stdout)
       -i <extract_by_id>          filename to extract sequences by id
       -l <extract_by_length>      integer to extract sequences by length     
+      -c <extract_by_composition> nt/aa min composition
       -r <regexp>                 regular expression to extract the sequences
       -C <enable_trimming>        trim seqs according -i file.
       -R <revcom>                 get reverse complementary
