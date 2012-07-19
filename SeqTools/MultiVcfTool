@@ -1,0 +1,879 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ MultiVcfTool.pl
+ Tool to manipulate and analyze Vcf files.
+
+=cut
+
+=head1 SYPNOSIS
+
+ MultiVcfTool [-h] -i <vcffiles> -c <coveragefiles> -o <outputbasename> 
+                   [-d <deepfilter>] [-q <qscorefilter>] [-g <groups>]
+                   [-f <outputformat>] [-p <ploidy>] [-m <max_markers>]
+                   [-s <num_structure_sets>] [-l <marker_list>] [-H]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<vcffiles>               input snp vcf files separated by commas as
+                          name=filename (mandatory)
+
+=item -c
+
+B<coveragefiles>          input coverage (3 columns) files separated by 
+                          commas as name=filename (mandatory) 
+
+=item -o
+
+B<outputbasename>         outputbasename (multivcf_out by default)
+
+=item -d
+
+B<deepfilter>             filter by min. deep (optional)
+
+=item -q
+
+B<qscorefilter>           filter by qscore (optional)
+
+=item -g
+
+B<groups>                 groups for analysis as groupname1=(name1,name2),
+                          groupname2=(name3,name4) (optional)
+
+=item -f
+
+B<outputformat>           outputformat (var.txt by default)
+
+=item -p
+
+B<ploidy>                 ploidy (an integer, 2 by default)
+
+=item -m
+
+B<max_markers>            max.number of markers selected for structure (def.all)
+
+=item -s
+
+B<num_struct_sets>        num. os structure sets to create with -m
+
+=item -l
+
+B<marker_list>            file with the marker list (incomp. with -m and -s)
+
+=item -H
+
+B<avoid_superheteroz>     avoid heterozygosity when it excess the polyploid.
+ 
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script parse multiple vcf files and creates a common file.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ MultiVcfTool
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use List::Util 'shuffle';
+
+our ($opt_i, $opt_c, $opt_o, $opt_d, $opt_q, $opt_g, $opt_f, $opt_p, $opt_m, 
+     $opt_s, $opt_l, $opt_H, $opt_h);
+getopts("i:c:o:d:q:g:f:p:m:s:l:Hh");
+if (!$opt_i && !$opt_c && !$opt_o && !$opt_d && !$opt_q && !$opt_g && !$opt_f
+    && !$opt_m && !$opt_p && !$opt_s && !$opt_l && !$opt_H && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+print STDERR "\n\n#############################";
+print STDERR "\n## MultiVcfTool starts ... ##";
+print STDERR "\n#############################\n\n";
+
+print STDERR "0) Checking arguments:\n\n";
+
+## Get the arguments and check them
+
+my $inputs = $opt_i || 
+    die("INPUT ARG. ERROR: -i <vcffiles> argument was not supplied.\n");
+
+my @infiles = split(/,/, $inputs);
+
+my %vcffile = ();
+foreach my $vcffilename (@infiles) {
+
+    if ($vcffilename =~ m/^(.+)=(.+)$/) {
+    
+	$vcffile{$1} = $2;
+    }
+    else {
+	
+	die("INPUT ERROR: File $vcffilename doesnt have format name=file.\n");
+    }
+}
+
+my $nm_input = scalar(keys %vcffile);
+print STDERR "\tINPUT-VCF FILE NUMBER:\t$nm_input\n";
+
+my $covfiles = $opt_c || 
+    die("INPUT ARG. ERROR: -c <coveragefiles> argument was not supplied.\n");
+
+my @cvfiles = split(/,/, $covfiles);
+my %covfile = ();
+foreach my $covfile (@cvfiles) {
+
+    if ($covfile =~ m/^(.+)=(.+)$/) {
+    
+	unless (exists $vcffile{$1}) {
+	    
+	    die("INPUT ERROR: coveragefile $1 doesnt exist in vcf name list\n");
+	}
+	else {
+	
+	    $covfile{$1} = $2;
+	}
+    }
+    else {
+	
+	die("INPUT ERROR: File $covfile doesnt have format name=file.\n");
+    }
+}
+
+my $nm_cov = scalar(keys %covfile);
+print STDERR "\tINPUT-COV FILE NUMBER:\t$nm_input\n";
+
+my $outbase = $opt_o || 'multivcf_out';
+
+print STDERR "\tMIN. DEEP:\t";
+if (defined $opt_d) {
+    
+    unless ($opt_d =~ m/^\d+$/) {
+	die("INPUT ARG. ERROR: -d <deepfilter> is not an integer.\n");
+    }
+    print STDERR "$opt_d\n";
+}
+else {
+    print STDERR "None\n";
+}
+
+print STDERR "\tMIN. SCORE:\t";
+if (defined $opt_q) {
+    
+    unless ($opt_q =~ m/^\d+$/) {
+	die("INPUT ARG. ERROR: -q <qscorefilter> is not an integer.\n");
+    }
+    print STDERR "$opt_q\n";
+}
+else {
+    print STDERR "None\n";
+}
+
+my %groups = ();
+my %grmembers = ();
+
+if ($opt_g) {
+
+    my @grlist = split(/\),/, $opt_g);
+    print STDERR "\n\tDefined Groups:\n";
+
+    foreach my $gr (@grlist) {
+    
+	$gr =~ s/\(//g;
+	$gr =~ s/\)//g;
+	if ($gr =~ m/^(.+)=(.+)$/) {
+	
+	    my $grname = $1;
+	    my @members = split(/,/, $2);
+	    $groups{$grname} = \@members;
+	    foreach my $grmember (@members) {
+	    
+		print STDERR "\t\tGROUP=$grname\tMEMBER=$grmember\n";
+		$grmembers{$grmember} = $grname;
+	    }
+	}
+	else {
+	
+	    die("INPUT ERROR: group $gr doesn't have the format name=(list)\n");
+	}
+    }
+}
+else {
+    die("INPUT ERROR: -g <groups> was not supplied.\n");
+}
+
+print STDERR "\n\tPLOIDY:\t";
+my $ploidy = $opt_p || 2;
+if ($ploidy !~ m/^\d+$/) {
+
+    die("INPUT ERROR: -p <ploidy> is not an integer.\n");
+}
+print STDERR "$ploidy\n";
+
+print STDERR "\n\tMAX. MARKERS FOR STRUCTURE FILES:\t";
+my $maxmarkers = $opt_m;
+if (defined $maxmarkers && $maxmarkers !~ m/^\d+$/) {
+
+    die("INPUT ERROR: -m <maxmarkers> is not an integer.\n");
+}
+else {
+    if (defined $maxmarkers) {
+	print STDERR "$maxmarkers\n";
+    }
+    else {
+	print STDERR "No limit\n";
+    }
+}
+
+print STDERR "\tSTRUCTURE OUTPUT SETS:\t";
+my $str_sets = $opt_s || 1;
+if ($str_sets !~ m/^\d+$/) {
+
+    die("INPUT ERROR: -s <structure_sets> is not an integer.\n");   
+}
+print STDERR "$str_sets\n\n";
+
+print STDERR "\tMARKER LIST FILE:\t";
+my $mrklistfile = $opt_l;
+if (defined $mrklistfile) {
+
+    print STDERR "$mrklistfile\n\n";
+    
+    if (defined $maxmarkers || $str_sets > 1) {
+    
+	die("ERROR: -l <markerlist> is incompatible with -m or -s. > 1\n");
+    }
+}
+else {
+
+    print STDERR "No defined\n\n";
+}
+
+
+## It will define the genotype numeric values for the structure format
+
+my %genotypes = (
+    A => 1,
+    C => 2,
+    G => 4,
+    T => 8,
+    R => 5,
+    Y => 10,
+    S => 6,
+    W => 9,
+    K => 12,	
+    M => 3,
+    B => 14,	
+    D => 13,
+    H => 11,
+    V => 7,
+    N => -9,	
+    '.' => -9,
+    '-' => -9,
+    );
+
+
+print STDERR "\n1) Parsing Vcf files\n\n";
+
+## The data will be stored with this structure:
+##
+## $snp{$seq_id}->{$pos}->{$name} = \@vcf_line
+## $ind{$seq_id}->{$pos}->{$name} = \@vcf_file
+##
+
+my %snp = ();
+my %ind = ();
+my @samples = ();
+
+## It'll define marker names as SeqID:Pos
+## The marks will have as value the distance between this mark and the
+## previous one if it is in the same seqid if not it will take the
+## value -1
+
+foreach my $name (sort keys %vcffile) {
+
+    ## Count SNP and INDELS
+
+    my ($snp_c, $ind_c) = (0, 0);
+    my %snp_t = ();
+
+    print STDERR "\n\tParsing $vcffile{$name} file.\n";
+
+    open my $fio, '<', $vcffile{$name};
+    my $L = `wc -l $vcffile{$name}`;
+    chomp($L);
+    my $l = 0;
+
+    while(<$fio>) {
+	chomp($_);
+	$l++;
+
+	print STDERR "\t\tParsing line:$l of $L                  \r";
+	
+	if ($_ !~ m/^#/) {
+
+	    my @vcf_row = split(/\t/, $_);
+	    my ($seqid, $pos, $snpid, $refvar, $altvar, $qual, 
+		$filter, $info, $format) = @vcf_row;
+	    
+	    ## Process the allele frequency information
+	    ## This programs usually are designed for diploid
+	    ## so we'll keep it simple adding only the ref var if
+	    ## AF < 0.95
+
+	    if ($info =~ m/AF1=(.+?);/) {
+	    
+		my $af = $1;
+		if ($af < 0.95) {
+		    
+		    $altvar .= ',' . $refvar;
+		    $vcf_row[4] = $altvar;
+		}
+	    }
+
+	    ## Filters
+	    
+	    my $selec = 1;
+	    if (defined $opt_d) {
+	    
+		if ($info =~ m/DP=(\d+);/) {
+		    
+		    my $deep = $1;
+
+		    if ($deep < $opt_d) {
+			$selec = 0;
+		    }
+		}
+	    }
+	    if (defined $opt_q) {
+	    
+		if ($qual < $opt_q) {		
+		    $selec = 0;
+		}
+	    }
+	    
+	    if ($selec == 1) {
+
+		if ($info =~ m/INDEL/i) {
+
+		    $ind_c++;
+
+		    ## Add data to indels
+		    
+		    if (exists $ind{$seqid}) {
+		
+			if (exists $ind{$seqid}->{$pos}) {
+		
+			    $ind{$seqid}->{$pos}->{$name} = \@vcf_row;
+			}
+			else {
+			    
+			    $ind{$seqid}->{$pos} = { $name => \@vcf_row };
+			}
+		    }
+		    else {
+			
+			$ind{$seqid} = {$pos => { $name => \@vcf_row } };
+		    }
+		}
+		else {
+
+		    $snp_c++;
+		    $snp_t{$refvar.$altvar}++;
+
+		    ## Add data to SNPs
+
+		    if (exists $snp{$seqid}) {
+			
+			if (exists $snp{$seqid}->{$pos}) {
+			    
+			    $snp{$seqid}->{$pos}->{$name} = \@vcf_row;
+			}
+			else {
+			    
+			    $snp{$seqid}->{$pos} = { $name => \@vcf_row };
+			}
+		    }
+		    else {
+			
+			$snp{$seqid} = {$pos => { $name => \@vcf_row } };
+		    }
+		}
+	    }	    
+	}	
+    }
+
+    print STDERR "\n\n\tSelected SNPs for $name file=$vcffile{$name}\n";
+    print STDERR "\tSNP COUNT:\t$snp_c\n";
+    print STDERR "\tINDEL COUNT:\t$ind_c\n";
+}
+
+print STDERR "\n2) Analyzing coverage to complete SNPs with the reference\n\n";
+
+foreach my $cname (sort keys %covfile) {
+
+    print STDERR "\n\tParsing $covfile{$cname} file.\n";
+
+    open my $bfio, '<', $covfile{$cname};
+    my $B = `wc -l $covfile{$cname}`;
+    chomp($B);
+    my $b = 0;
+
+    my ($csnp_c, $cind_c) = (0, 0);
+
+    while(<$bfio>) {
+	chomp($_);
+	$b++;
+
+	print STDERR "\t\tParsing line:$b of $B                  \r";
+	
+	if ($_ !~ m/^#/) {
+
+	    my ($seqid, $pos, $cov) = split(/\t/, $_);
+	    
+	    my $req_cov = $opt_d || 1;
+
+	    if ($cov >= $req_cov) {
+
+		if (exists $snp{$seqid}->{$pos}) {
+	    
+		    unless (exists $snp{$seqid}->{$pos}->{$cname}) {
+		
+			## it will take any reference and it will complete the
+			## calling.
+			
+			my @vcfrows = values(%{$snp{$seqid}->{$pos}}); 
+			my @any_vcf = @{$vcfrows[0]};
+		
+			## Now it will replace several datatypes:
+			$any_vcf[4] = $any_vcf[3];
+			$any_vcf[5] = 0;
+			$any_vcf[6] = '.';
+			$any_vcf[7] = 'DP=' . $cov;
+			$any_vcf[8] = '';
+
+			## And now it will add the new row
+
+			$snp{$seqid}->{$pos}->{$cname} = \@any_vcf;
+			$csnp_c++;
+		    }
+		}
+		if (exists $ind{$seqid}->{$pos}) {
+	    
+		    unless (exists $ind{$seqid}->{$pos}->{$cname}) {
+		
+			## it will take any reference and it will complete the
+			## calling.
+			
+			my @vcfrows = values(%{$ind{$seqid}->{$pos}}); 
+			my @any_vcf = @{$vcfrows[0]};
+		
+			## Now it will replace several datatypes:
+			$any_vcf[4] = $any_vcf[3];
+			$any_vcf[5] = 0;
+			$any_vcf[6] = '.';
+			$any_vcf[7] = 'DP=' . $cov;
+			$any_vcf[8] = '';
+
+			## And now it will add the new row
+
+			$ind{$seqid}->{$pos}->{$cname} = \@any_vcf;
+			$cind_c++;
+		    }
+		}
+	    }
+	}	
+    }
+
+    print STDERR "\n\n\tCompleted equal2ref SNPs for file=$covfile{$cname}\n";
+    print STDERR "\tSNP COUNT:\t$csnp_c\n";
+    print STDERR "\tINDEL COUNT:\t$cind_c\n";
+}
+
+
+print STDERR "\n\n3) Analyzing SNPs\n\n";
+
+my $outfile = $outbase . '.var.txt';
+open my $ofh, '>', $outfile;
+
+## var.txt file header
+
+print $ofh "#HEADER#\n";
+print $ofh "#SeqID\tPos\tRef\t";
+my $head = join("\t", sort keys %vcffile);
+print $ofh "$head\tNotes\n";
+
+
+
+## It will define an array to collect the sample data to print
+## the structure format: Sample Genotypes x Polyploidy
+## example:
+## Sample: Loc1:   Loc2:
+##      A     1  2    3  4
+##
+
+
+my %struc_data = ();
+my @marklist = ();
+my %selectedmarks = ();
+
+
+foreach my $seqid (sort {$a cmp $b} keys %snp) {
+
+    my %coords = %{$snp{$seqid}};
+
+    foreach my $coord (sort {$a <=> $b} keys %coords) {
+    
+	my $mark = $seqid . ':' . $coord;
+	my %struc_mark = ();
+	my $avoid_htz = 0;
+
+	my $f = 0;
+	my @line = ($seqid, $coord);
+	my @subline = ();
+	my $ggeno = '';
+	my $note = '';
+
+	my $varsam = 0;
+	my $complete = 1;
+
+	## Define the group SNP
+
+	my %snpgrp = ();
+	my %snpgrptype = ();
+
+	foreach my $sample (sort keys %vcffile) {
+	
+	    ## Get the group
+
+	    my $grp = $grmembers{$sample};
+
+	    my $var = '-';
+	    if (exists $coords{$coord}->{$sample}) {
+
+		print STDERR "\tAnalyzing $seqid:$coord [$sample]     \r";
+
+		my @vcfrow = @{$coords{$coord}->{$sample}};
+		$var = join(",", sort(split(',', $vcfrow[4])));
+		
+		if (exists $snpgrp{$grp}) {
+		    
+		    if ($var eq $snpgrp{$grp} && $snpgrptype{$grp} !~ m/INTR/) {
+		    
+			$snpgrptype{$grp} = "SNP_GROUP_" . $grp . "=" . $var;
+		    }
+		    else {
+			
+			$snpgrptype{$grp} = "VARIABLE_SNP_INTRAGROUP_" . $grp;
+		    }
+		}
+		else {
+		
+		    $snpgrp{$grp} = $var;
+		    $snpgrptype{$grp} = "INSUFFICIENT_DATA_FOR_GROUP_" . $grp;
+		}
+
+		if ($f == 0) {
+		    push @line, $vcfrow[3];
+		    $ggeno = $var;
+		}
+
+		$varsam++;
+		$f++;
+	    }
+
+
+	    push @subline, $var;
+
+	    ## Add the structure data
+
+	    my ($n, $p) = (0, 0);
+	    my @nt_gtypes = split(/,/, $var);
+	    
+	    if (scalar(@nt_gtypes) >= $ploidy && $opt_H) {
+		
+		$avoid_htz = 1;
+	    }
+
+	    my @nm_gtypes = ();
+
+	    while($n+1 <= $ploidy) {
+		    
+		if ($var eq '-') {
+		    push @nm_gtypes, -9;
+		    $complete = 0;
+		}
+		else {
+		    
+		    if (defined $nt_gtypes[$n]) {
+			
+			push @nm_gtypes, $genotypes{$nt_gtypes[$n]};
+		    }
+		    else {
+			
+			unless (defined $nt_gtypes[$p]) {
+			    $p = 0;
+			}
+			push @nm_gtypes, $genotypes{$nt_gtypes[$p]};
+			$p++;
+		    }
+		}
+		$n++;
+	    }
+	    
+	    $struc_mark{$sample} = \@nm_gtypes;
+	}
+	
+	my $pline = join("\t", (@line, @subline));
+	my $notes = join(";", sort values %snpgrptype);
+	print $ofh "$pline\t$notes\n";
+
+	if ($complete == 1 && $avoid_htz == 0) {
+		
+	    $struc_data{$mark} = \%struc_mark;
+	    $selectedmarks{$mark} = 1;
+	    push @marklist, $mark;
+	}
+    }
+}
+
+my $struc_n = scalar(keys %struc_data);
+print STDERR "\n\n\t$struc_n SNPs markers catched for Structure format.\n";
+
+unless (defined $maxmarkers) {
+    
+    $maxmarkers = scalar(keys %struc_data);
+}
+elsif ($maxmarkers !~ m/^\d+$/) {
+
+    $maxmarkers = scalar(keys %struc_data);
+}
+
+## It will select a random number of makers if maxmarkers < scalar(keys %struc)
+## or will take the file.
+
+print STDERR "\n\n4) Creating Structure file\n";
+
+my $set = 0;
+my @struc_mrks_list = ();
+
+while ($set < $str_sets) {
+
+    if (defined $mrklistfile) {
+
+	print STDERR "\t\tDefined marker file.\n";
+	my @altlist = ();
+	open my $mrkls_io, '<', $mrklistfile;
+	while(<$mrkls_io>) {
+	
+	    chomp($_);
+	    print STDERR "\tParsing marker file, line $_              \r";
+
+	    ## Markers could not have been selected, so we'll check if they
+	    ## are at selelected marks.
+
+	    my @rws = split(/\t/, $_);
+	    if ($rws[0] =~ /.+/) {
+		if (exists $selectedmarks{$rws[0]}) {
+		    push @altlist, $rws[0];
+		}
+	    }
+	}
+
+	my $alt_count = scalar(@altlist);
+	print STDERR "\n\n\t$alt_count markers have been parsed.\n\n";
+	@marklist = @altlist;
+    }
+    else {
+
+	if ($maxmarkers < scalar(keys %struc_data)) {
+
+	    my @mrk_list = keys %struc_data;
+    
+	    my @newlist = ();
+	    my @shuffle = shuffle(@mrk_list);
+
+	    my $n = 0;
+	    foreach my $var (@shuffle) {
+		$n++;
+	    	
+		push @newlist, $var;
+		last if ($n == $maxmarkers);
+	    }
+
+	    @marklist = @newlist;
+	}
+    }
+
+    my %newmrks = ();
+    foreach my $mrk (sort @marklist) {
+    
+	my ($id, $pos) = split(/:/, $mrk);
+    
+	unless (exists $newmrks{$id}) {
+	    
+	    $newmrks{$id} = {$pos => $mrk};
+	}
+	else {
+	    
+	    $newmrks{$id}->{$pos} = $mrk;
+	}
+    }
+
+    my @ordmarks = ();
+    my @mrkdist = ();
+
+    foreach my $id (sort keys %newmrks) {
+    
+	my $p = 0;
+	foreach my $pos (sort keys %{$newmrks{$id}}) {
+	
+	    if ($p == 0) {
+	    
+		push @mrkdist, -1;
+	    }
+	    else {
+	    
+		my ($prev_id, $prev_pos) = split(/:/, $ordmarks[-1]);
+		my $dist = $pos - $prev_pos;
+		push @mrkdist, $dist;
+	    }
+	    push @ordmarks, $newmrks{$id}->{$pos};
+	    $p++;
+	}
+	
+    }
+
+    ## Now it will change the format from: 
+    ##    %struc_data = ( $mark => { $samples => \@genotypes} )
+    ## to:
+    ##    @samples = \@genotypes
+
+    my %struc_samples = ();
+    foreach my $mrk (@ordmarks) {
+
+	foreach my $smp (sort keys %{$struc_data{$mrk}}) {
+    
+	    if (exists $struc_samples{$smp}) {
+		    
+		push @{$struc_samples{$smp}}, @{$struc_data{$mrk}->{$smp}};
+	    }
+	    else {
+		    
+		$struc_samples{$smp} = [$smp, @{$struc_data{$mrk}->{$smp}}];
+	    }
+	}
+	
+    }
+
+    ## structure output
+    
+    my $outfile2 = $outbase . '.struct.set' . $set .'.txt';
+    open my $ofh2, '>', $outfile2;
+    my $str_marknames = join(" ", @ordmarks);
+    print $ofh2 "$str_marknames\n";
+    
+    print STDERR "\nOutput filename: $outfile2\n";
+    print STDERR "\n\tMax. markers=$maxmarkers\n";
+
+    my $str_markdist = join(" ", @mrkdist);
+    print $ofh2 "$str_markdist\n";
+    
+    foreach my $stsample (sort keys %struc_samples) {
+	
+	my $gtypes_line = join(" ", @{$struc_samples{$stsample}}); 
+	print $ofh2 "$gtypes_line\n";
+    }
+    close($ofh2);
+    
+    $set++;
+}
+
+print STDERR "\n\nDone.\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+      
+
+    Usage:
+
+     MultiVcfTool [-h] -i <vcffiles> -c <coveragefiles> -o <outputbasename> 
+                   [-d <deepfilter>] [-q <qscorefilter>] [-g <groups>]
+                   [-f <outputformat>] [-p <ploidy>] [-m <max_markers>]
+                   [-s <num_structure_sets>] [-l <marker_list>] [-H]
+
+    Flags:
+
+      -i <vcffiles>               input snp vcf files separated by commas as
+                                  name=filename (mandatory)
+      -c <coveragefiles>          input coverage (3 columns) files separated by 
+                                  commas as name=filename (mandatory) 
+      -o <outputbasename>         outputbasename (multivcf_out by default)
+      -d <deepfilter>             filter by min. deep (optional)
+      -q <qscorefilter>           filter by qscore (optional)
+      -g <groups>                 groups for analysis as groupname1=(name1,
+                                  name2),groupname2=(name3,name4) (optional)
+      -f <outputformat>           outputformat (var.txt by default)
+      -p <ploidy>                 ploidy (an integer, 2 by default)
+      -m <max_markers>            max.number of markers selected for structure 
+                                  (def.all)
+      -s <num_struct_sets>        num. os structure sets to create with -m
+      -l <marker_list>            file with the marker list (incomp. with -m 
+                                  and -s)
+      -H <avoid_superheteroz>     avoid heterozygosity when it excess the 
+                                  polyploid.
+      -h <help>                   print the help
+
+
+EOF
+exit (1);
+}
+
