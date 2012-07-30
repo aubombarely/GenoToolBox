@@ -620,7 +620,7 @@ foreach my $seqid (sort {$a cmp $b} keys %snp) {
 	    my ($n, $p) = (0, 0);
 	    my @nt_gtypes = split(/,/, $var);
 	    
-	    if (scalar(@nt_gtypes) >= $ploidy && $opt_H) {
+	    if (scalar(@nt_gtypes) > $ploidy && $opt_H) {
 		
 		$avoid_htz = 1;
 	    }
