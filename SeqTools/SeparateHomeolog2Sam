@@ -1,0 +1,348 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ SeparateHomeolog2Sam
+ Tool to separate possible homeolog based in two reference alignment
+
+=cut
+
+=head1 SYPNOSIS
+
+ SeparateHomeolog2Sam [-h] -s <samfile> -p <homeolog_ref_prefix> 
+                           -o <output_basename>
+                           [-a <xs_as_score_ratio>] [-U] [-V]
+
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -s
+
+B<samfile>                samfile (mandatory).
+
+=item -p
+
+B<homeolog_ref_prefix>    prefix to identify different homeologs (mandatory).
+
+=item -o
+
+B<output_basename>        output basename (mandatory)
+
+=item -r
+
+B<xs_as_score_ratio>     min.ratio between AS XS scores to select the alignment.
+
+=item -U
+
+B<select_unique>         select only unique alignments
+
+=item -V
+
+B<invert_selection>      invert selection
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script filters the SAM format files to retrieve unique alignments (-U),
+ or/and alignments where the primary and the secondary alignment scores
+ (XS and AS) ratio is equal or bigger than a cutoff value (-r).
+
+ Case 1)
+
+   REF_A: ATGCCGTGCTTGCG  
+          ||||||||| ||||  AS = -6                
+   read1: ATGCCGTGCATGCG            XS/AS = -12/-6 >= 2, so read1 REF_A tagged
+          |||| |||| ||||  XS =-12
+   REF_B: ATGCTGTGCTTGCG
+
+  Case 2)
+
+   REF_A: ATGCCGTGCTTGCG  
+          |||| |||| ||||  XS =-12                
+   read2: ATGCTGTGCATGCG            XS/AS = -12/-6 >= 2, so read2 REF_B tagged
+          ||||||||| ||||  AS = -6
+   REF_B: ATGCTGTGCTTGCG   
+
+  Case 3)
+
+   REF_A: ATGCCGTGCTTGCG  
+          |||| |||||||||  XS = -6                
+   read3: ATGCGGTGCTTGCG            XS/AS = -6/-6 < 2, so read3 filtered.
+          |||| |||||||||  AS = -6
+   REF_B: ATGCTGTGCTTGCG 
+
+
+  The use of the -V option will reverse the selection (for example -U -V
+  will select non-unique alignments).
+
+  The script will create 2*prefix files (for example -p prefix1,prefix2):
+   + outbasename.prefix1.sam
+   + outbasename.prefix2.sam
+   + outbasename.prefix1.fq
+   + outbasename.prefix2.fq
+
+  More information about the SAM format can be found at: 
+  samtools.sourceforge.net/SAM1.pdf
+
+ 
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ SeparateHomeolog2Sam
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+
+our ($opt_s, $opt_p, $opt_o, $opt_r, $opt_U, $opt_V, $opt_h);
+getopts("s:p:o:r:UVh");
+if (!$opt_s && !$opt_p && !$opt_o && !$opt_r && !$opt_U && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Get the arguments and check them
+
+my $sam = $opt_s || 
+    die("ARGUMENT ERROR: -s <samfile> option was not supplied.\n");
+
+my $out = $opt_o ||
+    die("ARGUMENT ERROR: -o <output_basename> option was not supplied.\n");
+
+my $prfx = $opt_p ||
+    die("ARGUMENT ERROR: -p <homeolog_prefix> option was not supplied.\n");
+
+my @prefix = split(/,/, $prfx);
+
+if (defined $opt_r) {
+
+    if ($opt_r !~ m/^\d+$/) {
+    
+	die("ARGUMENT ERROR: -r <xsas_score_ratio> is not a numeric value.\n");
+    }
+} 
+
+print STDERR "\n\n##################################################\n";
+print STDERR "## SeparateHomeolog2Sam script begins.          ##\n";
+print STDERR "##################################################\n\n";
+
+open my $samio, '<', $sam;
+my $S = `wc -l $sam`;
+chomp($S);
+
+my %fq_io = ();
+my %sam_io = ();
+
+print STDERR "0) Creating the possible output files.\n\n";
+
+foreach my $pr (@prefix) {
+
+    my $outsamfile = $out . '.' . $pr . '.sam';
+    open my $samout_io, '>', $outsamfile;
+    $sam_io{$pr} = $samout_io;
+
+    my $outfqfile = $out . '.' . $pr . '.fq';
+    open my $seqio, '>', $outfqfile;
+    $fq_io{$pr} = $seqio;
+}
+
+print STDERR "1) Parsing and processing the SAM file.\n\n";
+
+my %count = ();
+
+my $s = 0;
+while (<$samio>) {
+    
+    chomp($_);
+    $s++;
+    print STDERR "\tParsing line:$s of $S of the SAM file                 \r";
+
+
+    if ($_ =~ m/^@/) {                                           ## SAM header
+
+	foreach my $pr (@prefix) {
+	
+	    if ($_ =~ m/$pr/) {
+	    
+		print { $sam_io{$pr} } "$_\n";
+	    }
+	}
+    }
+    else {
+    
+	my @f = split(/\t/, $_);
+	
+	foreach my $pr (@prefix) {
+	
+	    if ($f[2] =~ m/^$pr/) {
+
+		my $selection = 0;
+		if ($f[12] !~ m/XS/) {
+		    
+		    if ($opt_U) { 
+			$selection = 1;
+		    }
+		}
+		elsif ($opt_r =~ m/^\d+$/) {
+		
+		    my $as = $f[11];
+		    $as =~ s/AS:i://;
+		    my $xs = $f[12];
+		    $xs =~ s/XS:i://;
+
+		    if ($xs == 0 && $as == 0) {
+			
+			## Do nothing
+		    }
+		    elsif ($as == 0) {  ## Means identical with the reference
+		
+			$selection = 1;			
+		    }
+		    elsif ($xs == 0 && $as > 0) { ## Means that probably AS > 0 
+		
+			$selection = 1;
+		    }
+		    elsif ($xs * $as > 0 && $xs/$as >= $opt_r) {
+		    
+			$selection = 1;
+		    }
+		    elsif ($xs * $as < 0 && -($xs/$as) >= $opt_r) {
+			$selection = 1;
+		    }
+		}
+
+		if ($opt_V) {
+		    $selection++;
+		    if ($selection == 2) {
+			$selection = 0;
+		    }
+		}
+
+		if ($selection == 1) {
+		
+		    print {$sam_io{$pr}}"$_\n";
+		    print {$fq_io{$pr}}'@'.$f[0]."\n$f[9]\n+\n$f[10]\n";
+		    $count{$pr}++;
+		}	
+	    }
+	}
+    }
+}
+
+print STDERR "\n\nDone\n\nPrefix alignment count:\n";
+foreach my $prx (sort @prefix) {
+
+    print STDERR "\t$prx\t$count{$prx}\n";
+}
+
+print STDERR "\n\n";
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+    This script filters the SAM format files to retrieve unique alignments (-U),
+    or,and alignments where the primary and the secondary alignment scores
+    (XS and AS) ratio is equal or bigger than a cutoff value (-r).
+
+    Case 1)
+
+     REF_A: ATGCCGTGCTTGCG  
+            ||||||||| ||||  AS = -6                
+     read1: ATGCCGTGCATGCG            XS/AS = -12/-6 >= 2, so read1 REF_A tagged
+            |||| |||| ||||  XS =-12
+     REF_B: ATGCTGTGCTTGCG
+
+    Case 2)
+
+     REF_A: ATGCCGTGCTTGCG  
+            |||| |||| ||||  XS =-12                
+     read2: ATGCTGTGCATGCG            XS/AS = -12/-6 >= 2, so read2 REF_B tagged
+            ||||||||| ||||  AS = -6
+     REF_B: ATGCTGTGCTTGCG   
+
+    Case 3)
+
+     REF_A: ATGCCGTGCTTGCG  
+            |||| |||||||||  XS = -6                
+     read3: ATGCGGTGCTTGCG            XS/AS = -6/-6 < 2, so read3 filtered.
+            |||| |||||||||  AS = -6
+     REF_B: ATGCTGTGCTTGCG 
+
+
+    The use of the -V option will reverse the selection (for example -U -V
+    will select non-unique alignments).
+
+    The script will create 2*prefix files (for example -p prefix1,prefix2):
+       + outbasename.prefix1.sam
+       + outbasename.prefix2.sam
+       + outbasename.prefix1.fq
+       + outbasename.prefix2.fq
+
+    More information about the SAM format can be found at: 
+    samtools.sourceforge.net/SAM1.pdf      
+
+    Usage:
+       
+       SeparateHomeolog2Sam [-h] -s <samfile> -p <homeolog_ref_prefix> 
+                             -o <output_basename>
+                             [-a <xs_as_score_ratio>] [-U] [-V]
+
+    Flags:
+
+      -s <samfile>               samfile (mandatory).
+      -p <homeolog_ref_prefix>   prefix to identify different homeologs 
+                                 (mandatory).
+      -o <output_basename>       output basename (mandatory)
+      -r <xs_as_score_ratio>     min.ratio between AS XS scores to select 
+                                 the alignment.
+      -U <select_unique>         select only unique alignments
+      -V <invert_selection>      invert selection
+      -h <help>                  print the help
+     
+
+EOF
+exit (1);
+}
+
