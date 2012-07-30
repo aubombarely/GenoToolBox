@@ -1,0 +1,233 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ SeqNSelect.pl
+ Tool to select sequences based in its N content
+
+=cut
+
+=head1 SYPNOSIS
+
+ SeqNSelect.pl [-h] -f <input_fasta_file> -n <max_N_content> [-I] [-D]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -f
+
+B<input_fasta_file>       input fasta file (mandatory)
+
+=item -n
+
+B<max_N_content>          max. N percentage allowed (default. 0)
+
+=item -I
+
+B<remove_ID_redundancy>   for sequences with the same ID take the sequence
+                          with the lowest N content
+
+=item -D
+
+B<remove_Desc_redundancy> for sequences with the same description take the 
+                          sequence with the lowest N content
+
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script filter sequences based in its N content. Also for sequences
+ with the same ID (-I) or description (-D), it selects the sequence with the
+ lowest N content.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ SeqNSelect.pl
+
+
+=cut
+
+use strict;
+use warnings;
+
+use Getopt::Std;
+use Bio::SeqIO;
+use Bio::SeqUtils;
+use Bio::Tools::IUPAC;
+
+our ($opt_f, $opt_n, $opt_I, $opt_D, $opt_h);
+getopts("f:n:IDh");
+if (!$opt_f && !$opt_n && !$opt_I && !$opt_D && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Get the arguments and check them
+
+my $infasta_file = $opt_f || 
+    die("INPUT ARG. ERROR: -f <input_fastafile> argument was not supplied.\n");
+
+if ($opt_I && $opt_D) {
+    die("INPUT ARG. ERROR: Only one of this option (-I or -D) can be used.\n");
+}
+
+my $maxNcont = $opt_n || 0;
+
+if ($maxNcont !~ m/^\d+$/) {
+    die("INPUT ARG. ERROR: -n option is not an integer.\n");
+}
+
+## Open the file and parse it
+
+my $seqio = Bio::SeqIO->new( -file => "$infasta_file", -format => 'fasta');
+
+## It will store the sequences in an array keeping the indexes
+
+my $i = 0;
+my @seqobjs = ();
+my %seqs = ();
+
+print STDERR "\n1)Parsing fasta file.\n\n";
+
+while (my $seqobj = $seqio->next_seq()) {
+
+    my $id = $seqobj->primary_id();
+    my $desc = $seqobj->description();
+    my $len = $seqobj->length();
+    my $seq = $seqobj->seq();
+    
+    if (defined $id && defined $seq) {
+
+	my $no_nseq = $seq;
+	$no_nseq =~ s/n//gi;
+	my $nlen_p = ($len - length($no_nseq)) * 100 / $len;
+	my $n = $i + 1;
+    
+	my $selec = $id;
+	if ($opt_D && defined $desc) {
+	    
+	    $selec = $desc;
+	}
+    
+	## Store the sequences, the indexes and the N content
+
+	if (exists $seqs{$selec}) {
+	    
+	    $seqs{$selec}->{$i} = $nlen_p;
+	}
+	else {
+	    
+	    $seqs{$selec} = { $i => $nlen_p };
+	}
+
+	print STDERR "\tProcessing seqN=$n ID=$id GRP=$selec ($nlen_p)      \r";
+		
+	push @seqobjs, $seqobj;
+	$i++;
+    }
+}
+
+my $nr_number = scalar(keys(%seqs));
+print STDERR "\n\tThere is $nr_number non-redundant IDs.";
+
+print STDERR "\n\n2) Selecting sequences.\n\n";
+
+## Open the out
+
+my $outio = Bio::SeqIO->new( -format => 'fasta');
+
+## Scan the sequences
+
+my $s = 0;
+foreach my $id (sort {$a cmp $b} keys %seqs) {
+
+    my %grp = %{$seqs{$id}};
+
+    my @idxs = sort {$grp{$b} <=> $grp{$a}} keys %grp;
+    my @run = @idxs;
+    
+    if ($opt_I || $opt_D) {
+    
+	@run = ($idxs[0]);
+    }
+
+    foreach my $idx (@run) {
+    
+	if ($grp{$idx} <= $maxNcont) {
+
+	    print STDERR "\tScanning GRP=$id, index=$idx (selected)       \r";
+	    $outio->write_seq($seqobjs[$idx]);
+	    $s++;
+	}
+	else {
+	    
+	    print STDERR "\tScanning GRP=$id, index=$idx (no selected)    \r";
+	}
+    }
+}
+
+print STDERR "\n\nDone ($s sequences have been selected)\n\n";
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+      This script filter sequences based in its N content. Also for sequences
+     with the same ID (-I) or description (-D), it selects the sequence with the
+     lowest N content.
+
+    Usage:
+     
+     SeqNSelect.pl [-h] -f <input_fasta_file> -n <max_N_content> [-I] [-D]
+
+    Flags:
+
+      -f <input_fasta_file>       input fasta file (mandatory)
+      -n <max_N_content>          max. N percentage allowed (default. 0)
+      -I <remove_IDredundancy>    for sequences with the same ID take the 
+                                  sequence with the lowest N content
+      -D <remove_Descredundancy>  for sequences with the same description take 
+                                  the sequence with the lowest N content
+      -h <help>                   print the help
+     
+
+EOF
+exit (1);
+}
+
