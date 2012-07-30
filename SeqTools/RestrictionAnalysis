@@ -1,0 +1,349 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ RestrictionAnalysis.pl
+ A script to do restriction analysis over a sequence
+
+=cut
+
+=head1 SYPNOSIS
+
+ RestrictionAnalysis [-h] -i <fastaseq> -o <output> -r <restriction_list> 
+                          [-B] [-S] [-f <fragment_size>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<fastaseq>               input fasta file (mandatory)
+
+=item -o
+
+B<output>                 output basename (default: 're_analysis_out')
+
+=item -r
+
+B<restriction_list>       restriction list separated by commas (mandatory)
+
+=item -B
+
+B<output_bed_format>      produce an output in .bed format
+
+=item -S
+
+B<output_fasta_split>     produce an output with the splitted fragments.
+
+=item -f
+
+B<fragment_size>          produce fragments around the restr. site of f. size
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script performs a restriction site analysis of the input fasta file 
+ sequences. The restriction list can be known enzymes (PstI,EcoRI) or 
+ user enzymes (MyEnzI=CCT^AGG)
+
+ By default it just print the stats of the restriction analysis but also can:
+
+  + A .bed file with the restriction sites (-B)
+
+  + A .splitted.fasta file with the splitted sequences based in the 
+    restriction site.
+
+  + A .fragment.fasta file with the fragments produced in the restriction
+    enzyme surround region (-f <fragment_size>).
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ RestrictionAnalysis
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Bio::SeqIO;
+use Bio::SeqUtils;
+use Bio::Tools::IUPAC;
+use Bio::Restriction::EnzymeCollection;
+use Bio::Restriction::Enzyme;
+use Bio::Restriction::Analysis;
+
+our ($opt_i, $opt_o, $opt_r, $opt_B, $opt_S, $opt_f, $opt_h);
+getopts("i:o:r:BSf:h");
+if (!$opt_i && !$opt_o && !$opt_r && !$opt_B && !$opt_S && !$opt_f && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Get the arguments and check them
+
+my $input = $opt_i || 
+    die("INPUT ARG. ERROR: -i <inputfile> argument was not supplied.\n");
+
+my $relist = $opt_r ||
+    die("INPUT ARG. ERROR: -r <re_list> argument was not supplied.\n");
+
+my $output = $opt_o || 're_analysis_out';
+
+if (defined $opt_f && $opt_f !~ m/^\d+$/) {
+
+    die("INPUT ERROR: -f <fragment_size> argument is not an integer.\n");
+}
+
+
+print STDERR "\n\n########################################\n";
+print STDERR "## Running RestrictionAnalysis script ##\n";
+print STDERR "########################################\n";
+
+## Check the RE format
+
+my $all_re = Bio::Restriction::EnzymeCollection->new();
+
+my @relist = ();
+foreach my $re (split(/,/, $relist)) {
+
+    if ($re =~ m/^(.+)=(.+)$/) {
+	
+	my $reobj = Bio::Restriction::Enzyme->new( -enzyme => $1, -seq => $2 );
+	push @relist, $reobj;
+    }
+    else {
+    
+	my $reobj = $all_re->get_enzyme($re);
+	unless (defined $reobj) {
+	
+	    print STDERR "\n\tWARNING: $re is not defined in the collection.";
+	    print STDERR "\n\tUse format EnzymeName=CutSize to add it.\n\n";
+	}
+	else {
+	
+	    push @relist, $reobj;
+	}
+    }
+}
+ 
+my $re_num = scalar(@relist);
+print STDERR "\n\n0) $re_num Restriction Enzymes will be used:\n";
+foreach my $re (@relist) {
+
+    my $re_name = $re->name();
+    my $re_site = $re->site();
+    print STDERR "\t$re_name\t=>\t$re_site\n";
+}
+
+print STDERR "\n\n1) Performing the Restriction Analysis.\n\n";
+
+## Create the IO for the output files
+
+my $outbed_io;
+if ($opt_B) {
+
+    my $outbedname = $output . '.bed';
+    open $outbed_io, '>', $outbedname;
+}
+
+my $outbedfrag_io;
+if ($opt_f) {
+
+    my $outbedfrag_name = $output . '.frag.bed';
+    open $outbedfrag_io, '>', $outbedfrag_name;
+}
+
+my $outfassp_io;
+my $outnonre_io;
+if ($opt_S) {
+
+    my $outfassp_name = $output . '.splittedseq.fasta';
+    $outfassp_io = Bio::SeqIO->new( -file   => ">$outfassp_name", 
+				    -format => 'fasta'         );
+
+    my $outnonre_name = $output . '.seqwwithout_re.txt';
+    open $outnonre_io, '>', $outnonre_name;
+}
+
+
+## open the input file and process
+
+my $seqio = Bio::SeqIO->new( -file => $input, -format => 'fasta');
+
+my %stats = ();
+
+while( my $seqobj = $seqio->next_seq()) {
+
+    my $seqid = $seqobj->id();
+    
+    foreach my $reobj (@relist) {
+    
+	my $reid = $reobj->name();
+	print STDERR "\tAnalyzing seqID=$seqid with enzyme=$reid        \r";
+
+	my $ra = Bio::Restriction::Analysis->new( -seq     => $seqobj, 
+						  -enzymes => $reobj   );
+
+	my @posit = $ra->positions($reid);
+	my @frag = $ra->fragments($reid);
+
+	$stats{$seqid}->{$reid} = scalar(@posit);
+
+	foreach my $pos (@posit) {
+	
+	    my $zero_basedst = $pos - 1;
+	    my $one_baseden = $pos + 1;
+	    
+	    if (defined $outbed_io) {
+		print $outbed_io "$seqid\t$zero_basedst\t$one_baseden\t$reid\n";
+	    }
+
+	    if (defined $opt_f) {
+	    
+		my $frg1st = $zero_basedst - $opt_f;
+		if ($frg1st < 0) {
+		    $frg1st = 0;
+		}
+		my $frg1en = $one_baseden;
+		my $frg1nm = $seqid.":".$pos." [". $reid."-downstream]";
+		
+		my $frg2st = $zero_basedst;
+		my $frg2en = $one_baseden + $opt_f;
+		if ($frg2en > $seqobj->length()) {
+		    $frg2en = $seqobj->length();
+		}
+		my $frg2nm = $seqid.":".$pos." [". $reid."-upstream]";
+
+		if (defined $outbedfrag_io) {
+		
+		    print $outbedfrag_io "$seqid\t$frg1st\t$frg1en\t$frg1nm\n";
+		    print $outbedfrag_io "$seqid\t$frg2st\t$frg2en\t$frg2nm\n";
+		}
+	    }
+	}
+
+	if (scalar(@frag) > 1 && scalar(@posit) > 0) {
+	    my $f = 0;
+	    foreach my $seqfrag (@frag) {
+
+		my $curr_pos = $posit[$f];
+		if ($f + 1 == scalar(@frag)) {	    
+		    $curr_pos = $seqobj->length();
+		}
+
+		my $prev_pos = 1;
+		if ($f > 0) {
+		    $prev_pos = $posit[$f-1];
+		    $prev_pos++;
+		}
+		$f++;
+
+		my $fragid = $seqid . "_" . $prev_pos . "_" . $curr_pos;
+
+		if (defined $outfassp_io) {
+		    my $fragobj = Bio::Seq->new( -id  => $fragid, 
+						 -seq => $seqfrag);
+		    $outfassp_io->write_seq($fragobj);
+		}
+	    }
+	}
+	else {
+	
+	    print $outnonre_io "$seqid\t$reid ABSENT\n";
+	}
+    }
+}
+
+print STDERR "\n\n2) Printing stats:\n\n";
+
+foreach my $seqid (sort keys %stats) {
+
+    foreach my $reid (sort keys %{$stats{$seqid}}) {
+    
+	my $sites_n = $stats{$seqid}->{$reid};
+
+	print STDERR "$seqid\t$reid\t$sites_n\n";
+    }
+}
+
+print STDERR "\n\n";
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+     This script performs a restriction site analysis of the input fasta file 
+     sequences. The restriction list can be known enzymes (PstI,EcoRI) or 
+     user enzymes (MyEnzI=CCT^AGG)
+
+     By default it just print the stats of the restriction analysis but also 
+     can:
+
+      + A .bed file with the restriction sites (-B)
+ 
+      + A .splitted.fasta file with the splitted sequences based in the 
+        restriction site.
+
+      + A .fragment.fasta file with the fragments produced in the restriction
+        enzyme surround region (-f <fragment_size>).
+
+    Usage:
+     
+      RestrictionAnalysis [-h] -i <fastaseq> -o <output> -r <restriction_list> 
+                          [-B] [-S] [-f <fragment_size>]
+
+    Flags:
+
+     -i <fastaseq>               input fasta file (mandatory)
+     -o <output>                 output basename (default: 're_analysis_out')
+     -r <restriction_list>       restrictionlist separated by commas (mandatory)
+     -B <output_bed_format>      produce an output in .bed format
+     -S <output_fasta_split>     produce an output with the splitted fragments.
+     -f <fragment_size>          produce fragments around the restr. site of f.
+                                 size
+     -h <help>                   print the help
+     
+
+EOF
+exit (1);
+}
+
