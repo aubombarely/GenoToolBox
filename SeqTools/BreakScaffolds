@@ -1,0 +1,339 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ BreakScaffolds.pl
+ Tool to break scaffolds into contigs keeping the scaffolding information
+
+=cut
+
+=head1 SYPNOSIS
+
+ BreakScaffolds.pl [-h] -f <input_fasta_file> -o <output_basename> -n <N_length>
+                   [-V]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -f
+
+B<input_fasta_file>       input fasta file (mandatory)
+
+=item -o
+
+B<output_basename>        output basename (by default it will printed as stdout)
+
+=item -n
+
+B<N_length>               N minimum length to break a scaffold (3 by default)
+
+=item -V
+
+B<be_verbose>             be verbose printing status messages
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script breaks the scaffold into contigs based in a min. N length defined
+ by the -n <N_length argument>.
+
+ It will return three files:
+  
+  + <output_basename>.contig.fasta
+
+  + <output_basename>.scaffold_gaps.gff
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ BreakScaffolds.pl
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Bio::SeqIO;
+
+our ($opt_f, $opt_o, $opt_n, $opt_V, $opt_h);
+getopts("f:o:n:Vh");
+if (!$opt_f && !$opt_o && !$opt_n && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Get the arguments and check them
+
+my $input = $opt_f || 
+    die("ERROR: -f <input_fastafile> argument was not supplied.\n");
+
+my $output = $opt_o || 'BreakScaffold.out';
+my $nlength = $opt_n || 3;
+if ($nlength !~ m/^\d+$/) {
+    $nlength = 3;
+}
+
+my $date = `date`;
+chomp($date);
+
+print STDERR "\n\n#########################################################\n";
+print STDERR "## BreakScaffolds starts, $date ##\n";
+print STDERR "#########################################################\n";
+
+## Open the files
+
+if ($opt_V) {
+    print STDERR "\n0) Creating the output files\n";
+}
+
+my $inseqio = Bio::SeqIO->new( -file => $input, -format => 'fasta');
+
+my $outfasta = $output . '.contigs.fasta';
+my $outgff = $output . '.scaffold_gaps.gff';
+
+my $outseqio = Bio::SeqIO->new( -file => ">$outfasta", -format => 'fasta');
+open my $outgffio, '>', $outgff;
+print $outgffio "#gff-version\t3\n";
+
+## Count sequences
+
+if ($opt_V) {
+    print STDERR "\n1) Parsing Sequence file\n";
+}
+
+my $seqC = `grep -c '>' $input`;
+chomp($seqC);
+
+my $total_gaps = 0;
+my $total_glen = 0;
+
+
+my $seqc = 0;
+while( my $seqobj = $inseqio->next_seq() ) {
+
+    $seqc++;
+    my $id = $seqobj->id();
+    my $len = $seqobj->length();
+    my $sc_end = $len;
+
+    if ($opt_V) {
+	print STDERR "\tParsing seqID=$id ($seqc of $seqC sequences)       \r";
+    }
+
+    my $seq = $seqobj->seq();
+
+    ## Write the comment line and the scaffold line
+
+    print $outgffio "#sequence-region $id 1 $sc_end\n";
+    my @scline = ($id, 'breakscf', 'supercontig', 1, $sc_end, '.', '.', '.',
+		  "ID=$id;Name=$id");
+    my $scline = join("\t", @scline);
+    print $outgffio "$scline\n";
+
+
+    ## First locate the N GAPs
+
+    my @nt = split(//, $seq);
+    my @contigs_st = ();
+    my @contigs_en = ();
+    my @gaps_st = ();
+    my @gaps_en = ();
+    
+    my ($n_reg_st, $n_reg_en, $first, $last) = (1, 1, 0, 0);
+
+    my $n = 0;
+    foreach my $nt (@nt) {
+	$n++;                                  ## Gff3 is 1-based coordinate
+    
+	if ($nt =~ m/^N$/i) {
+	
+	    if ($n_reg_en == 1) { 
+		($n_reg_st, $n_reg_en, $first) = (1, 0, 1);
+	    }
+	}
+	else {
+	
+	    if ($n_reg_st == 1) {
+		($n_reg_st, $n_reg_en, $last) = (0, 1, 1);
+	    }
+	}
+
+	if ($n_reg_st == 1 && $n_reg_en == 0) {
+	
+	    if ($first == 1) {
+		
+		$first = 0;
+		push @gaps_st, $n;
+		
+		if ($n > 1 ) {
+		    push @contigs_en, $n-1;
+		}
+	    }
+	}
+	elsif ($n_reg_st == 0 && $n_reg_en == 1) {
+
+	    if ($last == 1) {
+	      
+		$last = 0;
+		push @contigs_st, $n;
+
+		if ($n > 1) {
+		    push @gaps_en, $n-1;
+		}
+	    }
+	}
+
+    }
+
+    push @contigs_en, $n;
+    
+    my ($c, $s) =(0, 0);
+
+    my @contig_list = ();
+    my @gaps_list = ();
+
+    ## Merge the contigs where the gaps are smaller than nlength
+
+    foreach my $crd (@contigs_st) {
+    
+	if (defined $contigs_st[$c] && defined $contigs_en[$c]) {
+	
+	    if (defined $gaps_st[$c] && defined $gaps_en[$c]) {
+
+		my $gap_size = $gaps_en[$c] - $gaps_st[$c];
+		
+		if ($gap_size >= $nlength) {
+	       
+		    push @gaps_list, { start => $gaps_st[$c],
+				       end   => $gaps_en[$c] };
+		    push @contig_list, { start => $contigs_st[$s],
+					 end   => $contigs_en[$c] };
+
+		    $total_gaps++;
+		    $total_glen += $gap_size;
+		    
+		    $s = $c+1;
+		}		
+	    }
+	    else {
+	    
+		push @contig_list, { start => $contigs_st[$s],
+				     end   => $contigs_en[$c] };
+	    }
+	}
+	$c++;
+    }
+
+    ## Now it will format the contigs and the gaps and print them
+
+    my $t = 0;
+    foreach my $mb (@contig_list) {
+
+	my @line = ($id, 'breakscf', 'contig', $mb->{start}, $mb->{end}, '.',
+		    '.', '.');
+
+	my $ctg = sprintf "%03s", $t + 1;
+	my $ctgname = $id . 'Ctg' . $ctg;
+	my @c9 = ("ID=".$ctgname, "Name=".$ctgname, "Parent=".$id);
+	push @line, join(";", @c9);
+	my $line = join("\t", @line);
+	print $outgffio "$line\n";
+
+	my $ctgseq = Bio::Seq->new( 
+	    -id  => $ctgname, 
+	    -seq => $seqobj->subseq($mb->{start}, $mb->{end}) );
+	$outseqio->write_seq($ctgseq);
+	
+	my $gap = $gaps_list[$t];
+	if (defined $gap) {
+
+	    my @line = ($id, 'breakscf', 'gap', $gap->{start}, $gap->{end},
+			'.', '.', '.');
+
+	    my $gp = sprintf "%03s", $t + 1;
+	    my $gpname = $id . 'Gap' . $gp;
+	    my @c9 = ("ID=".$gpname, "Name=".$gpname, "Parent=".$id);
+	    push @line, join(";", @c9);
+	    my $line = join("\t", @line);
+	    print $outgffio "$line\n";
+	}
+
+	$t++;
+    }
+}
+
+print STDERR "\nReport:\n=======\n\tTotal Number of Gaps:\t$total_gaps\n";
+print STDERR "\tTotal Gap Length:\t$total_glen\n";
+print STDERR "#########################################################\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+      This script breaks the scaffold into contigs based in a min. N length 
+      defined by the -n <N_length argument>.
+
+      It will return three files:
+  
+       + output_basename.contig.fasta
+
+       + output_basename.scaffold_gaps.gff
+
+    Usage:
+     
+      BreakScaffolds.pl [-h] -f <input_fasta_file> -o <output_basename> 
+                             -n <N_length> [-V]
+
+    Flags:
+
+      -f <input_fasta_file>       input fasta file (mandatory)
+      -o <output_basename>        output basename
+      -n <N_length>               N minimum length to break a scaffold 
+                                  (3 by default)
+      -V <be_verbose>             be verbose (print parsing status)
+      -h <help>                   print the help
+     
+
+EOF
+exit (1);
+}
+
