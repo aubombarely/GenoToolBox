@@ -12,7 +12,7 @@
  MultiVcfTool [-h] -i <vcffiles> -c <coveragefiles> -o <outputbasename> 
                    [-d <deepfilter>] [-q <qscorefilter>] [-g <groups>]
                    [-f <outputformat>] [-p <ploidy>] [-m <max_markers>]
-                   [-s <num_structure_sets>] [-l <marker_list>] [-H]
+                   [-s <num_structure_sets>] [-l <marker_list>] [-H] [-V]
 
 =head2 I<Flags:>
 
@@ -70,6 +70,10 @@ B<marker_list>            file with the marker list (incomp. with -m and -s)
 
 B<avoid_superheteroz>     avoid heterozygosity when it excess the polyploid.
  
+=item -V
+
+B<be_verbose>             be verbose and print the parsing status.
+
 =item -h
 
 B<help>                   print the help
@@ -106,10 +110,11 @@ use Getopt::Std;
 use List::Util 'shuffle';
 
 our ($opt_i, $opt_c, $opt_o, $opt_d, $opt_q, $opt_g, $opt_f, $opt_p, $opt_m, 
-     $opt_s, $opt_l, $opt_H, $opt_h);
-getopts("i:c:o:d:q:g:f:p:m:s:l:Hh");
+     $opt_s, $opt_l, $opt_H, $opt_V, $opt_h);
+getopts("i:c:o:d:q:g:f:p:m:s:l:HVh");
 if (!$opt_i && !$opt_c && !$opt_o && !$opt_d && !$opt_q && !$opt_g && !$opt_f
-    && !$opt_m && !$opt_p && !$opt_s && !$opt_l && !$opt_H && !$opt_h) {
+    && !$opt_m && !$opt_p && !$opt_s && !$opt_l && !$opt_H && !$opt_V && 
+    !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -302,6 +307,11 @@ my %genotypes = (
     '-' => -9,
     );
 
+my %invgenotypes = ();
+foreach my $nt (keys %genotypes) {
+    $invgenotypes{$genotypes{$nt}} = $nt;
+}
+
 
 print STDERR "\n1) Parsing Vcf files\n\n";
 
@@ -338,8 +348,10 @@ foreach my $name (sort keys %vcffile) {
 	chomp($_);
 	$l++;
 
-	print STDERR "\t\tParsing line:$l of $L                  \r";
-	
+	if ($opt_V) {
+	    print STDERR "\t\tParsing line:$l of $L                  \r";
+	}
+
 	if ($_ !~ m/^#/) {
 
 	    my @vcf_row = split(/\t/, $_);
@@ -455,8 +467,10 @@ foreach my $cname (sort keys %covfile) {
 	chomp($_);
 	$b++;
 
-	print STDERR "\t\tParsing line:$b of $B                  \r";
-	
+	if ($opt_V) {
+	    print STDERR "\t\tParsing line:$b of $B                  \r";
+	}
+
 	if ($_ !~ m/^#/) {
 
 	    my ($seqid, $pos, $cov) = split(/\t/, $_);
@@ -554,6 +568,8 @@ foreach my $seqid (sort {$a cmp $b} keys %snp) {
 
     foreach my $coord (sort {$a <=> $b} keys %coords) {
     
+	## Produce the SNP/markers ordered by ID and coordinate
+
 	my $mark = $seqid . ':' . $coord;
 	my %struc_mark = ();
 	my $avoid_htz = 0;
@@ -581,7 +597,9 @@ foreach my $seqid (sort {$a cmp $b} keys %snp) {
 	    my $var = '-';
 	    if (exists $coords{$coord}->{$sample}) {
 
-		print STDERR "\tAnalyzing $seqid:$coord [$sample]     \r";
+		if ($opt_V) {
+		    print STDERR "\tAnalyzing $seqid:$coord [$sample]     \r";
+		}
 
 		my @vcfrow = @{$coords{$coord}->{$sample}};
 		$var = join(",", sort(split(',', $vcfrow[4])));
@@ -682,7 +700,7 @@ elsif ($maxmarkers !~ m/^\d+$/) {
 ## It will select a random number of makers if maxmarkers < scalar(keys %struc)
 ## or will take the file.
 
-print STDERR "\n\n4) Creating Structure file\n";
+print STDERR "\n\n4) Creating Structure and PHASE files\n";
 
 my $set = 0;
 my @struc_mrks_list = ();
@@ -697,7 +715,9 @@ while ($set < $str_sets) {
 	while(<$mrkls_io>) {
 	
 	    chomp($_);
-	    print STDERR "\tParsing marker file, line $_              \r";
+	    if ($opt_V) {
+		print STDERR "\tParsing marker file, line $_              \r";
+	    }
 
 	    ## Markers could not have been selected, so we'll check if they
 	    ## are at selelected marks.
@@ -753,11 +773,75 @@ while ($set < $str_sets) {
     my @ordmarks = ();
     my @mrkdist = ();
 
+    ## It will print one PHASE file per ID
+    ## Phase output will one per chromosome as:
+    ## 2                                      NUMBER OF INDIVIDUALS
+    ## 3                                      NUMBER OF LOCI
+    ## P 1000 2000 3000                       POSITION LOCI
+    ## SSS                                    LOCUS TYPE (S, SNP by default)
+    ## A                                      INDIVIDUAL ID 1
+    ## 1 2 3                                  BIALLELIC GENOTYPES 1 for ID 1
+    ## 1 2 2                                  BIALLELIC GENOTYPES 2 for ID 1
+    ## B                                      INDIVIDUAL ID 2
+    ## 1 1 2                                  BIALLELIC GENOTYPES 1 for ID 2
+    ## 1 1 3                                  BIALLELIC GENOTYPES 2 for ID 2
+
+    ## This section will order the markers for structure and calculate their
+    ## distance but also will print the output for phase.
+
     foreach my $id (sort keys %newmrks) {
     
 	my $p = 0;
-	foreach my $pos (sort keys %{$newmrks{$id}}) {
+
+	## Create the file
 	
+	my $outfile_phase = $outbase . '.phase.set' . $set . '.' . $id . '.txt';
+	open my $ofh_ph, '>', $outfile_phase;
+	print STDERR "Output filename: $outfile_phase\n";
+
+	## PHASE First Line: Number of individuals
+	
+	my @marks_by_pos = sort {$a <=> $b} keys %{$newmrks{$id}};
+	my $first_mark = $newmrks{$id}->{$marks_by_pos[0]};
+	my @samples = sort keys %{$struc_data{$first_mark}};
+	my $ind_number = scalar(@samples);
+
+	print $ofh_ph "$ind_number\n";
+
+	## PHASE Second Line: Number of Loci (markers)
+
+	my $loci_number = scalar(@marks_by_pos);
+
+	print $ofh_ph "$loci_number\n";
+
+	## PHASE Third Line: Positions of the Loci starting with P
+
+	my $loci_pos = 'P ' . join(" ", @marks_by_pos);
+	print $ofh_ph "$loci_pos\n";
+
+	## PHASE Four Line: As many S as loci;
+
+	my $s_line = 'M' x $loci_number;
+	print $ofh_ph "$s_line\n";
+
+	## Use a numeric sorting for the position
+
+	## Now it will introduce the data in a data structure such as:
+	## $phase{$ind_id} = { 1 => \@genotypes, 2 => \@genotypes }
+
+	my %phase = ();
+	foreach my $ind_id (@samples) {
+	
+	    my $pol = 1;
+	    while($pol - 1 <= $ploidy) {
+	    
+		$phase{$ind_id}->{$pol} = [];
+		$pol++;
+	    }
+	}
+
+	foreach my $pos (@marks_by_pos) {
+
 	    if ($p == 0) {
 	    
 		push @mrkdist, -1;
@@ -769,9 +853,48 @@ while ($set < $str_sets) {
 		push @mrkdist, $dist;
 	    }
 	    push @ordmarks, $newmrks{$id}->{$pos};
+
+	    ## Get the genotypes
+
+	    foreach my $ind_id (@samples) {
+	    
+		
+		my @gentps = @{$struc_data{$newmrks{$id}->{$pos}}->{$ind_id}};
+		
+		my $g = 1;
+		foreach my $gtp (@gentps) {
+		
+		    if ($g - 1 <= $ploidy) {
+		    
+			my $pgtp = $invgenotypes{$gtp};
+			if ($gtp =~ m/\-9/) {
+			    $pgtp = '?';
+			}
+			
+			push @{$phase{$ind_id}->{$g}}, $pgtp;
+		    } 
+		    $g++;
+		}
+	    }
+
 	    $p++;
 	}
 	
+	## Now it will print the ind_IDs and the genotypes in the phase file
+
+	foreach my $ind_id (@samples) {
+	
+	    print $ofh_ph "$ind_id\n";
+	    
+	    foreach my $gtp (keys %{$phase{$ind_id}}) {
+	    
+		my @getypes = @{$phase{$ind_id}->{$gtp}};
+		my $getypes_line = join(" ", @getypes);
+		if ($getypes_line =~ m/\w+/) {
+		    print $ofh_ph "$getypes_line\n";		
+		}	
+	    }
+	}
     }
 
     ## Now it will change the format from: 
@@ -796,30 +919,40 @@ while ($set < $str_sets) {
 	
     }
 
-    ## structure output
+    ## structure output will be as
+    ## Gm01:1000 Gm01:2000 Gm01:2000        MARKERS (separated by spaces)
+    ## -1 1000 2000                         DISTANCE BETWEEN MARKERS
+    ## A 1 1 2 2 3 2                        GENOTYPES INDIVIDUAL 1
+    ## B 1 1 1 1 2 3                        GENOTYPES INDIVIDUAL 2
     
     my $outfile2 = $outbase . '.struct.set' . $set .'.txt';
     open my $ofh2, '>', $outfile2;
+
     my $str_marknames = join(" ", @ordmarks);
-    print $ofh2 "$str_marknames\n";
+
+    print $ofh2 "$str_marknames\n";                    ## Print Markers
     
     print STDERR "\nOutput filename: $outfile2\n";
     print STDERR "\n\tMax. markers=$maxmarkers\n";
 
     my $str_markdist = join(" ", @mrkdist);
-    print $ofh2 "$str_markdist\n";
+    print $ofh2 "$str_markdist\n";                     ## Print marker distances
     
-    foreach my $stsample (sort keys %struc_samples) {
+    foreach my $stsample (sort keys %struc_samples) {  ## Print Genotypes
 	
 	my $gtypes_line = join(" ", @{$struc_samples{$stsample}}); 
 	print $ofh2 "$gtypes_line\n";
     }
     close($ofh2);
-    
+
     $set++;
 }
 
+
+
+
 print STDERR "\n\nDone.\n\n";
+exit;
 
 
 =head2 help
@@ -841,14 +974,14 @@ sub help {
 
     Description:
 
-      
+       This script parse multiple vcf files and creates a common file.
 
     Usage:
 
      MultiVcfTool [-h] -i <vcffiles> -c <coveragefiles> -o <outputbasename> 
                    [-d <deepfilter>] [-q <qscorefilter>] [-g <groups>]
                    [-f <outputformat>] [-p <ploidy>] [-m <max_markers>]
-                   [-s <num_structure_sets>] [-l <marker_list>] [-H]
+                   [-s <num_structure_sets>] [-l <marker_list>] [-H] [-V]
 
     Flags:
 
@@ -870,6 +1003,7 @@ sub help {
                                   and -s)
       -H <avoid_superheteroz>     avoid heterozygosity when it excess the 
                                   polyploid.
+      -V <be_verbose>             be verbose and print the parsing status
       -h <help>                   print the help
 
 
