@@ -1,0 +1,684 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ Match2GeneGff3
+ Script to convert match/match_part into gene/exon
+
+=cut
+
+=head1 SYPNOSIS
+
+ Match2GeneGff3 [-h] -g <gff3_file> -s <sources> [-o <gff3_output>]
+                     [-e <equivalences>] [-i <idlist>] [-a <avoid_source_list> ]
+                     [-K] [-C] [-V]
+
+
+=head2 I<Flags:>
+
+=over
+
+=item -g
+
+B<gff3_file>              gff3 input file (mandatory)
+
+=item -s
+
+B<sources>                sources for gff3 file, for example snap  (mandatory)
+
+=item -o
+
+B<gff3_output>            gff3 output file (default: input_formated.gff3)
+
+=item -e
+
+B<equivalences>           equivalences for gff3 type (by default
+                          match=gene,match_part=exon)
+
+=item -i
+
+B<idlist>                 idlist to select to convert.
+
+=item -a
+
+B<avoid_source_list>      list of sources to skip for the output (sep=',')
+
+=item -K
+
+B<keep_noconverted>       keep no-converted IDs
+
+=item -C
+
+B<add_CDS>                add CDS type with the same coordinates starting with
+                          phase 0.
+
+=item -V
+
+B<be_verbose>             be verbose and print status messages
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This scripts converts some types (match and match_part) into gene and exon
+ types. It option -C is used it will add CDS feature  with the same coordinates
+ than exon type. It will calculate the phase starting with the phase 0.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ Match2GeneGff3
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::SeqIO;
+
+our ($opt_g, $opt_s, $opt_o, $opt_e, $opt_i, $opt_a, $opt_K, $opt_C, $opt_V, 
+     $opt_h);
+
+getopts("g:s:o:e:i:a:KCVh");
+
+if (!$opt_g && !$opt_s && !$opt_e && !$opt_i && !$opt_a && !$opt_K && !$opt_C 
+    && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Check variables.
+
+my $gff_file = $opt_g ||
+    die("DATA ARGUMENT: -g <gff3_file> was not supplied.\n");
+
+my $src = $opt_s ||
+    die("DATA ARGUMENT: -s <source> was not supplied.\n");
+
+my %srclist = ();
+foreach my $indsrc (split(/,/, $src)) {
+
+    $srclist{$indsrc} = 1;
+}
+
+    
+my $out = $opt_o ||
+    $gff_file . '_formated.gff';
+
+my %eq = ( 'match' => 'gene', 'match_part' => 'exon');
+if ($opt_e) {
+
+    %eq = ();
+    foreach my $eqline (split(/,/, $opt_e)) {
+
+	if ($eqline =~ m/^(.+)=(.+)$/) {
+	
+	    $eq{$1} = $2;
+	}
+    }
+}
+
+my %avlist = ();
+if ($opt_a) {
+    
+    foreach my $aelement (split(/,/, $opt_a)) {
+	$avlist{$aelement} = 1;
+    }
+}
+
+
+## Print header
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Match2GeneGff3 Starts ($date)   ##";
+print STDERR "\n############################################################\n";
+
+## STEP0: Parse ID file ####################################################
+
+print_header("Step 1: Parse ID file");
+
+my %ids = ();
+
+if ($opt_i) {
+
+    open my $idfh, '<', $opt_i;
+    
+    while(<$idfh>) {
+    
+	chomp($_);
+	$ids{$_} = 1;
+    }
+}
+else {
+
+    print STDERR "\n\tNo ID file was supplied. Skipping this step.\n";
+}
+
+print_header("Step 2: Parse GFF3 file");
+
+## Define the variables. GFF3 have to be stored with the following requeriments:
+## 1) Ordered by SequenceID, Start.coordinate
+## 2) Ordered by parent/children elements, usually gene => mRNA => exon => CDS.
+## 3) Each GFF3 will be stored as a hash_ref where keys=LineNumber, value=Aref.
+
+my ($ord_href, $dat_href, $par_href) = parse_gff3($gff_file, \%avlist);
+
+my $ln_p = scalar(keys %{$par_href});
+
+print STDERR "\tDone.\n\t$ln_p lines have been parsed from file:\n";
+print STDERR "\t$gff_file\n";
+
+print_header("Step 3: Creating GFF3 output");
+
+open my $ofh, '>', $out;
+print $ofh "##gff-version\t3\n";
+
+$date = `date`;
+chomp($date);
+print $ofh "##created: $date\n";
+
+my %ord = %{$ord_href};
+my %dat = %{$dat_href};
+my %par = %{$par_href};
+
+## Types are not ordered alphabetically, so we'll define an array to order them
+## based in the parent/child relations.
+
+my @ord_types = (
+    'chromosome', 'ultracontig', 'supercontig', 'contig', 'gene', 
+    'transcript', 'mRNA', 'exon', 'five_prime_UTR', 'CDS', 'three_prime_UTR',
+    'polypeptide', 'polypeptide_domain', 'ncRNA', 'tRNA', 'rRNA', 'miRNA', 
+    'snoRNA', 'snRNA', 'pseudogene', 'pseudogenic_transcript', 
+    'pseudogenic_exon', 'repeat_region', 'match', 'match_part', 
+    'expressed_sequence_match', 'translated_nucleotide_match', 'protein_match'
+    );
+
+my %printed = ();
+
+foreach my $seqid (sort keys %ord) {
+
+    foreach my $st (sort { $a <=> $b } keys %{$ord{$seqid}}) {
+    
+	foreach my $typ (@ord_types) {
+	
+	    ## Select when exists the ordered line and is not in avoid list
+
+	    if (exists $ord{$seqid}->{$st}->{$typ}) {
+	    
+		my @ln = @{$ord{$seqid}->{$st}->{$typ}};
+
+		foreach my $ln (@ln) {
+		
+		    if (exists $dat{$ln}) {
+		    
+			my @dt = @{$dat{$ln}};
+
+			my %feat =  _feat2hash($dt[8]);
+
+			if ($feat{'ID'} eq $dt[0]) {
+			
+			    print $ofh "##sequence-region $dt[0] 1 $dt[4]\n";
+			}
+
+			if (exists $srclist{$dt[1]}) {
+			
+			    if (exists $eq{$dt[2]}) {
+
+				$dt[2] = $eq{$dt[2]};
+				
+				## Print 'gene' and 'mRNA'
+
+				if ($dt[2] eq 'gene') {
+
+				    ## Create gene 
+
+				    my @dt_gene = @dt;
+				    
+				    my $gID = $feat{'Name'};
+				    $gID =~ s/-mRNA.+//;
+				    my @gFeat = (
+					'ID=' . $gID,
+					'Name=' . $gID,
+					'Origin=' . $feat{'ID'} 
+					);
+				    $dt_gene[8] = join(";", @gFeat);
+
+				    my $gprint = join("\t", @dt_gene);
+				    print $ofh "$gprint\n";
+
+				    ## Create mRNA
+
+				    my @dt_mrna = @dt;
+				    $dt_mrna[2] = 'mRNA';
+				    my $mID = $feat{'Name'};
+				    my @mFeat = (
+					'ID=' . $mID,
+					'Name=' . $mID,
+					'Parent=' . $gID
+					);
+				    $dt_mrna[8] = join(";", @mFeat);
+
+				    
+				    
+				    my $mprint = join("\t", @dt_mrna);
+				    print $ofh "$mprint\n";
+
+				    ## Add to the printed hash
+
+				    $printed{$ln} = 1;
+
+				    ## get the children and print them too
+
+				    if (exists $par{$ln}) {
+				    
+					my $e = 0;
+					my $E = scalar(@{$par{$ln}});
+					foreach my $chln (@{$par{$ln}}) {
+				    
+					    my @chdt = @{$dat{$chln}};
+					    $e++;
+
+					    if (exists $eq{$chdt[2]}) {
+			    
+						$chdt[2] = $eq{$chdt[2]};
+						
+						my $exn = $e;
+						if ($chdt[6] =~ m/-/) {
+						    $exn = $E - $e + 1;
+						}
+
+						## Print 'exon'
+						
+						if ($chdt[2] eq 'exon') {
+
+						    my @dt_exon = @chdt;
+						    my %chft = 
+							_feat2hash($chdt[8]);
+
+						    $dt_exon[2] = 'exon';
+						    
+						    my $peID = $chft{'Target'};
+						    my @peID = split(/\s+/, 
+								     $peID);
+
+						    my $eID = $peID[0].':exon';
+						    $eID .= sprintf("%02s", 
+								    $exn);
+						    
+						    my @eFeat = (
+							'ID=' . $eID,
+							'Name=' . $eID,
+							'Parent=' . $peID[0],
+							'Target=' . $peID,
+							'Gap=' . $chft{'Gap'}
+							);
+						    
+						    $dt_exon[8] = join(";",
+								       @eFeat);
+
+						    my $eprint = join("\t", 
+								      @dt_exon);
+						    print $ofh "$eprint\n";
+
+						    ## Now it will print CDS
+
+						    my @tg_e = split(/\s+/, 
+								     $peID);
+
+
+						    ## Get the phase dividing
+						    ## by 3 and taking the rem
+
+						    my $stp = Math::BigFloat
+							->new($tg_e[1] - 1);
+						    my ($quo, $rem) = $stp
+							->bdiv('3');
+						    
+						    my @dt_cds = @chdt;
+						    $dt_cds[2] = 'CDS';
+						    
+						    $dt_cds[7] = $rem;
+
+						    my $cID = $eID;
+						    $cID =~ s/exon/CDS/;
+						    
+						    my @cFeat = (
+							'ID=' . $cID,
+							'Name=' . $cID,
+							'Parent=' . $peID[0],
+							'Target=' . $peID,
+							'Gap=' . $chft{'Gap'}
+							);
+						    
+						    $dt_cds[8] = join(";",
+								       @cFeat);
+
+						    my $cprint = join("\t", 
+								      @dt_cds);
+						    print $ofh "$cprint\n";
+						}
+					    }
+					}
+				    }
+				}
+			    }
+			}
+			else {
+			    
+			    my $dt_line = join("\t", @dt);
+			    print $ofh "$dt_line\n";
+			}			
+		    }		    
+		}	
+	    }  
+	}
+    }
+}
+
+
+
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Match2GeneGff3 Ends   ($date)   ##\n";
+print STDERR "############################################################\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+       
+      This scripts converts some types (match and match_part) into gene and 
+      exon types. It option -C is used it will add CDS feature  with the same
+      coordinates than exon type. It will calculate the phase starting with
+      the phase 0.
+
+    Usage:
+     
+      Match2GeneGff3 [-h] -g <gff3_file> -s <sources> [-o <gff3_output>]
+                    [-e <equivalences>] [-i <idlist>] [-K] [-C] [-V]
+      
+    Flags:
+ 
+      -g <gff3_file>              gff3 file (mandatory)
+      -s <sources>                 source for gff3 file, (example snap,mandatory)
+      -o <gff3_output>            gff3 output file (default:input_formated.gff3)
+      -e <equivalences>           equivalences for gff3 type (by default
+                                  match=gene,match_part=exon)
+      -i <idlist>                 idlist to select to convert.
+      -K <keep_noconverted>       keep no-converted IDs
+      -C <add_CDS>                add CDS type with the same coordinates 
+                                  starting with phase 0.
+      -V <be_verbose>             be verbose and print status messages
+      -h <help>                   print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+=head2 parse_gff3
+
+  Usage: my ($ord_href, $gff_href, $par_href) = parse_gff3($gff_file, $listhrf);
+
+  Desc: Parse GFF3 file and returns two hashrefs.
+
+  Ret: $ord_href, a hash reference with the following structure:
+         + key=SeqID, value=hasref with:
+           + key=StartCoord, value=hashref with:
+             + key=Type, value=arrayref. with line numbers.
+      
+       $gff_href, a hash reference with the following structure:
+         + key=LineNumber, value=Array ref. with GFF3 data.
+
+       $par_href, a hash to store parent children relation:
+         + key=LineNumber, value=Array ref with LineNumber
+
+
+  Args: $gfffile, gff filename
+        $listhrf, a hashref with the sources to avoid
+
+  Side_Effects:
+
+  Example: my ($ord_href, $gff_href, $par_href) = parse_gff3($gff_file);
+
+=cut
+
+sub parse_gff3 {
+    my $gfffile = shift ||
+	die("ERROR: No gff3 file was supplied to the function parse_gff3()\n");
+
+    my $avlist_href = shift;
+
+    my %avlist = ();
+    if (defined $avlist_href && ref($avlist_href) eq 'HASH') {
+    
+	%avlist = %{$avlist_href};
+    }
+
+    ## Define the variables that wil be returned:
+
+    my %ord = ();
+    my %dat = ();
+    my %par = ();
+
+    ## Define the internal variables with the equivalences between 
+    ## FeatureIDs and LineN
+
+    my %eq = ();
+
+    open my $gfffh, '<', $gff_file;
+    my $l = 0;
+    
+    my $L = 'NA';
+    if ($opt_V) {
+    
+	$L = `cut -f1 $gff_file | wc -l`;
+	chomp($L);
+    }
+
+
+    while(<$gfffh>) {
+	chomp($_);
+	$l++;
+
+	my $fasta = 0;
+
+	unless ($_ =~ m/#/ && $fasta == 0) {
+
+	    my @data = split(/\t/, $_);
+	
+	    ## First store %dat and %ord
+	
+	    $dat{$l} = \@data;
+
+	    ## ignore sources from avoid list
+	
+	    unless (exists $avlist{$data[1]}) {
+	    
+		if (exists $ord{$data[0]}) {	
+		    if (exists $ord{$data[0]}->{$data[3]}) {	    
+			if (exists $ord{$data[0]}->{$data[3]}->{$data[2]}) {
+			    push @{$ord{$data[0]}->{$data[3]}->{$data[2]}}, $l;
+			}
+			else {	
+			    $ord{$data[0]}->{$data[3]}->{$data[2]} = [$l];
+			}
+		    }
+		    else {	    
+			$ord{$data[0]}->{$data[3]} = { $data[2] => [$l] };
+		    }
+		}
+		else {	
+		    $ord{$data[0]} = { $data[3] => { $data[2] => [$l] } };
+		}
+
+
+		## Get the features as a hash
+
+		my %feats = ();
+		foreach my $featline (split(/;/, $data[8])) {
+		
+		    if ($featline =~ m/^(.+)=(.+)$/) {
+			$feats{$1} = $2;
+		    }
+		}
+		
+		## Second get the Parent-Child relation
+	    
+		if (defined $feats{'ID'}) {
+		    
+		    my $id = $feats{'ID'};
+		    
+		    if (defined $eq{$id}) {
+			#print STDERR "\nWARNING: ID=$id isnt unique (L=$l)\n";
+		    }
+		    else {
+
+			## Add a new featureID, lineN
+			$eq{$id}= $l;
+		    }
+		}
+		
+
+		if (defined $feats{'Parent'}) {
+
+		    ## Get the ParentID and check if that exists
+		    my $parid = $feats{'Parent'};
+
+		    if (defined $eq{$parid}) {
+
+			my $pl = $eq{$parid};
+
+			if (defined $par{$pl}) {
+			    push @{$par{$pl}}, $l;
+			}
+			else {
+			    $par{$pl} = [$l];
+			}
+		    }
+		    else {	    
+			print STDERR "\nWARNING: Parent=$parid doesnt exists";
+			print STDERR " (L=$l)\n";
+		    }
+		}
+	    }
+		
+	    if ($opt_V) {
+		
+		print STDERR "\t Parsing line $l ($L)         \r";
+	    }
+	}
+	else {
+	    
+	    if ($_ =~ m/##FASTA/i) {
+		$fasta = 1;
+	    }
+	}
+    }
+    return (\%ord, \%dat, \%par);
+}
+
+=head2 _feat2hash
+
+  Usage: my %feats = _feat2hash($line);
+
+  Desc: parse a feature line and return in a hash format
+
+  Ret: %feats, a hash with key=tagID and value=tagValue
+
+  Args: $line, a scalar with features separated by commas
+
+  Side_Effects: None
+
+  Example: my %feats = _feat2hash($line);
+
+=cut
+
+sub _feat2hash {
+    my $line = shift;
+
+    my %feat = ();
+    my @feats = split(/;/, $line);
+    foreach my $ft (@feats) {
+	
+	if ($ft =~ m/^(.+)=(.+)$/) {
+	    
+	    $feat{$1} = $2;			
+	}
+    }
+
+    return %feat;
+}
+
+####
+1; #
+####
