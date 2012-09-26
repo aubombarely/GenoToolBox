@@ -1,0 +1,1073 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GffIdRename
+ Script to change the ID names for gene/mRNA/exon/CDS from Maker gff3 files.
+
+=cut
+
+=head1 SYPNOSIS
+
+ GffIdRename [-h] -g <gff3_file> [-f <fasta_file_list>] -r <rules> 
+                  -c [<countformat>] [-e <exclude_type_list> ]
+                  [-V] [-E]
+
+
+=head2 I<Flags:>
+
+=over
+
+=item -g
+
+B<gff3_file>              gff3 input file (mandatory)
+
+=item -f
+
+B<fastafile_list>         list of fasta files separated by commas (optional)
+
+=item -r
+
+B<rules>                  rules to change the IDs separated by semicolons
+
+=item -c 
+
+B<count_format>           number of zeros to add to the count string to have
+                          the same length (see description for defaults)
+
+=item -e
+
+B<exclude_type_list>      list of types to skip for the output (sep=',')
+
+=item -E
+
+B<exclude_empty_seqIDs>   exclude the unique seqID lines (without any feature)
+
+=item -V
+
+B<be_verbose>             be verbose and print status messages
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script has several functions over the gff3 and the fasta files produced
+ by Maker:
+
+  1) Exclude some types (detailed with -e parameter, for example: 
+     match.match_part)
+
+  2) Exclude the seqID where only the seqID is detailed (for example a scaffold
+     without any feature, just the scaffold).
+
+  3) This script can change the column 9 in the gff3 file for features tags such
+     as ID, Name, Parent and Target.
+ 
+     Maker feature tags have the following structure:
+     
+     gene            => pred-SeqID-status-gene-\d+\.\d+
+     mRNA            => pred-SeqID-status-gene-\d+\.\d+-mRNA-\d+
+     exon            => pred-SeqID-status-gene-\d+.\d+-mRNA-\d+:exon:?\d+
+     CDS             => pred-SeqID-status-gene-\d+.\d+-mRNA-\d+:(cds|CDS)\d*
+     five_prime_UTR  => pred-SeqID-status-gene-\d+.\d+-mRNA-\d+:five_prime_utr
+     three_prime_UTR => pred-SeqID-status-gene-\d+.\d+-mRNA-\d+:three_prime_utr
+
+     For example:
+     * Genes: 
+      augustus_masked-Niben044Ctg23129049-abinit-gene-0.0
+      augustus_masked-Niben044Scf00002787-processed-gene-1.1
+      maker-Niben044Scf00038998-augustus-gene-0.5
+     * mRNA
+      augustus_masked-Niben044Ctg23129049-abinit-gene-0.0-mRNA-1
+     * exon
+      augustus_masked-Niben044Ctg23129049-abinit-gene-0.0-mRNA-1:exon01
+     * CDS
+      augustus_masked-Niben044Ctg23129049-abinit-gene-0.0-mRNA-1:CDS01
+     
+     The script will make the following changes:
+   
+     -r 's/Niben044(\w)/Nb\1/'
+     (note: more than one rule can be added with comma, to use ',' in the
+      regexp use \{comma})
+
+     * Genes:
+      ID=NbC23129049g0001;PredictionNote=augustus_masked-abinitio
+      ID=NbS00002787g0101;PredictionNote=augustus_masked-processed
+      ID=NbS00038998g0005;PredictionNote=maker-augustus
+     * mRNA
+      ID=NbC23129049g0001.1;Parent=NbC23129049g0001
+     * exon
+      ID=NbC23129049g0001.1:exon:0001;Parent=NbC23129049g0001.1
+     * CDS
+      ID=NbC23129049g0001.1:CDS:0001;Parent=NbC23129049g0001.1
+
+     Numeric formats will be calculated previously in the following way:
+     1) Genes: Composed for two numbers, the formating will be set to:
+        $gene_c1 = ` awk '{ if ($3 ~ /gene/) print $0}' GffFile | cut -f9 | 
+                     cut -d ';' -f1 | sed -r 's/ID=//' | cut -d '-' -f 5 | 
+                     cut -d '.' -f1 | sort -nr | head -n1`;
+        $lgene_c1 = length($gene_c1);
+        $gene_c2 = ` awk '{ if ($3 ~ /gene/) print $0}' GffFile | cut -f9 | 
+                     cut -d ';' -f1 | sed -r 's/ID=//' | cut -d '-' -f 5 | 
+                     cut -d '.' -f2 | sort -nr | head -n1`;
+        $lgene_c2 = length($gene_c2);
+     
+     2) mRNA: Composed for one number.
+        $mRNA_c1 =  ` awk '{ if ($3 ~ /mRNA/) print $0}' GffFile | cut -f9 | 
+                     cut -d ';' -f1 | sed -r 's/ID=//' | cut -d '-' -f 7 | 
+                     sort -nr | head -n1`;
+        $lmRNA_c2 = length($mRNA_c2);
+    
+     3) exon, CDS and UTRs. The highest exon number per gene for human is 148,
+        so the $lexon_c and $lcds_c will be set to 3.
+
+     To change these parameters you can use the option -c Fgene,FmRNA,Fexon,
+     FCDS,FUTRs, for example -c 5,5,2,2,2 (Any string with less than five 
+     values will be filled with default values).
+
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ Match2GeneGff3
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::SeqIO;
+
+our ($opt_g, $opt_f, $opt_r, $opt_c, $opt_e, $opt_E, $opt_V, $opt_h);
+
+getopts("g:f:r:c:e:EVh");
+
+if (!$opt_g && !$opt_f && !$opt_r && !$opt_c && !$opt_e && !$opt_E 
+    && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Print header
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GffIdRename Starts ($date)   ##";
+print STDERR "\n############################################################\n";
+
+## STEP0: Check arguments ####################################################
+
+print_header("Step 0: Checking arguments");
+
+## Check variables.
+
+my $gff_file = $opt_g ||
+    die("DATA ARGUMENT: -g <gff3_file> was not supplied.\n");
+
+my @fastafiles = ();
+if (defined $opt_f) {
+
+    @fastafiles = split(/,/, $opt_f);
+}
+
+my @drules = ();
+if ($opt_r) {
+
+    foreach my $rule (split(/,/, $opt_r)) {
+    
+	$rule =~ s/\{comma}/,/g;
+
+	if ($rule =~ m/s\/.+\/.+\//) {
+	    push @drules, $rule;
+	}
+	else {
+	
+	    print STDERR "\nWARNING: Rule $rule doesnt have format s///\n\n";
+	}
+    }
+}
+else {
+
+    print STDERR "\nWARNING: No -r <rule> parameter was used.\n\n";
+}
+
+## Now it will get the count formats:
+
+my @fcounts = ();
+if (defined $opt_c) {
+    @fcounts = split(/,/, $opt_c);
+}
+
+if (scalar(@fcounts) > 5) {
+
+    print STDERR "\nWARNING: More than 5 arguments were suppplied to -c ";
+    print STDERR "option. Extra arguments will be ignored\n";
+}
+if (scalar(@fcounts) == 0) {
+
+    ## Get the fgene_c
+    print STDERR "\nGetting the formating values for gene numbering.\n";
+    my $gene_c1 = ` awk '{ if (\$3 ~ /gene/) print \$0}' $gff_file | cut -f9 | 
+                    cut -d ';' -f1 | sed -r 's/ID=//' | cut -d '-' -f 5 | 
+                    cut -d '.' -f1 | sort -nr | head -n1`;
+    chomp($gene_c1);
+    my $lgene_c1 = length($gene_c1);
+    my $gene_c2 = ` awk '{ if (\$3 ~ /gene/) print \$0}' $gff_file | cut -f9 | 
+                    cut -d ';' -f1 | sed -r 's/ID=//' | cut -d '-' -f 5 | 
+                    cut -d '.' -f2 | sort -nr | head -n1`;
+    chomp($gene_c2);
+    my $lgene_c2 = length($gene_c2);
+
+    print STDERR "\tGene default counter format: $lgene_c1 + $lgene_c2\n";
+
+    push @fcounts, $lgene_c1 . '+' . $lgene_c2;
+}
+if (scalar(@fcounts) == 1) {
+
+    ## Get the fmRNA_c
+    print STDERR "\nGetting the formating values for mRNA numbering.\n";
+    my $mRNA_c1 =  ` awk '{ if (\$3 ~ /mRNA/) print \$0}' $gff_file | cut -f9 | 
+                     cut -d ';' -f1 | sed -r 's/ID=//' | cut -d '-' -f 7 | 
+                     sort -nr | head -n1`;
+    chomp($mRNA_c1);
+    my $lmRNA_c1 = length($mRNA_c1);
+
+    print STDERR "\tmRNA default counter format:\t$mRNA_c1\n";
+
+    push @fcounts, $lmRNA_c1;
+}
+if (scalar(@fcounts) == 2) {
+
+    push @fcounts, 3;
+    print STDERR "\tExon default counter format:\t3\n";
+}
+if (scalar(@fcounts) == 3) {
+
+    push @fcounts, 3;
+    print STDERR "\tCDS default counter format:\t3\n";
+}
+if (scalar(@fcounts) == 4) {
+
+    push @fcounts, 3;
+    print STDERR "\tUTRs default counter format:\t3\n";
+}
+
+my %excltypes = ();
+if ($opt_e) {
+
+    foreach my $type (split(/,/, $opt_e)) {
+	
+	$excltypes{$type} = 1;
+    }
+}
+
+
+print_header("Step 1: Parse and Processing GFF3 file");
+
+open my $gfffh, '<', $gff_file;
+
+my $l = 0;
+my $L = 'NA';
+if ($opt_V) {
+    
+    $L = `cut -f1 $gff_file | wc -l`;
+    chomp($L);
+}
+
+my $fasta = 0;
+
+## It will store each line as:
+
+my %seqiddata = ();
+
+## For each seqid it'll store the lines in the same reading order
+## but it will order the seqIDs to print them
+
+my @fastadata = ();
+
+## Keep equivalences between gene/mRNA old and new IDs
+
+my %equivid = ();
+
+## This variable will store strand and how many exons, cds and utrs has each 
+## mRNA to be able to rename them during the gff printing.
+
+my %mrnacomp = ();
+
+## Create a children list for mRNA
+
+my %mrnachildren = ( exon            => 1, 
+		     CDS             => 1, 
+		     five_prime_UTR  => 1, 
+		     three_prime_UTR => 1
+    );
+
+while(<$gfffh>) {
+    chomp($_);
+    $l++;	
+
+    ## Switch for selected type
+
+    my $selectedtype = 1;
+
+    if ($opt_V) {
+		    
+	print STDERR "\tParsing line $l ($L)         \r";
+    }
+
+    unless ($_ =~ m/#/ && $fasta == 0) {
+
+	my @data = split(/\t/, $_);
+	
+	## First store %dat and %ord
+	
+	if (scalar(@data) == 9) {
+
+	    my %feats = ();
+	    my @ordtags = ();       ## To keep the original order with the tags
+	    foreach my $feat (split(/;/, $data[8])) {
+	    
+		if ($feat =~ m/^(.+)=(.+)$/) {
+		
+		    $feats{$1} = $2;
+		    push @ordtags, $1;
+		}
+	    }
+
+	    if (exists $excltypes{$data[2]}) {
+	    
+		$selectedtype = 0;
+	    }
+
+
+	    my @newfeats = ();
+
+	    if ($data[2] eq 'gene') {
+	    
+		## Genes should have at least two tags: ID and Name
+		## The script will create two more: AltID and PredictionNote
+
+		my $id = $feats{'ID'};
+		
+		unless (defined $id) {
+		
+		    warn("\nWARNING: Gene for line:$l doesn't have any ID\n");
+		}
+		else {
+		
+		   ## use rename function
+		    
+		   my ($newid, $predic) = rename_gene($id, \@drules, \@fcounts);
+
+		   ## Now it will add the new feats
+
+		   foreach my $tag (@ordtags) {
+		   
+		       if ($tag eq 'ID' or $tag eq 'Name') {
+		       
+			   push @newfeats, $tag . '=' . $newid;
+		       }
+		       else {
+		       
+			   push @newfeats, $tag . '=' . $feats{$tag};
+		       }
+		   }
+
+		   ## Additionally it will add the prediction note
+		   
+		   push @newfeats, 'PredictionNote=' . $predic;
+		   push @newfeats, 'AltID=' . $id;
+
+		   ## Finally the new id will stored in the hash of equivalences
+
+		   $equivid{$id} = $newid;
+		}
+	    }
+	    elsif ($data[2] eq 'mRNA') {
+
+		## mRNA should have at least three tags: ID, Name and Parent
+		## The script will create two more: AltID and PredictionNote
+
+		my $id = $feats{'ID'};
+		my $pid = $feats{'Parent'};
+		
+		unless (defined $id) {
+		
+		    warn("\nWARNING: mRNA for line:$l doesn't have any ID\n");
+		}
+		else {
+		    
+		   my $newid = rename_mRNA($id, \@drules, \@fcounts);
+		   my ($newpid, $pred) = rename_gene($pid, \@drules, \@fcounts);
+
+		   ## Now it will add the new feats
+
+		   foreach my $tag (@ordtags) {
+		   
+		       if ($tag eq 'ID' or $tag eq 'Name') {
+		       
+			   push @newfeats, $tag . '=' . $newid;
+		       }
+		       elsif ($tag eq 'Parent') {
+		       
+			   push @newfeats, 'Parent=' . $newpid;
+		       }
+		       else {
+		       
+			   push @newfeats, $tag . '=' . $feats{$tag};
+		       }
+		   }
+
+		   push @newfeats, 'AltID=' . $id;
+		   $equivid{$id} = $newid;
+
+		   ## Finally it will add the register to the mrnacomp
+
+		   $mrnacomp{$newid} = { strand => $data[6] };
+
+		}
+	    }
+	    elsif (exists $mrnachildren{$data[2]}) {
+
+		## They should have at least three tags: ID, Name and Parent
+		## The script will create two more: AltID and PredictionNote
+
+		my $id = $feats{'ID'};
+		my $pid = $feats{'Parent'};
+		
+		unless (defined $id) {
+		
+		    warn("\nWARNING: $data[2] line:$l doesn't have any ID\n");
+		}
+		else {
+		    
+		    my $cnt = $mrnacomp{$pid}->{$data[2]} || 0;
+		    $cnt++;
+		    my $newid = rename_exoncds($id, \@drules, \@fcounts, $cnt);
+		    my $newpid = rename_mRNA($pid, \@drules, \@fcounts);
+
+		    ## Now it will add the new feats
+
+		    foreach my $tag (@ordtags) {
+		   
+			if ($tag eq 'ID' or $tag eq 'Name') {
+			    
+			    push @newfeats, $tag . '=' . $newid;
+			}
+			elsif ($tag eq 'Parent') {
+			    
+			    push @newfeats, 'Parent=' . $newpid;
+			}
+			else {
+			    
+			    push @newfeats, $tag . '=' . $feats{$tag};
+			}
+		    }
+		    
+		    push @newfeats, 'AltID=' . $id;
+		    $equivid{$id} = $newid;
+		    if ($data[2] eq 'exon') {
+			$mrnacomp{$newpid}->{exon}++;
+		    }
+		    elsif ($data[2] eq 'CDS') {
+			$mrnacomp{$newpid}->{CDS}++;
+		    }
+		    elsif ($data[2] eq 'five_prime_UTR') {
+			$mrnacomp{$newpid}->{five_prime_UTR}++;
+		    }
+		    elsif ($data[2] eq 'three_prime_UTR') {
+			$mrnacomp{$newpid}->{three_prime_UTR}++;
+		    }
+		}
+	    }
+	    else {
+	    
+		## By default keep the same data for column 9
+		@newfeats = split(/;/, $data[8]);	    
+	    }
+	    
+	    if ($selectedtype == 1) {
+	    
+		## create a new column9 and replace in the data
+
+		my $col9 = join(";", @newfeats);
+	    
+		$data[8] = $col9;
+		my $pline = join("\t", @data);
+	    
+		if (exists $seqiddata{$data[0]}) {
+		   
+		    push @{$seqiddata{$data[0]}}, $pline;
+		}
+		else {
+		    
+		    $seqiddata{$data[0]} = [$pline];
+		}
+	    }
+	}	
+    }
+    else {
+	    
+	if ($_ =~ m/##FASTA/i) {
+	    $fasta = 1;
+	    
+	    if ($opt_V) {
+		print STDERR "\n\n\tParsing Fasta Section.\n\n";
+	    }
+	}
+	elsif ($fasta == 1) {
+	
+	    push @fastadata, $_;
+	}
+    }
+}
+print STDERR "\n\tDone. $l lines have been parsed.\n\n";
+
+
+print_header("Step 2: Printing new GFF3 file");
+
+my $out = $gff_file . '.formated.gff3';
+open my $ofh, '>', $out;
+
+print STDERR "\tCreated output file:\n\t\t$out\n\n";
+print $ofh "##gff-version\t3\n";
+
+$date = `date`;
+chomp($date);
+print $ofh "##created: $date\n";
+
+foreach my $seqid (sort keys %seqiddata) {
+
+    my @lines = @{$seqiddata{$seqid}};
+    
+    if (scalar(@lines) == 1) {  ## It will be just the seqID
+    
+	unless ($opt_E) {
+	
+	    my @linedt = split(/\t/, $lines[0]);
+	    print $ofh "##sequence-region $linedt[0] $linedt[3] $linedt[4]\n";
+	    print $ofh "$lines[0]\n";
+	}	
+    }
+    elsif (scalar(@lines) > 1) {
+    
+	my @linedt = split(/\t/, $lines[0]);
+	print $ofh "##sequence-region $linedt[0] $linedt[3] $linedt[4]\n";
+
+	foreach my $ln (@lines) {
+	
+	    my @linedt = split(/\t/, $ln);
+	    
+	    if (exists $mrnachildren{$linedt[2]}) {
+		
+		my %feats = ();
+		my @ordtags = ();      
+		foreach my $feat (split(/;/, $linedt[8])) {
+	    
+		    if ($feat =~ m/^(.+)=(.+)$/) {
+			
+			$feats{$1} = $2;
+			push @ordtags, $1;
+		    }
+		}
+
+		## Create the counter
+		my $tagcounter = $linedt[2] . '_cnt';
+		$mrnacomp{$feats{'Parent'}}->{$tagcounter}++;
+		my $currcnt = $mrnacomp{$feats{'Parent'}}->{$tagcounter};
+
+		## it will recount the ID
+		my $st = $mrnacomp{$feats{'Parent'}}->{strand};
+		my $cn = $mrnacomp{$feats{'Parent'}}->{$linedt[2]};
+		
+
+		my @newfeats = ();
+		foreach my $ft (@ordtags) {
+		
+		    if ($ft eq 'ID' or $ft eq 'Name') {
+		    
+			my @fragids = split(/:/, $feats{$ft});
+			
+			my $cnt = $mrnacomp{$feats{'Parent'}}->{$tagcounter};
+			if ($st eq '-') {
+			
+			    $cnt = $cn -$currcnt + 1;
+			}
+			
+			my $pcnt;
+			if ($linedt[2] =~ m/exon/i) {
+	
+			    $pcnt = sprintf("%0$fcounts[2]s", $cnt);
+			}
+			elsif ($linedt[2] =~ m/CDS/i) {
+    
+			    $pcnt = sprintf("%0$fcounts[3]s", $cnt);
+			}
+			else {
+    
+			    $pcnt = sprintf("%0$fcounts[4]s", $cnt);
+			}
+
+			my $crid = $fragids[0] .':' .lc($linedt[2]) .':' .$pcnt;
+			
+			push @newfeats, $ft . '=' . $crid;
+		    }
+		    else {
+			
+			push @newfeats, $ft . '=' . $feats{$ft};
+		    }
+		}
+
+		$linedt[8] = join(";", @newfeats);				
+	    }
+
+	    my $prline = join("\t", @linedt);
+	    print $ofh "$prline\n";
+	}    
+    }
+}
+
+if (@fastadata > 0) {
+
+    print $ofh "##FASTA\n";
+    foreach my $fastaline (@fastadata) {
+    
+	print $ofh "$fastaline\n";
+    }
+}
+
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GffIdRename Ends   ($date)   ##\n";
+print STDERR "############################################################\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+       
+      This script has several functions over the gff3 and the fasta files 
+      produced by Maker:
+
+      1) Exclude some types (detailed with -e parameter, for example: 
+         match.match_part)
+
+      2) Exclude the seqID where only the seqID is detailed (for example a 
+         scaffold without any feature, just the scaffold).
+
+      3) This script can change the column 9 in the gff3 file for features tags
+         such as ID, Name, Parent and Target.
+ 
+      Maker feature tags have the following structure:
+     
+       gene            => pred-SeqID-st-gene-\\d+\.\\d+
+       mRNA            => pred-SeqID-st-gene-\\d+\.\\d+-mRNA-\\d+
+       exon            => pred-SeqID-st-gene-\\d+.\\d+-mRNA-\\d+:exon:?\\d+
+       CDS             => pred-SeqID-st-gene-\\d+.\\d+-mRNA-\\d+:(cds|CDS)\\d*
+       five_prime_UTR  => pred-SeqID-st-gene-\\d+.\\d+-mRNA-\\d+:five_prime_utr
+       three_prime_UTR => pred-SeqID-st-gene-\\d+.\\d+-mRNA-\\d+:three_prime_utr
+
+      For example:
+      * Genes: 
+       augustus_masked-Niben044Ctg23129049-abinit-gene-0.0
+       augustus_masked-Niben044Scf00002787-processed-gene-1.1
+       maker-Niben044Scf00038998-augustus-gene-0.5
+      * mRNA
+       augustus_masked-Niben044Ctg23129049-abinit-gene-0.0-mRNA-1
+      * exon
+       augustus_masked-Niben044Ctg23129049-abinit-gene-0.0-mRNA-1:exon01
+      * CDS
+       augustus_masked-Niben044Ctg23129049-abinit-gene-0.0-mRNA-1:CDS01
+     
+      The script will make the following changes:
+   
+      -r 's/Niben044(\\w)/Nb\1/'
+      (note: more than one rule can be added with comma, to use ',' in the
+       regexp use \{comma})
+
+      * Genes:
+       ID=NbC23129049g0001;PredictionNote=augustus_masked-abinitio
+       ID=NbS00002787g0101;PredictionNote=augustus_masked-processed
+       ID=NbS00038998g0005;PredictionNote=maker-augustus
+      * mRNA
+       ID=NbC23129049g0001.1;Parent=NbC23129049g0001
+      * exon
+       ID=NbC23129049g0001.1:exon:0001;Parent=NbC23129049g0001.1
+      * CDS
+       ID=NbC23129049g0001.1:CDS:0001;Parent=NbC23129049g0001.1
+
+      Numeric formats will be calculated previously in the following way:
+      1) Genes: Composed for two numbers, the formating will be set to:
+         ` awk "{ if ($3 ~ /gene/) print $0}" GffFile | cut -f9 | 
+                      cut -d ";" -f1 | sed -r "s/ID=//" | cut -d "-" -f 5 | 
+                      cut -d "." -f1 | sort -nr | head -n1`;
+         ` awk "{ if ($3 ~ /gene/) print $0}" GffFile | cut -f9 | 
+                      cut -d ";" -f1 | sed -r "s/ID=//" | cut -d "-" -f 5 | 
+                      cut -d "." -f2 | sort -nr | head -n1`;
+     
+      2) mRNA: Composed for one number.
+         ` awk "{ if ($3 ~ /mRNA/) print $0}" GffFile | cut -f9 | 
+                      cut -d ";" -f1 | sed -r "s/ID=//" | cut -d "-" -f 7 | 
+                      sort -nr | head -n1`;
+    
+      3) exon, CDS and UTRs. The highest exon number per gene for human is 148,
+         so the 'lexon_c' and 'lcds_c' will be set to 3.
+
+      To change these parameters you can use the option -c Fgene,FmRNA,Fexon,
+      FCDS,FUTRs, for example -c 5,5,2,2,2 or -c 2+2,2,2,2 (Any string with 
+      less than five values will be filled with default values).
+
+    Usage:
+     
+       GffIdRename [-h] -g <gff3_file> [-f <fasta_file_list>] -r <rules> 
+                   -c [<countformat>] [-e <exclude_type_list> ]
+                   [-V] [-E]
+      
+    Flags:
+ 
+      -g <gff3_file>              gff3 file (mandatory)
+      -f <fastafile_list>         list of fasta files separated by commas 
+                                  (optional)
+      -r <rules>                  rules to change the IDs separated by 
+                                  semicolons
+      -c <count_format>           number of zeros to add to the count string 
+                                  to have the same length (see description for 
+                                  defaults)
+      -e <exclude_type_list>      list of types to skip for the output (sep=',')
+      -E <exclude_empty_seqIDs>   exclude the unique seqID lines (without any 
+                                  feature)
+      -V <be_verbose>             be verbose and print status messages
+      -h <help>                   print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+=head2 rename_gene
+
+  Usage: my ($new_id, $predic) = rename_gene($old_id, \@rules, \@formatcounts);
+
+  Desc: rename a gene ID based in the rules and the format_count
+
+  Ret: $new_id, a scalar (string)
+       $predic, a scalar (string)
+
+  Args: $old_id, a calar
+        \@rules, an arrayref. with the rules regexp
+        \@formatcounts, an arrayref with to format the gene counters
+
+  Side_Effects: None
+
+  Example:  my ($new_id) = rename_gene($old_id, \@rules, \@formatcounts);
+
+=cut
+
+sub rename_gene {
+    my $id = shift ||
+	die("ERROR: No id was supplied to the function rename_gene()\n");
+    my $rules_aref = shift ||
+	die("ERROR: No rules arraayref. was supplied to rename_gene().\n");
+    my $fcount_aref = shift ||
+	die("ERROR: No counter arrayref was supplied to rename_gene().\n");
+
+    my @rules = @{$rules_aref};
+    my @fcount = @{$fcount_aref};
+
+    ## First, apply the rules to the id
+
+    foreach my $rule (@rules) {
+		    
+	if ($rule =~ m/^s\/(.+)\/(.+)\/\w*$/) {
+	    
+	    my $match = $1;
+	    my $subst = $2;	    
+
+	    $id =~ s/$match/$subst/;			
+	}		    
+    }
+
+    ## Second, break the id in different parts
+
+    my @idcomp = split(/-/, $id);
+		 
+    ## Get the prediction note
+   
+    my $predic = join("-", ($idcomp[0], $idcomp[2]));
+
+    ## Third, get the format for the gene counter
+
+    my ($gn1, $gn2) = split(/\./, $idcomp[4]);
+
+    ## Usually $gn2 starts in 0, so it will add 1
+
+    $gn2++;
+
+    my $gnt = ();
+    if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
+		    
+	$gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
+    }
+    else {
+		    
+	$gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
+    }
+
+    my $newid = $idcomp[1] . 'g' . $gnt; 
+
+    return($newid, $predic);
+}
+
+
+=head2 rename_mRNA
+
+  Usage: my $new_id = rename_mRNA($old_id, \@rules, \@formatcounts);
+
+  Desc: rename a mRNA ID based in the rules and the format_count
+
+  Ret: $new_id, a scalar (string)
+
+  Args: $old_id, a calar
+        \@rules, an arrayref. with the rules regexp
+        \@formatcounts, an arrayref with to format the gene counters
+
+  Side_Effects: None
+
+  Example:  my $new_id = rename_mRNA($old_id, \@rules, \@formatcounts);
+
+=cut
+
+sub rename_mRNA {
+    my $id = shift ||
+	die("ERROR: No id was supplied to the function rename_gene()\n");
+    my $rules_aref = shift ||
+	die("ERROR: No rules arraayref. was supplied to rename_gene().\n");
+    my $fcount_aref = shift ||
+	die("ERROR: No counter arrayref was supplied to rename_gene().\n");
+
+    my @rules = @{$rules_aref};
+    my @fcount = @{$fcount_aref};
+
+    ## First, apply the rules to the id
+
+    foreach my $rule (@rules) {
+		    
+	if ($rule =~ m/^s\/(.+)\/(.+)\/\w*$/) {
+	    
+	    my $match = $1;
+	    my $subst = $2;
+
+	    $id =~ s/$match/$subst/;			
+	}		    
+    }
+
+    ## Second, break the id in different parts
+
+    my @idcomp = split(/-/, $id);
+
+    ## Third, get the format for the gene counter
+
+    my ($gn1, $gn2) = split(/\./, $idcomp[4]);
+
+    ## Usually $gn2 starts in 0, so it will add 1
+
+    $gn2++;
+
+    my $gnt = ();
+    if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
+		    
+	$gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
+    }
+    else {
+		    
+	$gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
+    }
+
+    ## Forth, get the mRNA count
+
+    my $mrnat = sprintf("%0$fcounts[1]s", $idcomp[6]);
+
+    my $newid = $idcomp[1] . 'g' . $gnt . '.' . $mrnat; 
+
+    return $newid;
+}
+
+=head2 rename_exoncds
+
+  Usage: my $new_id = rename_exoncds($old_id, \@rules, \@formatcounts, $count);
+
+  Desc: rename a exon/cds ID based in the rules and the format_count
+
+  Ret: $new_id, a scalar (string)
+
+  Args: $old_id, a calar
+        \@rules, an arrayref. with the rules regexp
+        \@formatcounts, an arrayref with to format the gene counters
+        $count, an scalar (numeric)
+
+  Side_Effects: None
+
+  Example:  my $new_id = rename_exoncds($old_id, \@rules, \@formatcounts, $cnt);
+
+=cut
+
+sub rename_exoncds {
+    my $id = shift ||
+	die("ERROR: No id was supplied to the function rename_gene()\n");
+    my $rules_aref = shift ||
+	die("ERROR: No rules arraayref. was supplied to rename_gene().\n");
+    my $fcount_aref = shift ||
+	die("ERROR: No counter arrayref was supplied to rename_gene().\n");
+    my $count = shift;
+
+    my @rules = @{$rules_aref};
+    my @fcount = @{$fcount_aref};
+
+    ## First, apply the rules to the id
+
+    foreach my $rule (@rules) {
+		    
+	if ($rule =~ m/^s\/(.+)\/(.+)\/\w*$/) {
+	    
+	    my $match = $1;
+	    my $subst = $2;
+	    
+	    $id =~ s/$match/$subst/;			
+	}		    
+    }
+
+    ## Second, break the id in different parts
+
+    my @idcomp = split(/-/, $id);
+
+    ## Third, get the format for the gene counter
+
+    my ($gn1, $gn2) = split(/\./, $idcomp[4]);
+
+    ## Usually $gn2 starts in 0, so it will add 1
+
+    $gn2++;
+
+    my $gnt = ();
+    if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
+		    
+	$gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
+    }
+    else {
+		    
+	$gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
+    }
+
+    ## Forth, get the mRNA count
+
+    my @submrna = split(/:/, $idcomp[6]);
+
+    my $mrnat = sprintf("%0$fcounts[1]s", $submrna[0]);
+
+    ## Fifth get a temporal counter for the feature
+
+    my $counter = $count;
+    my $type = lc($submrna[2]);
+
+    if (scalar(@submrna) == 3) {
+    
+	$counter = $submrna[2];
+    }
+    elsif ($submrna[1] =~ m/(\w+)(\d+)/) {
+    
+	$type = lc($1);
+	$counter = $2;
+    }
+
+    my $ch;
+    if ($submrna[1] =~ m/exon/i) {
+	
+	$ch = sprintf("%0$fcounts[2]s", $counter);
+    }
+    elsif ($submrna[1] =~ m/CDS/i) {
+    
+	$ch = sprintf("%0$fcounts[3]s", $counter);
+    }
+    elsif ($submrna[1] =~ m/UTR/i) {
+    
+	$ch = sprintf("%0$fcounts[4]s", $counter);
+    }
+
+
+    my $newid = $idcomp[1] . 'g' . $gnt . '.' . $mrnat . ':'.$type . ':' . $ch; 
+
+    return $newid;
+}
+
+
+####
+1; #
+####

@@ -260,12 +260,15 @@ foreach my $seqid (sort keys %ord) {
 			if (exists $srclist{$dt[1]}) {
 
 			    my $get = 1;
-			    my $target = $feat{'Target'} || $feat{'Name'};
-			    $target =~ s/\s+.+$//;
-			
+			    my $target = $feat{'Name'};
+			    if (defined $feat{'Target'}) {
+				$target = $feat{'Target'};
+				$target =~ s/\s+.+$//;
+			    }			
+
 			    if (scalar(keys %ids) > 0) {
+
 				unless (exists $ids{$target}) {
-				    
 				    $get = 0;
 				}
 			    }
@@ -587,12 +590,11 @@ sub parse_gff3 {
 	chomp($L);
     }
 
+    my $fasta = 0;
 
     while(<$gfffh>) {
 	chomp($_);
-	$l++;
-
-	my $fasta = 0;
+	$l++;	
 
 	unless ($_ =~ m/#/ && $fasta == 0) {
 
@@ -600,89 +602,94 @@ sub parse_gff3 {
 	
 	    ## First store %dat and %ord
 	
-	    $dat{$l} = \@data;
+	    if (scalar(@data) == 9) {
 
-	    ## ignore sources from avoid list
+		$dat{$l} = \@data;
+
+		## ignore sources from avoid list
 	
-	    unless (exists $avlist{$data[1]}) {
+		unless (exists $avlist{$data[1]}) {
 	    
-		if (exists $ord{$data[0]}) {	
-		    if (exists $ord{$data[0]}->{$data[3]}) {	    
-			if (exists $ord{$data[0]}->{$data[3]}->{$data[2]}) {
-			    push @{$ord{$data[0]}->{$data[3]}->{$data[2]}}, $l;
+		    if (exists $ord{$data[0]}) {	
+			if (exists $ord{$data[0]}->{$data[3]}) {	    
+			    if (exists $ord{$data[0]}->{$data[3]}->{$data[2]}) {
+				push @{$ord{$data[0]}->{$data[3]}->{$data[2]}}, 
+				$l;
+			    }
+			    else {	
+				$ord{$data[0]}->{$data[3]}->{$data[2]} = [$l];
+			    }
 			}
-			else {	
-			    $ord{$data[0]}->{$data[3]}->{$data[2]} = [$l];
-			}
-		    }
-		    else {	    
+			else {	    
 			$ord{$data[0]}->{$data[3]} = { $data[2] => [$l] };
+			}
 		    }
-		}
-		else {	
-		    $ord{$data[0]} = { $data[3] => { $data[2] => [$l] } };
-		}
-
-
-		## Get the features as a hash
-
-		my %feats = ();
-		foreach my $featline (split(/;/, $data[8])) {
-		
-		    if ($featline =~ m/^(.+)=(.+)$/) {
-			$feats{$1} = $2;
+		    else {	
+			$ord{$data[0]} = { $data[3] => { $data[2] => [$l] } };
 		    }
-		}
-		
-		## Second get the Parent-Child relation
-	    
-		if (defined $feats{'ID'}) {
+
+
+		    ## Get the features as a hash
+
+		    my %feats = ();
+		    foreach my $featline (split(/;/, $data[8])) {
 		    
-		    my $id = $feats{'ID'};
+			if ($featline =~ m/^(.+)=(.+)$/) {
+			    $feats{$1} = $2;
+			}
+		    }
 		    
-		    if (defined $eq{$id}) {
-			#print STDERR "\nWARNING: ID=$id isnt unique (L=$l)\n";
-		    }
-		    else {
-
-			## Add a new featureID, lineN
-			$eq{$id}= $l;
-		    }
-		}
-		
-
-		if (defined $feats{'Parent'}) {
-
-		    ## Get the ParentID and check if that exists
-		    my $parid = $feats{'Parent'};
-
-		    if (defined $eq{$parid}) {
-
-			my $pl = $eq{$parid};
-
-			if (defined $par{$pl}) {
-			    push @{$par{$pl}}, $l;
+		    ## Second get the Parent-Child relation
+		    
+		    if (defined $feats{'ID'}) {
+			
+			my $id = $feats{'ID'};
+			
+			if (defined $eq{$id}) {
+			    #print STDERR "\nWARNING: ID=$id isnt unique (L=$l)\n";
 			}
 			else {
-			    $par{$pl} = [$l];
+			    
+			    ## Add a new featureID, lineN
+			    $eq{$id}= $l;
 			}
 		    }
-		    else {	    
-			print STDERR "\nWARNING: Parent=$parid doesnt exists";
-			print STDERR " (L=$l)\n";
+		    
+
+		    if (defined $feats{'Parent'}) {
+
+			## Get the ParentID and check if that exists
+			my $parid = $feats{'Parent'};
+
+			if (defined $eq{$parid}) {
+			    
+			    my $pl = $eq{$parid};
+			    
+			    if (defined $par{$pl}) {
+				push @{$par{$pl}}, $l;
+			    }
+			    else {
+				$par{$pl} = [$l];
+			    }
+			}
+			else {	    
+			    print STDERR "\nWARNING:Parent=$parid doesnt exist";
+			    print STDERR " (L=$l)\n";
+			}
 		    }
 		}
-	    }
 		
-	    if ($opt_V) {
-		
-		print STDERR "\tParsing line $l ($L)         \r";
+		if ($opt_V) {
+		    
+		    print STDERR "\tParsing line $l ($L)         \r";
+		}
 	    }
 	}
 	else {
 	    
 	    if ($_ =~ m/##FASTA/i) {
 		$fasta = 1;
+		print STDERR "\n\n\tFasta Section.\n\n";
 	    }
 	}
     }
