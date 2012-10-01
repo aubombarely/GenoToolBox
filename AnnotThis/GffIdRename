@@ -173,7 +173,7 @@ if ($opt_h) {
 my $date = `date`;
 chomp($date);
 print STDERR "\n\n############################################################";
-print STDERR "\n## GffIdRename Starts ($date)   ##";
+print STDERR "\n## GffIdRename Starts ($date)      ##";
 print STDERR "\n############################################################\n";
 
 ## STEP0: Check arguments ####################################################
@@ -243,6 +243,10 @@ if (scalar(@fcounts) == 0) {
 
     push @fcounts, $lgene_c1 . '+' . $lgene_c2;
 }
+else {
+
+    print STDERR "\nGene numbering defined by user: $fcounts[0].\n";
+}
 if (scalar(@fcounts) == 1) {
 
     ## Get the fmRNA_c
@@ -257,33 +261,51 @@ if (scalar(@fcounts) == 1) {
 
     push @fcounts, $lmRNA_c1;
 }
+else {
+
+    print STDERR "\nmRNA numbering defined by user: $fcounts[1].\n";
+}
 if (scalar(@fcounts) == 2) {
 
     push @fcounts, 3;
     print STDERR "\tExon default counter format:\t3\n";
+}
+else {
+
+    print STDERR "\nExon numbering defined by user: $fcounts[2].\n";
 }
 if (scalar(@fcounts) == 3) {
 
     push @fcounts, 3;
     print STDERR "\tCDS default counter format:\t3\n";
 }
+else {
+
+    print STDERR "\nCDS numbering defined by user: $fcounts[3].\n";
+}
 if (scalar(@fcounts) == 4) {
 
     push @fcounts, 3;
     print STDERR "\tUTRs default counter format:\t3\n";
 }
+else {
+
+    print STDERR "\nUTRs numbering defined by user: $fcounts[4].\n";
+}
 
 my %excltypes = ();
 if ($opt_e) {
 
+    print STDERR "\nOption -e <exclude_types> is enabled. Excluding:\n";
     foreach my $type (split(/,/, $opt_e)) {
 	
+	print STDERR "\t$type\n";
 	$excltypes{$type} = 1;
     }
 }
 
 
-print_header("Step 1: Parse and Processing GFF3 file");
+print_header("Step 1: Processing GFF3 file");
 
 open my $gfffh, '<', $gff_file;
 
@@ -545,12 +567,12 @@ while(<$gfffh>) {
 print STDERR "\n\tDone. $l lines have been parsed.\n\n";
 
 
-print_header("Step 2: Printing new GFF3 file");
+print_header("Step 2: Printing new GFF3");
 
 my $out = $gff_file . '.formated.gff3';
 open my $ofh, '>', $out;
 
-print STDERR "\tCreated output file:\n\t\t$out\n\n";
+print STDERR "\tCreated output file:\n\t$out\n\n";
 print $ofh "##gff-version\t3\n";
 
 $date = `date`;
@@ -657,12 +679,54 @@ if (@fastadata > 0) {
     }
 }
 
+if (scalar(@fastafiles) > 0) {
+
+    print_header("Step 3: Renamind ID for fasta.");
+
+    foreach my $fasta (@fastafiles) {
+    
+	my $iseqio = Bio::SeqIO->new( -format => 'fasta', -file => $fasta);
+
+	my $outfasta = $fasta . '.formatted.fasta';
+	my $oseqio = Bio::SeqIO->new( -format => 'fasta', -file =>">$outfasta");
+	print STDERR "\tCreated output file:\n\t$outfasta\n\n";
+
+	my ($c, $unchg, $chg) = (0, 0, 0);
+
+	while(my $seqobj = $iseqio->next_seq()) {
+	
+	    $c++;
+	    my $seqid = $seqobj->id();
+	    if ($opt_V) {
+	    
+		print STDERR "\tProcessing sequence $c (ID=$seqid)          \r";
+	    }	    
+
+	    if (exists $equivid{$seqid}) {
+	
+		$seqobj->id($equivid{$seqid});
+		$chg++;
+	    }
+	    else {
+
+		$unchg++;
+	    }
+	    
+	    $oseqio->write_seq($seqobj);	       
+	}
+
+	print STDERR "\n\t$c sequences have been processed.\n";
+	print STDERR "\t$chg IDs have been changed.\n";
+	print STDERR "\t$unchg IDs remain like in the no formated file.\n\n";
+    }
+}
+
 
 
 $date = `date`;
 chomp($date);
 print STDERR "\n\n############################################################";
-print STDERR "\n## GffIdRename Ends   ($date)   ##\n";
+print STDERR "\n## GffIdRename Ends   ($date)      ##\n";
 print STDERR "############################################################\n\n";
 
 
