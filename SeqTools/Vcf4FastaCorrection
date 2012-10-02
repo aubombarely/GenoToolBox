@@ -1,0 +1,889 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ Vcf4FastaCorrection
+ Tool create a consensus based in a Vcf file.
+
+=cut
+
+=head1 SYPNOSIS
+
+ Vcf4FastaCorrection.pl [-h] -f <fasta_file> -v <vcf_file> [-o <output>]
+                        [-d <min_deep>] [-a <min_allelefreq>] [-s <min_score>] 
+                        [-V] [-R] 
+
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -f
+
+B<fasta_file>             input fasta file (mandatory)
+
+=item -v
+
+B<vcf_file>               vcf file (mandatory)
+
+=item -o
+
+B<output_basename>        output basename (by default it will use vcf2fastaout)
+
+=item -d
+
+B<min_deep>               min. deep to consider an SNP/INDEL
+
+=item -a
+
+B<min_allele_freq>        min. allele frequency to consider an SNP/INDEL
+
+=item -s
+
+B<min_score>              min. score to consider an SNP/INDEL
+
+=item -s
+
+=item -V
+
+B<be_verbose>             be verbose
+ 
+=item -R
+
+B<report_errors>          report errors as STDOUT
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script create a consensus fasta file replacing the SNPs supplied in the
+ vcf file.
+
+ It has three options to filter the VCF during the parsing:
+ 
+   1) Min. deep (-d)
+ 
+   2) Min. allele frequency (-a)
+ 
+   3) Min. score (-s)
+
+ Heterozygous positions such as A,T or ATAT,ATATT will be ignored independently
+ of the allele frequency.
+
+ The script reports two different kind of errors (-R):
+ + Wrong SNPs/Indels when the VCF reference is different from the fasta file.
+ + Redundant Indel when .VCF file contains a no real Indel for example:
+   CTCTCT should be CTTCT and two indels have been called:
+   CT => C and TC => T, the real one is TC => T   
+ + Incongruent Indel when .VCF contains two indels with some incongruency such
+   as: ATT => ATTC and the next TT => TTG (last nucleotide could be G or C).
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ Vcf4FastaCorrection
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Bio::SeqIO;
+use Bio::SeqUtils;
+use Bio::Tools::IUPAC;
+
+our ($opt_f, $opt_v, $opt_o, $opt_d, $opt_a, $opt_s, $opt_V, $opt_R, $opt_h);
+getopts("f:v:o:d:a:s:VRh");
+if (!$opt_f && !$opt_v && !$opt_o && !$opt_d && !$opt_a && !$opt_s && !$opt_V 
+    && !$opt_R && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Vcf4FastaCorrection Starts ($date)\n";
+print STDERR "############################################################\n\n";
+
+
+
+
+
+## Get the arguments and check them
+
+my $fasfile = $opt_f || 
+    die("INPUT ARG. ERROR: -f <fasta_file> argument was not supplied.\n");
+my $vcffile = $opt_v || 
+    die("INPUT ARG. ERROR: -v <vcf_file> argument was not supplied.\n");
+
+my $out = $opt_o || 'vcf2consensus_out.fasta';
+
+my $deep = $opt_d;
+if (defined $deep) { 
+    if ($deep !~ m/^\d+$/) {
+	die("ERROR: -d <min_deep> doesnt have a numeric value.\n");
+    }
+    else {
+	
+	print STDERR "\tFILTER MIN.DEEP ENABLED: $deep\n";
+    }
+}
+else {
+
+    print STDERR "\tFILTER MIN.DEEP DISABLED\n";
+}
+
+my $afreq = $opt_a;
+if (defined $afreq) {
+    if ($afreq !~ m/^\d+$/) {
+	die("ERROR: -a <min_allele_freq> doesnt have a numeric value.\n");
+    }
+    else {
+
+	print STDERR "\tFILTER MIN.ALLELE FREQUENCY ENABLED: $afreq\n";
+    }
+}
+else {
+
+    print STDERR "\tFILTER MIN.ALLELE FREQUENCY DISABLED\n";
+}
+
+my $score = $opt_s;
+if (defined $score) {
+    if ($score !~ m/^\d+$/) {
+	die("ERROR: -s <min_score> doesnt have a numeric value.\n");
+    }
+    else {
+
+	print STDERR "\tFILTER MIN.SCORE ENABLED: $score\n";
+    }
+}
+else {
+
+    print STDERR "\tFILTER MIN.SCORE DISABLED\n";
+}
+
+print_header("1) Parsing Vcf file");
+
+my ($vcf_href, $snp_c, $indel_c, $het_c) = parse_vcf($vcffile);
+my %vcf = %{$vcf_href};
+my $seqid_c = scalar(keys %vcf);
+
+print STDERR "\n\n\tVcf file has been parsed\n\t\tSeqID Count\t=\t$seqid_c\n";
+print STDERR "\t\tSNP Count\t=\t$snp_c\n\t\tIndel Count\t=\t$indel_c\n";
+print STDERR "\t\tHeter. Count\t=\t$het_c\n";
+
+print STDERR "\n\tHeterozygous SNPs will be ignored.\n\n";
+
+
+print_header("2) Checking NT fasta file");
+
+my ($checkhref, $wsnps, $windels, $rindels, $iindels) = 
+    checking_fasta($fasfile, \%vcf);
+
+print STDERR "\n\n\tFasta checking has detected:\n\t\t$wsnps wrong SNPs ";
+print STDERR "references\n\t\t$windels wrong indels references\n\t\t$rindels";
+print STDERR " redundant indels\n\t\t$iindels with incongruent indels\n";
+
+print_header("3) Checking NT fasta file");
+
+my $outfasta = $out . '.fas';
+my ($repl, $seqn) = replacing_fasta($fasfile, $outfasta, $checkhref);
+
+print STDERR "\n\n\t$repl replacements in $seqn sequences were performed\n\n";
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Vcf4FastaCorrection Ends ($date)\n";
+print STDERR "############################################################\n\n";
+exit;
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+     This script create a consensus fasta file replacing the SNPs supplied in 
+     the vcf file.
+
+     It has three options to filter the VCF during the parsing:
+ 
+       1) Min. deep (-d)
+ 
+       2) Min. allele frequency (-a)
+ 
+       3) Min. score (-s)
+
+     Heterozygous positions such as A,T or ATAT,ATATT will be ignored 
+     independently of the allele frequency.
+
+      The script reports two different kind of errors (option -R):
+        + Wrong SNPs/Indels when the VCF reference is different from the 
+          fasta file.
+      
+        + Redundant Indel when .VCF file contains a no real Indel for example:
+          CTCTCT should be CTTCT and two indels have been called:
+          CT => C and TC => T, the real one is TC => T   
+       
+        + Incongruent Indel when .VCF contains two indels with some 
+          incongruency such as: ATT => ATTC and the next TT => TTG (last 
+          nucleotide could be G or C).     
+
+    Usage:
+     
+      Vcf4FastaCorrection.pl [-h] -f <fasta_file> -v <vcf_file> [-o <output>]
+                       [-d <min_deep>] [-a <min_allelefreq>] [-s <min_score>]
+                       [-V] [-R]
+      
+    Flags:
+
+      -f <fasta_file>             input fasta file (mandatory)
+      -v <vcf_file>               vcf file (mandatory)
+      -o <output_basename>        output basename (by default: vcf2fastaout)
+      -d <min_deep>               min. deep to consider an SNP/INDEL
+      -a <min_allele_freq>        min. allele frequency to consider an SNP/INDEL
+      -s <min_score>              min. score to consider an SNP/INDEL
+      -V <be_verbose>             be verbose
+      -R <report_errors>          print errors as STDOUT
+      -h <help>                   print the help
+     
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+=head2 parse_vcf
+
+  Usage: my (\%vcf, $snp_c, $indel_c, $heteroz) = parse_vcf($file);
+
+  Desc: Parse the vcf file
+
+  Ret: \%vcf, a hashref with with the following structure:
+          % vcf = ( SeqID => { Coord. => { Type => \@vcfline } })
+       $snp_c, an scalar with SNP count
+       $indel_c, an scalar with INDEL count
+       $heteroz, heterozygous positions
+
+  Args: $file, Vcf filename
+
+  Side_Effects: Die if something is wrong
+
+  Example: my( $vcfhref, $sc, $ic, $ht) = parse_vcf($file);
+
+=cut
+
+
+sub parse_vcf {
+    my $file = shift ||
+	die("ERROR: No filename was supplied to parse_vcf function.\n");
+
+
+    my %vcf = ();
+
+    open my $vfh, '<', $file;
+
+    my ($V, $v) = (0, 0);
+    if ($opt_V) {
+    
+	$V = `cut -f1 $file | wc -l`;
+	chomp($V);
+    }
+    
+    my ($snp_c, $indel_c, $het) = (0, 0, 0);
+
+    while(<$vfh>) {
+    
+	$v++;	
+	if ($opt_V) {
+	
+	    print STDERR "\tParsing line:$v of $V lines for .VCF file       \r";
+	}
+	
+	chomp($_);
+	
+	## Avoid the headers
+	if ($_ !~ m/^#/) {
+	
+	    my @data = split(/\t/, $_);
+
+	    ## Manage filters
+
+	    my $select = 1;
+
+	    my $score = $data[5];	    
+	    my %feats = ();
+	    foreach my $ft (split(/;/, $data[7])) {
+	    
+		if ($ft =~ m/(.+)=(.+)/) {
+		
+		    $feats{$1} = $2;
+		}
+	    }
+
+	    if ($opt_s && $score < $opt_s) {
+	    
+		$select = 0;
+	    }
+	    if ($opt_d && $feats{DP} < $opt_d) {
+	    
+		$select = 0;
+	    }
+	    if ($opt_a && $feats{AF} < $opt_a) {
+	    
+		$select = 0;
+	    }
+
+	    ## Additionally if the polymorphism presents a comma
+	    ## such as A,T or TAT,TATT it will ignore it
+
+	    if ($data[4] =~ m/,/) {
+	    
+		$select = 0;
+		$het++;
+	    }
+
+	    if ($select == 1) {
+
+		if (exists $vcf{$data[0]}) {
+	    
+		    if (exists $vcf{$data[0]}->{$data[1]}) {
+		
+			if ($data[7] =~ m/INDEL/) {
+			    
+			    $vcf{$data[0]}->{$data[1]}->{'INDEL'} = \@data; 
+			    $indel_c++;
+			}
+			else {
+			    
+			    $vcf{$data[0]}->{$data[1]}->{'SNP'} = \@data;
+			    $snp_c++;
+			}
+		    }
+		    else {
+			
+			if ($data[7] =~ m/INDEL/) {
+			    
+			    $vcf{$data[0]}->{$data[1]} = { 'INDEL' => \@data }; 
+			    $indel_c++;
+			}
+			else {
+			    
+			    $vcf{$data[0]}->{$data[1]} = { 'SNP' => \@data }; 
+			    $snp_c++;
+			}
+		    }
+		}
+		else {
+	    
+		    if ($data[7] =~ m/INDEL/) {
+		
+			$vcf{$data[0]} = { $data[1] => { 'INDEL' => \@data } }; 
+			$indel_c++;
+		    }
+		    else {
+			
+			$vcf{$data[0]} = { $data[1] => { 'SNP' => \@data } }; 
+			$snp_c++;
+		    }
+		}
+	    } 
+	}
+    }
+    
+    return (\%vcf, $snp_c, $indel_c, $het);
+}
+
+
+=head2 checking_fasta
+
+  Usage: my (\%check, $wsnp, $wind, $rind, $iind) = checking_fasta($file,\%vcf);
+
+  Desc: Check if the reference contained in the VCF file is right and return 
+        a hashref. with the checked SNPs 
+
+  Ret: %check, with the following structure:
+          % check = ( SeqID => { Coord. => { Type => \@vcfline } })
+       $wsnp, an scalar with wrong snp count
+       $wind, an scalar with wrong indel count
+       $rind, an scalar with redundant indels count
+       $iind, an scalar with the incongruency indels
+
+  Args: $file, Fasta filename
+        \%vcf, a vcf hashref (see structure in the Ret. section)
+
+  Side_Effects: Print as STDOUT the wrong SNPs.
+                Die if the file can not be openned.
+
+  Example: my ($checkhref) = checking_fasta($file, \%vcf);
+
+=cut
+
+sub checking_fasta {
+    my $file = shift ||
+	die("ERROR: No fasta file was supplied to checking_fasta function.\n");
+    my $vcfhref = shift ||
+	die("ERROR: No vcf hashref was supplied to checking_fasta function.\n");
+
+    if (ref($vcfhref) ne 'HASH') {
+    
+	die("ERROR: vcf hashref supplied to checking_fasta isnt a hashref.\n");
+    }
+
+    my %vcf = %{$vcfhref};
+    my %check = ();
+    my %incong = ();
+
+    my $seqio = Bio::SeqIO->new( -format => 'fasta', -file => $file );
+    my ($S, $s) = (0, 0);
+    if ($opt_V) {
+	
+	$S = `grep -c '>' $file`;
+	chomp($S);
+    }
+    
+    my ($wsnps, $windels, $findels) = (0, 0, 0);
+
+    while( my $seqobj = $seqio->next_seq() ) {
+    
+	$s++;	
+	my $id = $seqobj->id();
+	
+	if ($opt_V) {
+	
+	    print STDERR "\tParsing seqID=$id (seq $s of $S sequences)      \r";
+	}
+    
+
+	if (exists $vcf{$id}) {
+	
+	    my $seq = $seqobj->seq();
+	    my @seqnt = split(//, $seq);
+
+	    foreach my $coord (sort {$a <=> $b} keys %{$vcf{$id}}) {
+	    
+		if (exists $vcf{$id}->{$coord}->{SNP}) {
+		
+		    my @dt = @{$vcf{$id}->{$coord}->{SNP}};
+		    my $ref = uc($dt[3]);
+		    
+		    my $nt = uc($seqnt[$coord - 1]);
+		    if ($nt eq $ref) {
+		    
+			$check{$id}->{$coord}->{SNP} = \@dt;
+		    }
+		    else {
+		    
+			if ($opt_R) {
+			    print STDOUT "WRONG NT REFERENCE (SNP): $id\t";
+			    print STDOUT "$coord\tVCF_REF=$ref\tFASTA_NT=$nt\n";
+			}
+			$wsnps++;
+		    }
+
+		}
+		elsif (exists $vcf{$id}->{$coord}->{INDEL}) {
+		    
+		    my @dt = @{$vcf{$id}->{$coord}->{INDEL}};
+		    my $ref = uc($dt[3]);
+		    my $pol = uc($dt[4]);
+		    my $reflen = length($ref);
+		    my $pollen = length($pol);
+		    
+		    ## Some Indels can be false positives when:
+		    ## TGT
+		    ## TX   => TG => T => is a false positive
+		    ##  GX  => GT => G
+		    
+		    my $ext = $reflen - 1;
+		    my $findel = 0;
+		    
+			
+		    while($ext > 0) {
+
+			my $nextcoord = $coord + $ext;
+			
+			if (exists $vcf{$id}->{$nextcoord}->{INDEL}) {
+			
+			    my @nxtdt = @{$vcf{$id}->{$nextcoord}->{INDEL}};
+			    my $nextref = uc($nxtdt[3]);
+			    my $nextpol = uc($nxtdt[4]);
+			    
+			    my @ref = split(//, $ref);
+			    my @pol = split(//, $pol);
+			    my @nextref = split(//, $nextref);
+			    my @nextpol = split(//, $nextpol);
+				
+			    ## Compare the ref. line and the pol line
+
+			    my $refln = join("", @ref[$ext .. $reflen - 1]);
+			    my $re = length($refln) - 1;
+				
+			    ## Sometimes the next reference can be shorter 
+			    ## than the ref. less the ext.
+			    ## for example: REF[77181]=AGTAAG, NXT[77183]=TA
+			    
+			    if ($re > scalar(@nextref) - 1) {
+				
+				$re = scalar(@nextref) - 1;
+				$refln = join("", @ref[$ext .. $ext + $re]);
+			    }
+			    my $nreln = join("", @nextref[0 .. $re]);
+			    
+			    my $polln = join("", @pol[$ext .. $pollen - 1]);
+			    my $pe = length($polln) - 1;
+			    if ($pe > scalar(@nextpol) - 1) {
+				
+				$pe = scalar(@nextpol) - 1;
+				$polln = join("", @pol[$ext .. $ext + $pe]);
+			    }
+			    my $npoln = join("", @nextpol[0 .. $pe]);
+			    
+			    if ($refln eq $nreln) {
+				
+				if ($polln eq $npoln) {
+				    
+				    $findel++;
+				}
+				else {
+				    
+				    if ($opt_R) {
+					print STDOUT "INCONGRUITY FOR ";
+					print STDOUT "INDELS: $id:$coord\t";
+					print STDOUT "$id:$nextcoord\n";
+				    }
+				    
+				    $findel++;
+				    
+				    ## It will tag the next INDEL to skip
+				    
+				    $incong{$id . ':' . $nextcoord} = 1;
+				    $incong{$id . ':' . $coord} = 1;
+				}
+			    }
+			}
+			$ext--;
+		    }
+		    
+		    if (exists $incong{$id . ':' . $coord}) {
+			
+			$findel++;
+		    }
+		    
+
+		    if ($findel < 1) {
+
+			my $nt = uc($seqnt[$coord - 1]);
+			if ($reflen > 1) {
+		    
+			    my @nt = @seqnt[$coord - 1 .. $coord + $reflen - 2];
+			    $nt = uc(join("", @nt));
+			}
+		    
+			if ($nt eq $ref) {
+		    
+			    $check{$id}->{$coord}->{INDEL} = \@dt;
+			}
+			else {
+		    
+			    if ($opt_R) {
+				print STDOUT "WRONG REFERENCE (INDEL): $id\t";
+				print STDOUT "$coord\tVCF_REF=$ref\tFASTA_NT=";
+				print STDOUT "$nt\n";
+			    }
+			    $windels++;
+			}
+		    }
+		    else {
+			if ($opt_R) {
+			    
+			    print STDOUT "FALSE INDEL: $id\t$coord\tVCF_REF=";
+			    print STDOUT "$ref\tVCF_POL=$dt[4]\n";
+			}
+			$findels++;
+		    }
+		}
+	    }
+	}
+    }
+
+    return (\%check, $wsnps, $windels, $findels, scalar(keys %incong));
+}
+
+
+=head2 replacing_fasta
+
+  Usage: my ($repl, $seqc) = replacing_fasta($file, $outfile, \%vcf);
+
+  Desc: Replace the SNPs/Indels from the vcf file creating a new fasta file
+
+  Ret: $repl, number of replacements
+       $seqc, sequences replaced
+
+  Args: $file, Fasta filename
+        $outfile, a filename for the output file.
+        \%vcf, a vcf hashref (see structure in the Ret. section)
+
+  Side_Effects: Die if the file can not be openned.
+
+  Example: replacing_fasta($file, $outfile, \%vcf);
+
+=cut
+
+sub replacing_fasta {
+    my $file = shift ||
+	die("ERROR: No fasta file was supplied to checking_fasta function.\n");
+    my $out = shift ||
+	die("ERROR: No out file was supplied to checking_fasta function.\n");
+    my $vcfhref = shift ||
+	die("ERROR: No vcf hashref was supplied to checking_fasta function.\n");
+
+    if (ref($vcfhref) ne 'HASH') {
+    
+	die("ERROR: vcf hashref supplied to checking_fasta isnt a hashref.\n");
+    }
+
+    my %vcf = %{$vcfhref};
+    my %check = ();
+
+    my ($repl_c, $seq_c) = (0, 0);
+
+    my $seqio = Bio::SeqIO->new( -format => 'fasta', -file => $file );
+    my $outio = Bio::SeqIO->new( -format => 'fasta', -file => ">$out");
+    my ($P, $p) = (0, 0);
+
+    if ($opt_V) {
+	
+	$P = `grep -c '>' $file;`;
+	chomp($P);
+    }
+    
+    while( my $seqobj = $seqio->next_seq() ) {
+    
+	$p++;	
+	my $id = $seqobj->id();
+	
+	if ($opt_V) {
+	
+	    print STDERR "\tParsing seqID=$id (seq $p of $P sequences)      \r";
+	}
+    
+
+	if (exists $vcf{$id}) {
+	
+	    my $seq = $seqobj->seq();
+	    my @seqnt = split(//, $seq);
+
+	    ## It will replace the new nt in the array.
+	    ## It doesn't need to modify the coordinates because they will
+            ## be the same in the array.
+
+	    $seq_c++;
+	    foreach my $coord (sort {$a <=> $b} keys %{$vcf{$id}}) {
+	    
+		if (exists $vcf{$id}->{$coord}->{SNP}) {
+		
+		    my @dt = @{$vcf{$id}->{$coord}->{SNP}};
+		    my $ref = uc($dt[3]);
+		    
+		    my $nt = uc($seqnt[$coord - 1]);
+		    if ($nt eq $ref) {
+		    
+			$seqnt[$coord - 1] = uc($dt[4]);
+			$repl_c++;
+		    }
+		    else {
+		    
+			print STDERR "WRONG NT REFERENCE (SNP): $id\t$coord";
+			print STDERR "\tVCF_REF=$ref\tFASTA_NT=$nt\n";
+		    }
+
+		}
+		elsif (exists $vcf{$id}->{$coord}->{INDEL}) {
+
+		    my @dt = @{$vcf{$id}->{$coord}->{INDEL}};
+		    my $ref = uc($dt[3]);
+		    my $reflen = length($ref);
+		    my $pol = uc($dt[4]);
+		    my $pollen = length($pol);
+		    
+		    my $nt = uc($seqnt[$coord - 1]);
+		    if ($reflen > 1) {
+		    
+			my @nt = @seqnt[$coord - 1 .. $coord + $reflen - 2];
+			$nt = uc(join("", @nt));
+		    }
+
+		    ## It will check before if the sequence is the same than the
+		    ## nt (some indels can be redundant)
+
+		    if ($nt ne $pol) {
+
+			if ($nt eq $ref) {
+		    
+			    ## To replace the indel there are two options
+			    ##  1) length(REF) > length(POL) in which case
+			    ##     the extra positions (deletions) will be:
+			    ##     'X' => ''.
+			    ##  2) length(REF) < length(POL) in which case
+			    ##     the extra positions (insertions) will be
+			    ##     covered in the last array as extra 
+                            ##     characters: 'X' => 'XY'
+
+			    if ($reflen > $pollen) {
+
+				my @ref = split(//, uc($dt[3]));
+				my @rep = split(//, uc($dt[4]));
+				
+				## Additional slots
+				my $ad = $reflen - $pollen;
+				my $ex = 0;
+
+				##Check the position of the deletion
+				
+				my ($ps, $fr) = (0, 0);
+				foreach my $bs (@rep) {
+				
+				    if ($ref[$ps] ne $rep[$fr + $ps]) {
+					
+					$fr++;
+				    }
+
+				    $ps++;
+				}
+				
+
+				
+				while($ex < $ad) {
+				    
+				    push @rep, '';
+				    $ex++;
+				}
+				
+				@seqnt[$coord - 1 .. $coord + $reflen - 2] = 
+				    @rep;
+			    }
+			    elsif ($reflen < $pollen) {
+			
+				my @rep = ();
+				
+				## There is not additional slots
+				## so it will add the extra nt in the last slot
+				
+				my $c = 0;
+				foreach my $e (split(//, uc($dt[4]))) {
+				    
+				    $c++;
+				    if ($c <= $reflen) {
+					
+					push @rep, $e;
+				    }
+				    else {
+					
+					my $last = $rep[-1];
+					$rep[-1] = $last . $e;
+				    }
+				}
+			    				
+				@seqnt[$coord - 1 .. $coord + $reflen - 2] = 
+				    @rep;
+			   
+			    }
+			    else {
+			    
+				my @rep = split(//, uc($dt[4]));
+				@seqnt[$coord - 1 .. $coord + $reflen - 2] = 
+				    @rep;
+			    }
+			
+			    $repl_c++;
+			}
+			else {
+		    
+			    print STDERR "\nWRONG NT REFERENCE (INDEL): $id\t";
+			    print STDERR "$coord\tVCF_REF=$ref\tFASTA_NT=$nt\n";
+			}
+		    }   
+		}
+	    }
+
+	    ## Now it will rejoin back the sequence and put into the object
+
+	    my $newseq = join("", @seqnt);
+	    $seqobj->seq($newseq);	    
+	}
+	$outio->write_seq($seqobj);
+    }
+    
+    return($repl_c, $seq_c);
+}
