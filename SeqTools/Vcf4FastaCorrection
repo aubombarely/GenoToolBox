@@ -510,6 +510,11 @@ sub checking_fasta {
 	
 	$S = `grep -c '>' $file`;
 	chomp($S);
+
+	unless (defined $S) {
+	
+	    $S = 'NA';
+	}
     }
     
     my ($wsnps, $windels, $findels) = (0, 0, 0);
@@ -726,6 +731,11 @@ sub replacing_fasta {
 	
 	$P = `grep -c '>' $file;`;
 	chomp($P);
+
+	unless (defined $P) {
+	    
+	    $P = 'NA';
+	}
     }
     
     while( my $seqobj = $seqio->next_seq() ) {
