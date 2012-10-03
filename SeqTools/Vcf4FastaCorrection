@@ -106,6 +106,7 @@ use warnings;
 use autodie;
 
 use Getopt::Std;
+use Math::BigFloat;
 use Bio::SeqIO;
 use Bio::SeqUtils;
 use Bio::Tools::IUPAC;
@@ -215,6 +216,60 @@ my ($repl, $seqn) = replacing_fasta($fasfile, $outfasta, $checkhref);
 print STDERR "\n\n\t$repl replacements in $seqn sequences were performed\n\n";
 
 
+print_header("4) Creating Report");
+
+my $outrep = $out . '.report.txt';
+open my $rofh, '>', $outrep;
+
+my $totalp = $snp_c + $indel_c + $het_c;
+my $p_totalp = sprintf("% 15s", $totalp);
+my $p_het_c = sprintf("% 15s", $het_c);
+my $p_snp_c = sprintf("% 15s", $snp_c);
+my $p_indel_c = sprintf("% 15s", $indel_c);
+my $p_wsnps = sprintf("% 15s", $wsnps);
+my $p_windels = sprintf("% 15s", $windels);
+my $p_rindels = sprintf("% 15s", $rindels - $iindels);
+my $p_iindels = sprintf("% 15s", $iindels);
+my $p_repl = sprintf("% 15s", $repl);
+
+my $het_p = $het_c * 100 / $totalp;
+my $snp_p = $snp_c * 100 / $totalp;
+my $ind_p = $indel_c * 100 / $totalp;
+my $wsp_p = $wsnps * 100 / $totalp;
+my $win_p = $windels * 100 / $totalp;
+my $rin_p = ($rindels - $iindels) * 100 / $totalp;
+my $iin_p = $iindels * 100 / $totalp;
+my $rep_p = $repl * 100 / $totalp;
+
+my $r_totalp = sprintf("% 8s", '100 %');
+my $r_het_c = sprintf("% 8s", Math::BigFloat->new($het_p)->ffround(0) . ' %');
+my $r_snp_c = sprintf("% 8s", Math::BigFloat->new($snp_p)->ffround(0) . ' %');
+my $r_indel_c = sprintf("% 8s", Math::BigFloat->new($ind_p)->ffround(0) . ' %');
+my $r_wsnps = sprintf("% 8s", Math::BigFloat->new($wsp_p)->ffround(0) . ' %');
+my $r_windels = sprintf("% 8s", Math::BigFloat->new($win_p)->ffround(0) . ' %');
+my $r_rindels = sprintf("% 8s", Math::BigFloat->new($rin_p)->ffround(0) . ' %');
+my $r_iindels = sprintf("% 8s", Math::BigFloat->new($iin_p)->ffround(0) . ' %');
+my $r_repl = sprintf("% 8s", Math::BigFloat->new($rep_p)->ffround(0) . ' %');
+
+
+
+my @repprint = ();
+push @repprint, "Total Polymorphism:\t\t$p_totalp\t$r_totalp\n";
+push @repprint, "Heterozygous Polymorphism:\t$p_het_c\t$r_het_c\n";
+push @repprint, "Homozygous SNP:\t\t\t$p_snp_c\t$r_snp_c\n";
+push @repprint, "Homozygous INDELs:\t\t$p_indel_c\t$r_indel_c\n";
+push @repprint, "SNPs with ref. discrepancies:\t$p_wsnps\t$r_wsnps\n";
+push @repprint, "INDELs with ref. discrepancies:\t$p_wsnps\t$r_windels\n";
+push @repprint, "Redundant INDELs:\t\t$p_rindels\t$r_rindels\n";
+push @repprint, "Incongruent INDELs:\t\t$p_iindels\t$r_iindels\n";
+push @repprint, "Successful corrections:\t\t$p_repl\t$r_repl\n";
+
+foreach my $repline (@repprint) {
+
+    print STDERR "$repline";
+    print $rofh "$repline";
+}
+
 $date = `date`;
 chomp($date);
 print STDERR "\n\n############################################################";
@@ -313,7 +368,14 @@ sub print_header {
     my $message = shift;
 
     my $date = `date`;
-    chomp($date);
+
+    unless (defined $date) {
+	
+	$date = 'NA';
+    }
+    else {
+	chomp($date);
+    }
 
     print STDERR "\n";
     print STDERR "============================================================";
@@ -509,11 +571,14 @@ sub checking_fasta {
     if ($opt_V) {
 	
 	$S = `grep -c '>' $file`;
-	chomp($S);
-
+	
 	unless (defined $S) {
 	
 	    $S = 'NA';
+	}
+	else {
+	
+	    chomp($S);
 	}
     }
     
@@ -730,11 +795,14 @@ sub replacing_fasta {
     if ($opt_V) {
 	
 	$P = `grep -c '>' $file;`;
-	chomp($P);
 
 	unless (defined $P) {
 	    
 	    $P = 'NA';
+	}
+	else {
+	
+	    chomp($P);
 	}
     }
     
@@ -820,20 +888,26 @@ sub replacing_fasta {
 				my $ex = 0;
 
 				##Check the position of the deletion
+				##      0 1 2 3 4
+				## Ref: A A C A A
+				## Pol: A C A A
+				## 1 => A/A PS=0; FR=0; PS+FR=0;
+				## 2 => A/C PS=1; FR=0; PS+FR=1;
+				## 3 => A/A PS=2; FR=1; PS+FR=3;
+				## 4 => A/A PS=3; FR=1; PS+FR=4;
 				
 				my ($ps, $fr) = (0, 0);
+				
 				foreach my $bs (@rep) {
 				
-				    if ($ref[$ps] ne $rep[$fr + $ps]) {
+				    if ($ref[$fr + $ps] ne $rep[$ps]) {
 					
 					$fr++;
 				    }
 
 				    $ps++;
 				}
-				
-
-				
+								
 				while($ex < $ad) {
 				    
 				    push @rep, '';
