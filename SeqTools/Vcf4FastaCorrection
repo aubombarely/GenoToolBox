@@ -208,7 +208,7 @@ print STDERR "\n\n\tFasta checking has detected:\n\t\t$wsnps wrong SNPs ";
 print STDERR "references\n\t\t$windels wrong indels references\n\t\t$rindels";
 print STDERR " redundant indels\n\t\t$iindels with incongruent indels\n";
 
-print_header("3) Checking NT fasta file");
+print_header("3) Correcting fasta file");
 
 my $outfasta = $out . '.fas';
 my ($repl, $seqn) = replacing_fasta($fasfile, $outfasta, $checkhref);
@@ -702,6 +702,51 @@ sub checking_fasta {
 				}
 			    }
 			}
+			elsif (exists $vcf{$id}->{$nextcoord}->{SNP}) {
+
+			    ## Sometimes an SNP can follow an Indel, for example
+			    ## AN => A; N => T
+			    ## In this case probably the Indel is wrong so
+			    ## it'll keep the SNP removing the INDEL
+			    ## after check the incongruency
+
+			    my @nxtsnpdt = @{$vcf{$id}->{$nextcoord}->{SNP}};
+			    my $nextref = uc($nxtsnpdt[3]);
+			    my $nextpol = uc($nxtsnpdt[4]);
+			    
+			    my @ref = split(//, $ref);
+			    my @pol = split(//, $pol);
+			    my $lp = scalar(@pol);
+
+			    ## Get if the reference is the same
+			    if ($nextref eq $ref[$ext]) {
+			    				
+				if ($lp > $ext && $nextpol eq $pol[$ext]){
+			
+				    ## Do nothing if they are the same
+				}
+				else {
+				
+				    ## In this case there is an incongruency
+				    $incong{$id . ':' . $coord} = 1;
+				    $findel++;
+
+				     if ($opt_R) {
+					print STDOUT "INCONGRUITY FOR ";
+					print STDOUT "INDEL: $id:$coord\tSNP: ";
+					print STDOUT "$id:$nextcoord\n";
+				     }
+				}
+			    }
+			    else {
+			    
+				## It will something wrong between two refs.
+				## in this case pull out the INDEL
+
+				$findels++;
+			    }			    
+			}
+
 			$ext--;
 		    }
 		    
@@ -742,7 +787,7 @@ sub checking_fasta {
 			}
 			$findels++;
 		    }
-		}
+		}		
 	    }
 	}
     }
@@ -842,7 +887,7 @@ sub replacing_fasta {
 		    }
 		    else {
 		    
-			print STDERR "WRONG NT REFERENCE (SNP): $id\t$coord";
+			print STDERR "\nWRONG NT REFERENCE (SNP): $id\t$coord";
 			print STDERR "\tVCF_REF=$ref\tFASTA_NT=$nt\n";
 		    }
 
