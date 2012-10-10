@@ -1,0 +1,1259 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ MultiThreadStructure
+ Script to split and run multiple Strcuture process
+
+=cut
+
+our $VERSION = '0.1';
+$VERSION = eval $VERSION;
+
+=head1 SYPNOSIS
+
+ MultiThreadStructure [-h] -i <structure_file_list> 
+                           [-o <outbase>]
+                           [-p <project_template>]
+                           [-e <extra_params_template>] 
+                           [-m <mainparams_template>]
+                           [-k <maxpopulation_range>]
+                           [-r <runs_per_file_and_k>]
+                           [-t <threads>]
+                           [-a <change_argument>]
+                           [-s <sort_individuals_list>]
+                           [-T]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<structure_file_list>          a list of files separated by commas (mandatory)
+
+=item -o
+
+B<outbase>                      base for output dir (default: out_structure)
+
+=item -p                        
+
+B<project_template>             template for project (see description)
+
+=item -e                        
+
+B<extraparam_template>          extra parameters template file (see description)
+
+=item -m                        
+
+B<mainparam_template>           main parameters template file (see description)
+
+=item -k                        
+
+B<maxpopulation_range>          range of MAXPOP (for example 2-15).
+
+=item -r
+
+B<runs_per_file_and_K>          number of runs per file and K (default 1)
+
+=item -t
+
+B<threads>                      number of threads (2 by default)
+
+=item -a 
+
+B<change_argument>              change argument for mainparameters
+
+=item -s
+
+B<sort_individual_list>         list to sort individuals when is applicable
+
+=item -T
+
+B<use_tags>                     use file tags as tag=file for the -i
+
+=item -h
+
+B<help>                         print the help
+
+=item -v
+
+B<version>                      print version
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script run Structure using the multithread. 
+
+ It takes advantage of multiple runs/files/conditions to manage each of the
+ works in a thread. For example, a job with -i fileA,fileB,fileC (3 files),
+ -k '2-11' (10 conditions) -r 5 (5 runs), will need 150 jobs. Using 10 threads
+ it will be run in 15 jobs of 10 threads each.
+
+  Note: 
+       
+      Structure executable have to be in the system path. Alternatively the
+      $STRUCTURE_EXEC environment variable can be used.
+
+ Additionally the script will collect all the results producting two files
+ per result: PopulationMatrix (1 per run), and AlphaResults (1 for the complete
+ job). 
+
+ Files can be tagged for futher analysis using -T option, for example:
+ -i Chr01B01Mb=foo,Chr01B02Mb=baa
+
+ All the input files should have the same format defined by the project 
+ template.
+
+ Default for PROJECT_TEMPLATE:
+ =============================================
+ PROJNAME  ### It will be replaced during the input file analysis
+ NUMINDS   ### It will be replaced during the input file analysis.
+ NUMLOCI   ### It will be replaced during the input file analysis.
+ PLOIDY  2
+ MISSINGVAL  -9
+ ONEROW   1
+ INDLABEL   1
+ POPID   0
+ POPFLAG   0
+ LOCDATA   0
+ PHENOTYPE   0
+ EXTRACOL  0
+ MARKERNAME   1
+ RECESSIVEALLELE   0
+ MAPDISTANCE   1
+ PHASED   0
+ PHASEINFO   0
+
+ Default for MAINPARAMS:
+ =======================
+ #define OUTFILE ### Defined as input_file.structresults
+ #define INFILE  ### Defined by -i option
+ #define NUMINDS ### Defined after input file analysis
+ #define NUMLOCI ### Defined after input file analysis
+ #define LABEL 1 
+ #define POPDATA 0 
+ #define POPFLAG 0 
+ #define LOCDATA 0 
+ #define PHENOTYPE 0 
+ #define MARKERNAMES 1 
+ #define MAPDISTANCES 1 
+ #define ONEROWPERIND 1 
+ #define PHASEINFO 0 
+ #define PHASED 0 
+ #define RECESSIVEALLELES 0 
+ #define EXTRACOLS 0
+ #define MISSING -9
+ #define PLOIDY 2
+ #define MAXPOPS 6
+ #define BURNIN 50000
+ #define NUMREPS 50000
+ #define NOADMIX 0
+ #define LINKAGE 0
+ #define USEPOPINFO 0
+ #define LOCPRIOR 0
+ #define INFERALPHA 1
+ #define ALPHA 1.0
+ #define POPALPHAS 0 
+ #define UNIFPRIORALPHA 1 
+ #define ALPHAMAX 10.0
+ #define ALPHAPROPSD 0.025
+ #define FREQSCORR 1 
+ #define ONEFST 0
+ #define FPRIORMEAN 0.01
+ #define FPRIORSD 0.05
+ #define INFERLAMBDA 0 
+ #define LAMBDA 1.0
+ #define COMPUTEPROB 1 
+ #define PFROMPOPFLAGONLY 0 
+ #define ANCESTDIST 0 
+ #define STARTATPOPINFO 0 
+ #define METROFREQ 10
+ #define UPDATEFREQ 1 
+
+ There is not a extraparams default file.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ MultiThreadStructure
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Config;
+use threads;
+
+use File::Basename;
+use Statistics::Descriptive;
+use File::Spec;
+use File::Path qw(remove_tree);
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::SeqIO;
+
+
+our ($opt_i, $opt_p, $opt_e, $opt_m, $opt_k, $opt_r, $opt_t, $opt_o, $opt_a, 
+     $opt_s, $opt_T, $opt_h, $opt_v);
+getopts("i:p:e:m:k:r:t:o:a:s:Thv");
+
+$Config{useithreads} or 
+    die('THREAD ERROR: Recompile Perl with threads to run this program.');
+
+if (!$opt_i && !$opt_p && !$opt_e && !$opt_m && !$opt_k && !$opt_r && !$opt_t 
+    && !$opt_o && !$opt_a && !$opt_s && !$opt_T && !$opt_h && !$opt_v) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+elsif ($opt_h) {
+    help();
+}
+elsif ($opt_v) {
+    print STDERR "\nMultiThreadStructure version: $VERSION\n\n";
+    exit(1);
+}
+
+
+## First, check in the executable is accessible
+
+our $struc_exec = $ENV{STRUCTURE_EXEC} || 'structure';
+
+my $strucmsg = `$struc_exec`;
+
+unless (defined $strucmsg) {
+    die("ERROR: No Structure executable was accessible. Check path and env.\n");
+}
+else {
+    print STDERR "\tStructure executable:\tOk\n";
+}
+
+my $date = `date`;
+chomp($date);
+
+print STDERR "\n\n#########################################################\n";
+print STDERR "## MultiThreadStructure version:$VERSION \n";
+print STDERR "## $date \n";
+print STDERR "#########################################################\n\n";
+
+## First argument checking
+
+print_header("0) Arguments and templates validation");
+
+my $inlist = $opt_i ||
+    die("ERROR: No -i <structure_file_list> was supplied.\n");
+
+my %inlist = ();
+my $incount = 0;
+foreach my $file (split(/,/, $inlist)) {
+
+    $incount++;
+
+    if ($opt_T) {
+
+	if ($file =~ m/(.+)=(.+)/) {
+	
+	    $inlist{$1} = $2;
+	}
+	else {
+	
+	    die("ERROR: -T option is enabled but files doesnt have any tag.\n");
+	}
+    }
+    else {
+
+	$inlist{$incount} = $file;
+    }
+}
+
+print STDERR "\tSTRUCTURE FILE LIST with $incount elements.\n";
+
+my $outdir = $opt_o || 'out_structure';
+if (-d $outdir) {
+    
+    print STDERR "\tWARNING: $outdir dir exists. It will overwrite the data.\n";
+}
+else {
+
+    mkdir($outdir);
+    print STDERR "\tCREATED OUTPUT DIR: $outdir.\n";
+}
+
+
+## GET PROJECT TEMPLATE DATA
+
+## Define the order for the template file and parse the template or
+## create a new one using the default values.
+
+my @projfields = ('PROJNAME', 'NUMINDS', 'NUMLOCI', 'PLOIDY', 'MISSINGVAL',
+		  'ONEROW', 'INDLABEL', 'POPID', 'POPFLAG', 'LOCDATA',
+		  'PHENOTYPE', 'EXTRACOL', 'MARKERNAME', 'RECESSIVEALLELE',
+		  'MAPDISTANCE', 'PHASED', 'PHASEINFO');
+
+my %project = ( 
+    PROJNAME        => '',
+    NUMINDS         => '',
+    NUMLOCI         => '',  
+    PLOIDY          => 2,
+    MISSINGVAL      => -9,
+    ONEROW          => 1,
+    INDLABEL        => 1,
+    POPID           => 0,
+    POPFLAG         => 0,
+    LOCDATA         => 0,
+    PHENOTYPE       => 0,
+    EXTRACOL        => 0,
+    MARKERNAME      => 1,
+    RECESSIVEALLELE => 0,
+    MAPDISTANCE     => 1,
+    PHASED          => 0,
+    PHASEINFO       => 0
+    );
+
+if ($opt_p) {
+
+    print STDERR "\tPROJECT TEMPLATE FILE: $opt_p SUPPLIED.\n\n";
+    open my $tfh, '<', $opt_p;
+
+    my $T = `cut -f1 $opt_p | wc -l`;
+    chomp($T);
+    my ($t, $tt) = (0, 0);
+
+    while (<$tfh>) {
+	
+	$t++;
+	chomp($_);
+	
+	print STDERR "\tParsing template file $t of $T lines            \r";
+
+	## Clean the first and last spaces from the line
+	$_ =~ s/^\s+//;
+	$_ =~ s/\s+$//;
+
+	my ($field, $data) = split(/\s+/, $_);
+
+	unless (exists $project{$field}) {
+	
+	    print STDERR "WARNING: $field (line:$t) from project file is not ";
+	    print STDERR "a Structure project field. Check documentation.\n";
+	}
+	else {
+	
+	    $project{$field} = $data;
+	    $tt++;
+	}
+    }
+    
+    print STDERR "\n\t$tt fields have been parse from $opt_p template file.\n";
+}
+
+## GET MAIN PARAMETERS TEMPLATE DATA
+
+## Define the order for the template file and parse the template or
+## create a new one using the default values.
+
+my @mainfields = ('OUTFILE', 'INFILE', 'NUMINDS', 'NUMLOCI', 'LABEL',
+		  'POPDATA', 'POPFLAG', 'LOCDATA', 'PHENOTYPE', 'MARKERNAMES',
+		  'MAPDISTANCES', 'ONEROWPERIND', 'PHASEINFO', 'PHASED',
+		  'RECESSIVEALLELES', 'EXTRACOLS', 'MISSING', 'PLOIDY',
+		  'MAXPOPS', 'BURNIN', 'NUMREPS', 'NOADMIX', 'LINKAGE',
+		  'USEPOPINFO', 'LOCPRIOR', 'INFERALPHA', 'ALPHA',
+		  'POPALPHAS', 'UNIFPRIORALPHA', 'ALPHAMAX', 'ALPHAPROPSD',
+		  'FREQSCORR', 'ONEFST', 'FPRIORMEAN', 'FPRIORSD',
+		  'INFERLAMBDA', 'LAMBDA', 'COMPUTEPROB', 'PFROMPOPFLAGONLY',
+		  'ANCESTDIST', 'STARTATPOPINFO', 'METROFREQ', 'UPDATEFREQ');
+
+my %mainpar = ( 
+    OUTFILE          => '',
+    INFILE           => '',
+    NUMINDS          => '',
+    NUMLOCI          => '',
+    LABEL            => 1, 
+    POPDATA          => 0, 
+    POPFLAG          => 0, 
+    LOCDATA          => 0, 
+    PHENOTYPE        => 0, 
+    MARKERNAMES      => 1, 
+    MAPDISTANCES     => 1, 
+    ONEROWPERIND     => 1, 
+    PHASEINFO        => 0, 
+    PHASED           => 0, 
+    RECESSIVEALLELES => 0, 
+    EXTRACOLS        => 0,
+    MISSING          => -9,
+    PLOIDY           => 2,
+    MAXPOPS          => 6,
+    BURNIN           => 10000,
+    NUMREPS          => 10000,
+    NOADMIX          => 0,
+    LINKAGE          => 0,
+    USEPOPINFO       => 0,
+    LOCPRIOR         => 0,
+    INFERALPHA       => 1,
+    ALPHA            => 1.0,
+    POPALPHAS        => 0, 
+    UNIFPRIORALPHA   => 1, 
+    ALPHAMAX         => 10.0,
+    ALPHAPROPSD      => 0.025,
+    FREQSCORR        => 1, 
+    ONEFST           => 0,
+    FPRIORMEAN       => 0.01,
+    FPRIORSD         => 0.05,
+    INFERLAMBDA      => 0, 
+    LAMBDA           => 1.0,
+    COMPUTEPROB      => 1, 
+    PFROMPOPFLAGONLY => 0, 
+    ANCESTDIST       => 0, 
+    STARTATPOPINFO   => 0, 
+    METROFREQ        => 10,
+    UPDATEFREQ       => 1     
+    );
+
+if ($opt_m) {
+
+    print STDERR "\tMAINPARAMETERS TEMPLATE FILE: $opt_m SUPPLIED.\n\n";
+    open my $mfh, '<', $opt_m;
+
+    my $M = `cut -f1 $opt_m | wc -l`;
+    chomp($M);
+    my ($m, $mm) = (0, 0);
+
+    while (<$mfh>) {
+	
+	$m++;
+	chomp($_);
+    
+	print STDERR "\tParsing template file $m of $M lines            \r";
+
+	## Clean the first and last spaces from the line
+	$_ =~ s/^\s+//;
+	$_ =~ s/\s+$//;
+
+	my ($field, $data) = split(/\s+/, $_);
+
+	unless (exists $mainpar{$field}) {
+	
+	    print STDERR "WARNING: $field (line:$m) from mainparameters file ";
+	    print STDERR "is not an Structure mainparameters field. ";
+	    print STDERR "Check documentation.\n";
+	}
+	else {
+	
+	    $mainpar{$field} = $data;
+	    $mm++;
+	}
+    }
+    
+    print STDERR "\n\t$mm fields have been parse from $opt_m template file.\n";
+}
+
+my @extrafields = ('FREQSCORR', 'ONEFST', 'INFERALPHA', 'POPALPHAS', 
+		   'RECOMBINE', 'COMPUTEPROB', 'INFERLAMBDA', 'NOADMIX',
+		   'ADMBURNIN', 'USEPOPINFO', 'GENSBACK', 'MIGRPRIOR',
+		   'PFROMPOPFLAGONLY', 'RANDOMIZE');
+
+my %checkextra = ();
+foreach my $extf (@extrafields) {
+
+    $checkextra{$extf} = 1;
+}
+
+## Now it will parse the extraparameters file.
+
+my %extrapar = ();
+
+if ($opt_e) {
+
+    print STDERR "\tEXTRAPARAMETERS TEMPLATE FILE: $opt_e SUPPLIED.\n\n";
+    open my $efh, '<', $opt_e;
+
+    my $E = `cut -f1 $opt_e | wc -l`;
+    chomp($E);
+    my ($e, $ee) = (0, 0);
+
+    while (<$efh>) {
+	
+	$e++;
+	chomp($_);
+        
+	print STDERR "\tParsing template file $e of $E lines            \r";
+
+	## Clean the first and last spaces from the line
+	$_ =~ s/^\s+//;
+	$_ =~ s/\s+$//;
+
+	my ($field, $data) = split(/\s+/, $_);
+
+	unless (exists $checkextra{$field}) {
+	
+	    print STDERR "WARNING: $field (line:$e) from extraparameters file ";
+	    print STDERR "is not an Structure extraparameters field. ";
+	    print STDERR "Check documentation.\n";
+	}
+	else {
+	
+	    $extrapar{$field} = $data;
+	    $ee++;
+	}
+    }
+    
+    print STDERR "\n\t$ee fields have been parse from $opt_e template file.\n";
+}
+
+## Change arguments with -a parameter
+
+if ($opt_a) {
+
+    foreach my $arg (split(/,/, $opt_a)) {
+    
+	if ($arg =~ m/(.+)=(.+)/) {
+	
+	    if (exists $mainpar{$1}) {
+		
+		print STDERR "\tReplace field=$1 value=$mainpar{$1} for $2\n";
+		$mainpar{$1} = $2;
+	    }
+	    elsif ($checkextra{$1}) {
+	    
+		print STDERR "\tReplace/Adding field=$1 to extra parameters\n";
+		$extrapar{$1} = $2;
+	    }
+	    else {
+	    
+		print STDERR "\tWARNING: $1 is not a main or extra parameter. ";
+		print STDERR "Ignoring command line -a $1\n";
+	    }
+	}
+    }
+}
+
+## Set the K values
+
+my @k = ();
+if ($opt_k =~ m/^\d+$/) {
+    
+    push @k, $opt_k;
+}
+elsif ($opt_k =~ m/^(\d+)-(\d+)$/) {
+
+    my ($min, $max) = ($1, $2);
+    while($min <= $max) {
+    
+	push @k, $min;
+	$min++;
+    }
+}
+else {
+
+    die("ERROR: -k <K_range> doesn't have a permited format.\n");
+}
+
+my $kline = join(",", @k);
+my $kcount = scalar(@k);
+print STDERR "\tMAX. POPULATIONS VALUES: $kline\n\n";
+
+my $runs = $opt_r || 1;
+unless ($runs =~ m/^\d+$/) {
+
+    die("ERROR: -r <runs> is not an integer.\n");
+}
+else {
+
+    print STDERR "\tRUNS SET TO $runs PER CONDITION (infile * k)\n\n";
+}
+
+my $thr = $opt_t;
+
+## Once the template files has been parsed it'll calculate how many
+## jobs it should create.
+
+my $threads = $opt_t || 2;
+unless ($threads =~ m/^\d+$/) {
+
+    die("ERROR: -t <threads> is not an integer.\n");
+}
+else {
+
+    print STDERR "\tTHREADS SET TO $threads\n\n";
+}
+
+
+my %sortind = ();
+if ($opt_s) {
+
+    my $s = 0;
+    foreach my $ind (split(/,/, $opt_s)) {
+    
+	if ($ind =~ m/.+/) {
+	    $s++;
+	    $sortind{$ind} = $s;
+	}
+    }
+    my $indcount = scalar(keys %sortind);
+    print STDERR "\tSORTED INDIVIDUAL LIST WITH $indcount elements SUPPLIED.\n";
+}
+
+
+
+my $max_j = $incount * $kcount * $runs;
+print STDERR "\tNUMBER OF JOBS: $max_j\n";
+
+## It will divide the jobs in packages
+## based in the number of threads
+## It will be as many jobs in a package as threads have been especified.
+
+print_header("1) Jobs packing");
+
+my @packages = ();
+my @jobs = ();
+my %outfiles = ();
+
+my ($j, $v) = (0, 0);
+
+foreach my $filetag (sort {$a cmp $b} keys %inlist) {
+    
+    my $in = $inlist{$filetag};
+
+    ## separate dirname and basename
+
+    my ($filein, $dirin) = fileparse($in);
+
+    print STDERR "\tAnalyzing loci and individuals for file: $in\n\n";
+
+    ## Loci and Ind number analysis
+
+    my $loci = 0;
+
+    open my $ifh, '<', $in;
+   
+    my @lines = ();
+    my ($l, $i) = (0, 0);
+
+    ## Get the column/row structure
+
+    my $locirow = $mainpar{MARKERNAMES} + $mainpar{MAPDISTANCES};
+    my $indicol = $mainpar{LABEL} + $mainpar{POPDATA} + $mainpar{PHENOTYPE} + 
+	$mainpar{EXTRACOLS};
+    
+    while(<$ifh>) {
+    
+	chomp($_);
+
+	if ($_ =~ m/.+/) {
+
+	    $l++;
+	    my @d = split(/\s+/, $_);
+	    
+	    if ($l == 1) {
+	    
+		if ($locirow >= 1) {
+	    
+		    $loci = scalar(@d);    
+		}
+		else {
+	
+		    $loci = scalar(@d) - $indicol;
+
+		    if ($mainpar{ONEROWPERIND} == 1) {
+		    
+			$loci = $loci / $mainpar{PLOIDY};
+		    }	
+		}
+	    }
+	}
+    }
+    close($ifh);
+
+    ## Now it'll count indiv as:
+
+    my $indiv = $l - $locirow;
+
+    if ($mainpar{ONEROWPERIND} == 0) {
+    
+	my $corr = $mainpar{PLOIDY} + $mainpar{PHASEINFO};
+	$indiv = $indiv / $corr;
+    }
+
+    print STDERR "\tNUMLOCI = $loci\n\tNUMINDS = $indiv\n\n";
+
+    foreach my $popk (@k) {
+    
+	my $c_run = 1;
+	while( $c_run <= $runs) {
+
+	    #print STDERR "\tPackage FILE=$in | K=$popk | RUN=$c_run\n\n";
+
+	    ## Create the outbase for the mainpar file
+	    
+	    my $lpopk = length(scalar(@k));
+	    my $ppopk = sprintf("%0$lpopk"."s", $popk);
+	    my $lrun = length($runs);
+	    my $prun = sprintf("%0$lrun"."s", $c_run);
+
+	    my $outbase = $filein . ".K" . $ppopk . 'R' . $prun;
+	    if ($opt_T) {
+	    
+		$outbase = $filetag . ".K" . $ppopk . 'R' . $prun;
+	    }
+	    
+	    
+	    ## Create the project data file
+
+	    ##$project{NUMLOCI} = $loci;
+	    ##$project{NUMINDS} = $indiv;
+	    ##$project{PROJNAME} = $in;
+
+	    #my $projfile = File::Spec->catfile($dirin, 'proj_'.$outbase);
+	    ##open my $pifh, '>', $projfile;
+
+	    ##foreach my $projf (@projfields) {
+	    
+		##print $mifh "##define $projf $project{$projf}\n"	    
+	    ##}
+	    ##close($pifh);
+
+	    $mainpar{NUMLOCI} = $loci;
+	    $mainpar{NUMINDS} = $indiv;
+	    $mainpar{INFILE} = $in;
+	    $mainpar{MAXPOPS} = $popk;
+	    $mainpar{OUTFILE} = File::Spec->catfile($outdir, 'out_' . $outbase);
+	    	   
+	    ## Print the mainpar file
+
+	    my $mainparfile = File::Spec->catfile($outdir, 'mainpar_'.$outbase);
+	    open my $mifh, '>', $mainparfile;
+
+	    foreach my $mainf (@mainfields) {
+	    
+		print $mifh "#define $mainf $mainpar{$mainf}\n"	    
+	    }
+	    close($mifh);
+
+	    ## Get a name for a log file
+
+	    my $logfile = File::Spec->catfile($outdir, 'log_'.$outbase);
+
+	    ## Print the extrapar file
+
+	    my $extraparfile = File::Spec->catfile($outdir, 'extpar_'.$outbase);
+	    open my $eifh, '>', $extraparfile;
+
+	    if ($opt_e) {
+	  
+		foreach my $exinf (keys %extrapar) {
+	    
+		    print $eifh "##define $exinf $extrapar{$exinf}\n"	    
+		}
+		
+	    }
+	    close($eifh);
+	    
+	    ## Add the mainpar file to the list
+
+	    my @files = ($mainparfile, $logfile, $extraparfile);
+
+	    push @jobs, \@files;
+
+	    ## By default Struture adds _f to the filename
+
+	    my $outfile_f = $mainpar{OUTFILE} . '_f';
+
+	    if (exists $outfiles{$filetag}) {
+		
+		if (exists $outfiles{$filetag}->{$popk}) {
+
+		    $outfiles{$filetag}->{$popk}->{$c_run} = $outfile_f;
+		}
+		else {
+		
+		    $outfiles{$filetag}->{$popk} = { $c_run => $outfile_f };
+		}
+	    }
+	    else {
+	    
+		$outfiles{$filetag} = {$popk => {$c_run => $outfile_f }};
+	    }
+
+	    $c_run++;
+	    $j++;
+
+	    if ($v + 1 == $max_j || $j == $threads) {   ## It is the last job
+
+		my @pack_jobs = @jobs;
+		push @packages, \@pack_jobs;
+		$j = 0;
+		@jobs = ();
+	    }
+	    $v++;
+	}
+    }
+}
+
+my $pcks = scalar(@packages);
+print STDERR "\tBatches have been organized in $pcks packages and $v jobs\n";
+
+print_header("2) Packs executions");
+
+my $j_exec = 0;
+my $p = 0;
+
+foreach my $pack (@packages) {
+
+    $p++;
+    my @exjobs = @{$pack};
+    my ($n, $j_run) = (0, 0);
+    my @th_procs = ();
+
+    my $all_j = scalar(@exjobs);
+    print STDERR "\n\tRunning package $p ($threads threads)\n";
+
+    while($n < $threads && $j_exec <= $v && $j_run < $all_j)  {	
+
+	$j_run++;
+	my @jobfiles = @{$exjobs[$n]};
+	my $th_proc = threads->create(\&run_batchstructure, @jobfiles);
+	push @th_procs, $th_proc;
+	$n++;
+    }
+
+    foreach my $th (@th_procs) {
+	my $th_id = $th->tid();
+	my $th_res = $th->join();
+
+	unless (defined($th_res)) {
+	    warning("\tExecution error for thread $th_id\n");
+	    my $error = $th->error();
+	    print "\n===== ERROR $th_id =====\n$error\n===================\n";
+	}
+	$j_exec++;
+    }
+}
+
+print STDERR "\n\t$j_exec jobs have been executed in $p packages.\n";
+
+print_header("3) Parsing Output");
+
+my %data = ();
+
+foreach my $tag (sort {$a cmp $b} keys %outfiles) {
+
+    $data{$tag} = {};
+
+    foreach my $k (sort {$a <=> $b} keys %{$outfiles{$tag}}) {
+    
+	$data{$tag}->{$k} = {};
+
+	foreach my $r (sort {$a <=> $b} keys %{$outfiles{$tag}->{$k}}) {
+	
+	    my %results = parse_results($outfiles{$tag}->{$k}->{$r});
+	    $data{$tag}->{$k}->{$r} = \%results;
+	}
+    }
+}
+
+print_header("4) Creating reports");
+
+my $outres = File::Spec->catfile($outdir, 'Results');
+if (-d $outres) {
+    
+    print STDERR "\tWARNING: $outres dir exists. It will overwrite the data.\n";
+}
+else {
+
+    mkdir($outres);
+    print STDERR "\tCREATED OUTPUT DIR: $outres.\n";
+}
+
+my $structtabfile = File::Spec->catfile($outres, 'StructureResults.txt');
+open my $sfh, '>', $structtabfile;
+print $sfh "#TAG\tK\tRUN\tLnEst\tLnMean\tLnVar\tAlphaMean\n";
+
+foreach my $tag (sort {$a cmp $b} keys %outfiles) {
+
+    my $n = 0;
+    my %lndata = ();
+
+    foreach my $k (sort {$a <=> $b} keys %{$outfiles{$tag}}) {    
+
+	my @ln = ();
+
+	foreach my $r (sort {$a <=> $b} keys %{$outfiles{$tag}->{$k}}) {
+
+	    my %res = %{$data{$tag}->{$k}->{$r}};
+
+	    my @line = ($tag, $k, $r, $res{LnEstimation}, $res{LnMean},
+			$res{LnVariance}, $res{AlphaMean});
+
+	    if ($n > 0) {
+
+		my $currln = $data{$tag}->{$k}->{$r}->{LnMean};
+		my $prevk = $k - 1;
+		my $prevln = $data{$tag}->{$prevk}->{$r}->{LnMean};
+		my $lndif = $currln - $prevln;
+	    
+		push @ln, $lndif;
+	    }
+
+	    my $line = join("\t", @line);
+	    print $sfh "$line\n";
+
+	    my $mtxname = $tag . '-K' . $k . '.R' . $r . '.' . 'popmatrix.txt';
+	    my $mtxfile = File::Spec->catfile($outres, $mtxname);
+	    open my $mfh, '>', $mtxfile;
+
+	    my %mtx = %{$res{Popmatrix}};
+	    my @indv = sort keys %mtx;
+
+	    if ($opt_s) {
+	    
+		my @prein = sort {$sortind{$a} <=> $sortind{$b}} keys %sortind;
+		my $nomtx = 0;
+
+		foreach my $indv (@prein) {
+		
+		    unless (exists $mtx{$indv}) {
+		    
+			$nomtx++;
+			print STDERR "\nTEST: [$indv]\n";
+		    }
+		}
+		if ($nomtx == 0 && scalar(@indv) == scalar(@prein)) {
+		
+		    @indv = @prein;
+		}
+		else {
+		
+		    print STDERR "\t$nomtx sorted indiv. list are not in the";
+		    print STDERR "population matrix.\n\tIgnoring sorting\n";
+		}
+	    }
+
+
+	    foreach my $tg (@indv) {
+	    
+		my @rw = @{$mtx{$tg}};
+		shift(@rw);
+		my $pline = join("\t", @rw);
+		print $mfh "$pline\n";
+	    }
+	    close($mfh);
+	}
+
+	if ($n > 0) {
+	    $lndata{$k} = \@ln;
+	}
+	
+	$n++;
+    }
+
+    my $dname = $tag . '.' . 'delta.txt';
+    my $dfile = File::Spec->catfile($outres, $dname);
+    open my $dfh, '>', $dfile;
+    
+    foreach my $kp (sort {$a <=> $b} keys %lndata) {
+    
+	my @lnt = @{$lndata{$kp}};
+	my $stats = Statistics::Descriptive::Full->new();
+	$stats->add_data(@lnt);
+	my $lnmean = $stats->mean();
+	my $lnsd = $stats->standard_deviation();
+
+	my $lmean = Math::BigFloat->new($stats->mean())->babs();
+	my $lsd = Math::BigFloat->new($stats->standard_deviation());
+	my $delta = $lmean->bdiv($lsd)->bfround(-2)->bstr();
+	    
+	print $dfh "$kp\t$delta\n";
+    }
+    print STDERR "\n";
+}
+
+
+
+##
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n#########################################################\n";
+print STDERR "## End of the MultiThreadBlat execution                ##\n";
+print STDERR "## $date                        ##\n";
+print STDERR "#########################################################\n\n";
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+     
+
+    Note: 
+       
+      Structure executable have to be in the system path. Alternatively the
+      \$STRUCTURE_EXEC environment variable can be used.
+
+    Usage:
+
+      MultiThreadStructure [-h] -i <structure_file_list> 
+                           [-p <project_template>]
+                           [-e <extra_params_template>] 
+                           [-m <mainparams_template>]
+                           [-k <maxpopulation_range>]
+                           [-r <runs_per_file_and_k>]
+                           [-t <threads>]
+
+    Flags:
+    
+     -i <structure_list>        a list of files separated by commas (mandatory)
+     -p <project_template>      template for project (see description)
+     -e <extraparam_template>   extra parameters template file (see description)
+     -m <mainparam_template>    main parameters template file (see description)
+     -k <maxpopulation_range>   range of MAXPOP (for example 2-15).
+     -r <runs_per_file_and_K>   number of runs per file and K (default 1)
+     -t <threads>               number of threads (2 by default)
+     -h <help>                  print the help
+     -v <version>               print version
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+
+    unless (defined $date) {
+	
+	$date = 'NA';
+    }
+    else {
+	chomp($date);
+    }
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+=head2 run_batchstructure
+
+  Usage: run_batchstructure($mainparfile, $extraparfile);
+  
+  Desc: run structure
+  
+  Ret: nothing
+  
+  Args: $mainparfile, a file with the main parameters
+        $extraparfile, a file with the extra parameters
+  
+  Side_Effects: die of something is wrong
+  
+  Example: run_batchstructure($mainparfile, $extraparfile);
+
+=cut
+
+sub run_batchstructure {
+    
+    my $mainpar = shift ||
+	die("ERROR: No main parameter file was supplied to run_batchstructure");
+    my $logfile = shift ||
+	die("ERROR: No log file was supplied to run_batchstructure");
+    
+    my $extrapar = shift;
+
+    my $cmd = "$struc_exec -m $mainpar";
+
+    if (defined $extrapar) {
+    
+	$cmd .= " -e $extrapar";
+    }
+
+    $cmd .= " > $logfile";
+    
+    #print STDERR "\tRunning: $cmd\n";
+    system($cmd);
+ 
+    return 1;
+}
+
+
+=head2 parse_results
+
+  Usage: my %results = parse_results($file);
+
+  Desc: parse results and return then in a hash
+
+  Ret: %results, a hash with the following keys
+
+  Args: $file, a filename to parse
+
+  Side_Effects: Die if something is wrong
+
+  Example: my %results = parse_results($file);
+
+=cut
+
+sub parse_results {
+
+    my $file = shift ||
+	die("ERROR: No file was supplied to parse_results().\n");
+
+
+    my %results = ();
+
+    open my $rfh, '<', $file;
+
+    ## Define the field switches.
+    my ($cl, $ht, $mt) = (0, 0, 0);
+    
+    ## Define the hash variables (multiline)
+    my %clusters = ();
+    my %popmatrix = ();
+    my @preclusters = ();
+
+    while(<$rfh>) {
+	    
+	chomp($_);
+	$_ =~ s/^\s+//;
+
+	if ($cl == 1) {
+	   
+	    $_ =~ s/\s+$//;
+	    $_ =~ s/\s+/\t/g;
+	    @preclusters = split(/\t/, $_);
+	    $cl++;
+	}
+	elsif ($cl == 2) {
+	    
+	    $_ =~ s/\s+$//;
+	    $_ =~ s/\s+/\t/g;
+	    my $n = 0;
+	    foreach my $val (split(/\t/, $_)) {
+		
+		$clusters{$preclusters[$n]} = { size => $val };
+		$n++;
+	    }
+	    $cl = 0;
+	}
+	elsif ($ht == 1) {
+	    
+	    if ($_ =~ m/cluster\s+(\d+)\s+:\s+(.+)/) {
+		
+		$clusters{$1}->{heterozygosity}= $2;
+	    }
+	    else {
+		
+		$ht = 0;
+	    }		
+	}
+	elsif ($mt == 2) {
+		
+	    if ($_ =~ m/.+/) {
+		$_ =~ s/\s+/\t/g;
+	    
+		my @row = ();
+		foreach my $dta (split(/\t/, $_)) {
+
+		    if ($dta !~ m/\(/ && $dta !~ m/:/) {
+			
+			push @row, $dta;
+		    }
+		}	
+		$popmatrix{$row[1]} = \@row;		    
+	    }
+	}
+	
+
+	## set up the marker
+	
+	if ($_ =~ /Inferred Clusters/) {
+	    
+	    $cl = 1;
+	}
+	elsif ($_ =~ /Average distances \(expected/) {
+		
+	    $ht = 1;
+	}
+	elsif ($_ =~ m/Estimated\s+Ln\s+Prob\s+of\s+Data\s+=\s+(.+)/) {
+	    
+	    $results{LnEstimation} = $1;
+	}
+	elsif ($_ =~ m/Mean\svalue\s+of\s+ln\s+likelihood\s+=\s+(.+)/) {
+	    
+	    $results{LnMean} = $1;
+	}
+	elsif ($_ =~ m/Variance\s+of\s+ln\s+likelihood\s+=\s+(.+)/) {
+		
+	    $results{LnVariance} = $1;
+	}
+	elsif ($_ =~ m/Mean\s+value\s+of\s+alpha\s+=\s+(.+)/) {
+	    
+	    $results{AlphaMean} = $1;
+	}
+	elsif ($_ =~ m/Inferred\s+ancestry\s+of\s+individuals:/) {
+	    
+	    $mt++;
+	}
+	elsif ($_ =~ m/:\s+Inferred\s+clusters/) {
+	    
+	    $mt++;
+	}
+	elsif ($_ =~ m/^\s*$/) {
+	
+	    $mt = 0;
+	}
+    }
+    
+    $results{Clusters} = \%clusters;
+    $results{Popmatrix} = \%popmatrix;
+
+    return(%results);
+}
