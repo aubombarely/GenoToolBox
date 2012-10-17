@@ -14,7 +14,7 @@
                    [-f <outputformat>] [-p <ploidy>] [-m <max_markers>]
                    [-s <num_structure_sets>] [-e <excluding_seqID>]
                    [-l <marker_list> | -b <bp_boxsize> | -S] 
-                   [-V] [-H]
+                   [-V] [-H] [-B]
 
 =head2 I<Flags:>
 
@@ -84,6 +84,10 @@ B<one_file_for_seqid>     create one file for seqid
 
 B<filter_het_for_poly>    filter the heterozygous SNPs for polyploids
  
+=item -B
+
+B<biallelic_filter>       filter the positions with more of two alleles
+
 =item -V
 
 B<be_verbose>             be verbose and print the parsing status.
@@ -101,9 +105,10 @@ B<help>                   print the help
  This script parse multiple vcf files and creates a common file.
 
  Available formats: .var     (columnar txt format with notes).
-                    .hmp     (hapmap format).
+                    .hapmap  (hapmap format).
                     .struct  (Structure program input format).
-                    .phase   (Phase program input format).
+                    .mphase  (Phase program input format) (numeric SNP).
+                    .sphase  (Phase program input format) (character SNP) 
  
  Available filters: -d (min. sequence depth for the SNP position)
                     -q (min. SNP score)
@@ -143,11 +148,11 @@ use Getopt::Std;
 use List::Util 'shuffle';
 
 our ($opt_i, $opt_c, $opt_o, $opt_d, $opt_q, $opt_g, $opt_f, $opt_p, $opt_m, 
-     $opt_s, $opt_l, $opt_b, $opt_e, $opt_S, $opt_H, $opt_V, $opt_h);
-getopts("i:c:o:d:q:g:f:p:m:s:l:b:e:SHVh");
+     $opt_s, $opt_l, $opt_b, $opt_e, $opt_S, $opt_H, $opt_B, $opt_V, $opt_h);
+getopts("i:c:o:d:q:g:f:p:m:s:l:b:e:SHBVh");
 if (!$opt_i && !$opt_c && !$opt_o && !$opt_d && !$opt_q && !$opt_g && !$opt_f
     && !$opt_m && !$opt_p && !$opt_s && !$opt_l && !$opt_b && !$opt_e && 
-    !$opt_S && !$opt_H && !$opt_V && !$opt_h) {
+    !$opt_S && !$opt_H && !$opt_B && !$opt_V && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -176,7 +181,8 @@ my %outf_def = (
     'var'       => 1,
     'hapmap'    => 1,
     'structure' => 1, 
-    'phase'     => 1
+    'mphase'    => 1,
+    'sphase'    => 1
     );
 
 my $outdef = join(",", keys %outf_def);
@@ -414,6 +420,10 @@ if ($opt_e) {
     print STDERR "\tExcluded SeqID file as been supplied with $exnum seqIDs\n";
 }
 
+if ($opt_B) {
+
+    print STDERR "\tBiallelic filtering enabled.\n";
+}
 
 ## It will define the genotype numeric values for the structure format
 
@@ -692,7 +702,7 @@ my @completemarks = ();
 my %data = ();
 
 my $m = 0;
-my $filterH = 0;
+my ($filterH, $filterB) = (0, 0);
 my $excl_count = 0;
 
 foreach my $seqid (sort {$a cmp $b} keys %snp) {
@@ -729,6 +739,10 @@ foreach my $seqid (sort {$a cmp $b} keys %snp) {
 	    my %snpgrp = ();
 	    my %snpgrptype = ();
 
+	    ## Define the alleles
+	    
+	    my %alleles = ();
+
 	    foreach my $sample (sort keys %vcffile) {
 		
 		## Get the group
@@ -749,10 +763,24 @@ foreach my $seqid (sort {$a cmp $b} keys %snp) {
 		    if ($f == 0) {
 		    
 			$data{$mark}->{reference} = $vcfrow[3];
+
+			## Add the reference allele
+			
+			foreach my $al ( split(/,/, $vcfrow[3])) {
+
+			    $alleles{$al} = 1;
+			}
 		    }
 						
-		    $var = join(",", sort(split(',', $vcfrow[4])));		
+		    $var = join(",", sort(split(/,/, $vcfrow[4])));		
 		
+		    ## Add the var.
+
+		    foreach my $val (split(/,/, $var)) {
+		    
+			$alleles{$val} = 1;
+		    }
+
 		    ## Check other groups to build the note
 
 		    if (exists $snpgrp{$grp}) {
@@ -792,6 +820,13 @@ foreach my $seqid (sort {$a cmp $b} keys %snp) {
 		    $complete = 0;
 		    $filterH++;
 		}
+
+		my $allele_n = scalar(keys %alleles);
+		if ($opt_B && $allele_n > 2) {
+		
+		    $complete = 0;
+		    $filterB++;
+		}
 	    }
 	
 	    ## Add the note to %data
@@ -827,6 +862,11 @@ if ($opt_H) {
 
     print STDERR "\t$filterH SNPs have been filtered out ";
     print STDERR "(heterozygosity level > ploidy * 2).\n";
+}
+if ($opt_B) {
+
+    print STDERR "\t$filterB SNPs have been filtered out ";
+    print STDERR "(marker was not biallelic).\n";
 }
 
 
@@ -1120,15 +1160,26 @@ foreach my $listaref (@mark_glists) {
 	print STDERR "\tFile $outvarname with .struct format ($nm markers) ";
 	print STDERR "has been created\n";
     }
-    if ($outf{phase}) {
+    if ($outf{mphase}) {
     	
-	my $outvarname = $outbase . '.set_' . $setid . '.phase.txt';
+	my $outvarname = $outbase . '.set_' . $setid . '.m.phase.txt';
 	open my $outvarfh, '>', $outvarname;
 
-	print_phase($outvarfh, \%data, $ploidy, \%genotypes, \@mlist);
+	print_mphase($outvarfh, \%data, $ploidy, \%genotypes, \@mlist);
 	my $nm = scalar(@mlist);
     
-	print STDERR "\tFile $outvarname with .phase format ($nm markers) ";
+	print STDERR "\tFile $outvarname with .phase (M) format ($nm markers) ";
+	print STDERR "has been created\n";
+    }
+    if ($outf{sphase}) {
+    	
+	my $outvarname = $outbase . '.set_' . $setid . '.s.phase.txt';
+	open my $outvarfh, '>', $outvarname;
+
+	print_sphase($outvarfh, \%data, $ploidy, \%genotypes, \@mlist);
+	my $nm = scalar(@mlist);
+    
+	print STDERR "\tFile $outvarname with .phase (S) format ($nm markers) ";
 	print STDERR "has been created\n";
     }
 }
@@ -1165,9 +1216,10 @@ sub help {
        This script parse multiple vcf files and creates a common file.
 
        Available formats: .var     (columnar txt format with notes).
-                          .hmp     (hapmap format).
+                          .hapmap  (hapmap format).
                           .struct  (Structure program input format).
-                          .phase   (Phase program input format).
+                          .mphase  (Phase program input format) (numeric SNP).
+                          .sphase  (Phase program input format) (character SNP) 
  
         Available filters: -d (min. sequence depth for the SNP position)
                            -q (min. SNP score)
@@ -1190,7 +1242,7 @@ sub help {
                    [-f <outputformat>] [-p <ploidy>] [-m <max_markers>]
                    [-s <num_structure_sets>] [-e <excluding_seqID>]
                    [-l <marker_list> | -b <bp_boxsize> | -S] 
-                   [-V] [-H]
+                   [-V] [-H] [-B]
 
     Flags:
 
@@ -1213,6 +1265,7 @@ sub help {
       -b <boxsize>                divide markers in boxes with size -b <size> bp
       -S <split_files_by_seqid>   one file per seqID (except .var format)
       -H <filterout_overheteroz>  filter out the SNPs where n.alleles > polypl.
+      -B <biallelic_filter>       filter the positions with more of two alleles
       -V <be_verbose>             be verbose and print the parsing status
       -h <help>                   print the help
 
@@ -1788,11 +1841,11 @@ sub print_struct {
 }
 
 
-=head2 print_phase
+=head2 print_mphase
 
-  Usage: print_phase($ofh, \%data. $polyp, \@markers)
+  Usage: print_mphase($ofh, \%data. $polyp, \@markers)
 
-  Desc: print SNPdata in structure format
+  Desc: print SNPdata in Phase (M) format
 
   Ret: none
 
@@ -1804,11 +1857,11 @@ sub print_struct {
 
   Side_Effects: Die if something is wrong
 
-  Example: print_phase($ofh, \%data)
+  Example: print_mphase($ofh, \%data)
 
 =cut
 
-sub print_phase { 
+sub print_mphase { 
     my $ofh = shift || 
 	die("ERROR: No filehandle variable was supplied to print_phase().\n");
     my $datahref = shift ||
@@ -1999,6 +2052,222 @@ sub print_phase {
 	foreach my $pol (sort {$a <=> $b} keys %genotyp) {
 
 	    my $pline =  join(" ", @{$genotyp{$pol}});
+	    print $ofh "$pline\n";
+	}
+    }   
+}
+
+
+=head2 print_sphase
+
+  Usage: print_snpphase($ofh, \%data. $polyp, \@markers)
+
+  Desc: print SNPdata in phase format
+
+  Ret: none
+
+  Args: $ofh, output filehandle
+        \%data, a hashref with data where keys = marker_id and values = hashref
+        with keys=sample_name,note,position,seqID and value=value
+        $polyploidy, a numeric scalar
+        \@markers, a arrayref of markers
+
+  Side_Effects: Die if something is wrong
+
+  Example: print_sphase($ofh, \%data)
+
+=cut
+
+sub print_sphase { 
+    my $ofh = shift || 
+	die("ERROR: No filehandle variable was supplied to print_phase().\n");
+    my $datahref = shift ||
+	die("ERROR: No datahref variable was supplied to print_phase().\n");
+    my $polypl = shift || 2;
+    my $equivhref = shift ||
+	die("ERROR: No equivhref variable was supplied to print_phase().\n");
+    my $ordmks_aref = shift;
+
+    my %data = ();
+    if (ref($datahref) ne 'HASH') {
+    
+	die("ERROR: $datahref (datahref) supplied to print_phase isnt href\n");
+    }
+    else {
+    
+	%data = %{$datahref};
+    }
+
+    if ($polypl !~ m/^\d+$/) {
+    
+	die("ERROR: polyploidy var. for print_phase isnt numeric.\n");
+    }
+
+    my %nonsamples = ( seqid     => 1, 
+		       position  => 1, 
+		       reference => 1, 
+		       notes     => 1,
+		       sort      => 1
+	);
+
+
+    ## Markers supplied to the structure format need to be ordered by
+    ## position, this functions will assume that, or that the name can be
+    ## used for the same purpose.
+
+    my @markers = ();
+    if (defined $ordmks_aref) {
+    
+	unless (ref($ordmks_aref) eq 'ARRAY') {
+	
+	    die("ERROR: $ordmks_aref supplied to print_phase isnt arrayref\n");
+	}
+	@markers = @{$ordmks_aref};
+    }
+    else {
+	@markers = sort { $a cmp $b } keys %data;
+    }
+
+    ## Get the distance between markers
+
+    my @positions = ();
+    my $n = 0;
+
+    if ($opt_V) {
+    
+	print STDERR "\tGetting positions for each marker.\n\n";
+    }
+
+    ## Check that there is only one seqID
+
+    my %seqids = ();
+
+    foreach my $mrk (@markers) {
+    
+	my $pos = $data{$mrk}->{position};
+	my $seqid = $data{$mrk}->{seqid};
+	$seqids{$seqid} = 1;
+
+	push @positions, $pos;
+    }
+
+    if (scalar(keys %seqids) > 1) {
+    
+	die("ERROR:Phase only can be used when markers are grouped by seqID\n");
+    }
+
+    ## Now it needs to switch the data from %databymarks to %databysample
+
+    ## First get the sample name
+
+    my @samples = ();
+    my %databysmp = ();
+
+    if ($opt_V) {
+    
+	print STDERR "\tSorting genotypes by sample.\n\n";
+    }
+
+    foreach my $key (keys %{$data{$markers[0]}}) {
+    
+	unless (exists $nonsamples{$key}) {
+	
+	    push @samples, $key;
+
+	    ## Create the sample hash
+
+	    $databysmp{$key} = {};
+
+	    my $p = 1;
+	    
+	    while($p <= $polypl) {
+		
+		
+		$databysmp{$key}->{$p} = [];
+		$p++;
+	    }    
+	}
+    }
+
+    @samples = sort @samples;
+
+    ## Second scan all the samples to retrieve the genotypic data
+    ## Structure works with numbers so it'll use the equivalence
+    ## hash to transform the Genotypes in numbers    
+
+    my $m = 0;
+    foreach my $mrk (@markers) {
+
+	$m++;
+	my %dtmrk = %{$data{$mrk}};
+	
+	foreach my $smp (@samples) {
+	
+	    my @genotypes = split(/,/, $dtmrk{$smp});
+	    my $gcount = scalar(@genotypes);
+
+	    if ($gcount > 0) {
+
+		my @genotcomp = ();
+		
+		my ($p, $a) = (1, 0);
+
+		while($p <= $polypl) {		    
+		
+		    if ($a+1 > $gcount) {		
+			
+			$a = 0;  ## Reset a counter
+		    }
+
+		    my $gty = $genotypes[$a] || 'N';
+
+		    push @{$databysmp{$smp}->{$p}}, lc($gty);
+		    $a++;
+		    $p++;
+		}
+	    }
+
+	    ## It will join the genotypes without a single character
+
+	    
+	}
+    }
+
+    if ($opt_V) {
+	print STDERR "\tPrinting the phase output.\n\n";
+    }
+
+    ## It will print one PHASE file per ID
+    ## Phase output will one per chromosome as:
+    ## 2                                      NUMBER OF INDIVIDUALS
+    ## 3                                      NUMBER OF LOCI
+    ## P 1000 2000 3000                       POSITION LOCI
+    ## SSS                                    LOCUS TYPE (S by default)
+    ## A                                      INDIVIDUAL ID 1
+    ## a t c                                  BIALLELIC GENOTYPES 1 for ID 1
+    ## a t c                                  BIALLELIC GENOTYPES 2 for ID 1
+    ## B                                      INDIVIDUAL ID 2
+    ## a t c                                  BIALLELIC GENOTYPES 1 for ID 2
+    ## a g g                                  BIALLELIC GENOTYPES 2 for ID 2
+    
+    my $sample_n = scalar(@samples);
+    my $loci_n = scalar(@markers);
+        
+    unshift(@positions, 'P');
+    my $positline = join(" ", @positions);
+
+    my $locustypeline = 'S' x $loci_n;
+
+    print $ofh "$sample_n\n$loci_n\n$positline\n$locustypeline\n";
+
+    foreach my $sample (@samples) {
+    
+	print $ofh "# $sample\n";
+	my %genotyp = %{$databysmp{$sample}};
+
+	foreach my $pol (sort {$a <=> $b} keys %genotyp) {
+
+	    my $pline =  join("", @{$genotyp{$pol}});
 	    print $ofh "$pline\n";
 	}
     }   
