@@ -53,11 +53,19 @@ B<help>                   print the help
  The script parse first the first file, getting the IDs and removing the pair
  tag based in fastq Illumina format:
 
- * Cassava1.7 or lower:
+ * 454 (sff_extract) (.f | .r)
+   @GGSVR7H01CO4LY.f
+   @GGSVR7H01CO4LY
+
+ * 454 (Newbler) (_left | _right)
+   @F98U7VR01CSYRA_left
+   @F98U7VR01CSYRA
+
+ * Cassava1.7 or lower (/1 | /2):
    @HWUSI-EAS100R:6:73:941:1973#0/1
    @HWUSI-EAS100R:6:73:941:1973
  
- * Cassava1.8
+ * Cassava1.8 ( 1: | 2:)
    @EAS139:136:FC706VJ:2:2104:15343:197393 1:Y:18:ATCACG
    @EAS139:136:FC706VJ:2:2104:15343:197393
 
@@ -126,7 +134,7 @@ open my $ifh, '<', $fastq_a;
 my $A = 0;
 if ($opt_V) {
 
-    $A = `grep -c "@" $fastq_a`;
+    $A = `grep -c "^@" $fastq_a`;
     chomp($A);
 }
 
@@ -135,10 +143,6 @@ my %ids = ();
 while (<$ifh>) {
 
     chomp($_);
-    $a++;
-    if ($opt_V) {
-	print STDERR "\tExtracting ID for line $a of $A               \r";
-    }
 
     if ($_ =~ m/^@/) {
 	if ($_ =~ m/^@(.+?)#.+$/) {                ## Cassava1.7 of lower
@@ -147,9 +151,20 @@ while (<$ifh>) {
 	elsif ($_ =~ m/^@(.+?)\s+.+$/) {           ## Cassava1.8
 	    $ids{$1} = 1;
 	}
+	elsif ($_ =~ m/^@(.+?)\.(f|r)$/) {         ## 454 (sff_extract)
+	    $ids{$1} = 1;
+	}
+	elsif ($_ =~ m/^@(.+?)_(left|right)$/) {   ## 454 (newbler)
+	    $ids{$1} = 1;
+	}
 	else {
 	    $ids{$_} = 1;
 	}
+	$a++;
+    }
+
+    if ($opt_V) {
+	print STDERR "\tExtracting ID $a of $A               \r";
     }
 }
 
@@ -165,7 +180,7 @@ my $seqio_b = Bio::SeqIO->new( -file   => $fastq_b, -format => 'fastq' );
 my $B = 0;
 if ($opt_V) {
 
-    $B = `grep -c "@" $fastq_b`;
+    $B = `grep -c "^@" $fastq_b`;
     chomp($B);
     print STDERR "\n\n2) Second pair file parsing\n\n";
 }
@@ -193,6 +208,12 @@ while ( my $seqobj = $seqio_b->next_seq() ) {
 	$trimid = $1;
     }
     elsif ($id =~ m/^(.+?)\s+.+$/) {           ## Cassava1.8
+	$trimid = $1;
+    }
+    elsif ($id =~ m/^(.+?)\.(f|r)$/) {         ## 454 (sff_extract)
+	$trimid = $1;
+    }
+    elsif ($id =~ m/^(.+?)_(left|right)$/) {   ## 454 (newbler)
 	$trimid = $1;
     }
 
@@ -234,6 +255,12 @@ while ( my $seqobj = $seqio_a->next_seq() ) {
 	$trimid = $1;
     }
     elsif ($id =~ m/^(.+?)\s+.+$/) {           ## Cassava1.8
+	$trimid = $1;
+    }
+     elsif ($id =~ m/^(.+?)\.(f|r)$/) {        ## 454 (sff_extract)
+	$trimid = $1;
+    }
+    elsif ($id =~ m/^(.+?)_(left|right)$/) {   ## 454 (newbler)
 	$trimid = $1;
     }
 
@@ -288,6 +315,14 @@ sub help {
 
      The script parse first the first file, getting the IDs and removing the 
      pair tag based in fastq Illumina format:
+
+      * 454 (sff_extract) (.f | .r)
+         '\@GGSVR7H01CO4LY.f'
+         '\@GGSVR7H01CO4LY'
+
+      * 454 (Newbler) (_left | _right)
+        '\@F98U7VR01CSYRA_left'
+        '\@F98U7VR01CSYRA'
 
       * Cassava1.7 or lower:
         '\@HWUSI-EAS100R:6:73:941:1973#0/1'
