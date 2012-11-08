@@ -1,0 +1,774 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ Hapmap2Structure
+ Tool to change Hapmap format to Structure compatible
+
+=cut
+
+=head1 SYPNOSIS
+
+ Hapmap2Structure [-h] -i <hapmap_inputfile> -o <structure_outputfile>
+                       -r <reference> [-B] [-L | -N] [-M] 
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<hapmap_inputfile>       hapmap input file (mandatory)
+
+=item -o
+
+B<structure_outputfile>   structure output filename (mandatory)
+
+=item -r
+
+B<reference_name>         reference name for biallelic markers
+
+=item -B
+
+B<biallelic_filter>       filter out the non biallelic genotypes.
+
+=item -L
+
+B<logic_output>           use logic (0, 1) genotypes for output
+
+=item -N
+
+B<numeric_output>         use numeric (-9,1,2,4,8) genotypes for output.
+
+=item -M
+
+B<multiple_lines_ind>     print one line per haplotype (multiple per individual)
+
+=item -V
+
+B<be_verbose>             be verbose and print the parsing status.
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script trasforms a hapmap file into a Structure compatible file.
+
+ Hapmap format is a tabular format file with the following columns:
+  C1:   rs#
+  C2:   alleles
+  C3:   chrom
+  C4:   pos
+  C5:   strand
+  C6:   assembly
+  C7:   center
+  C8:   protLSID
+  C9:   assyLSID	
+  C10:  panelLSID	
+  C11:  QCcode	
+  C12+: Genotypes
+
+ Structure compatible file will be file with the following lines:
+  L1:   markernames separated by spaces (equivalent to rs# from hapmap)
+  L2:   distance beetween markers separated by spaces (-9 if distance is not
+        applicable for example between different chromosomes)
+  L3+:  accession name and genotypes separated by spaces.
+        for diploid genotypes the alleles will be consecutive.
+
+  Example hapmap:
+  C1     C2   C3    C4    C5  C6  C7  C8  C9  C10  C11  S1  S2  S3
+  MRK01  A/T  Chr5  1000  +   NA  NA  NA  NA  NA   NA   AA  TT  AA 
+  MRK02  C/T  Chr5  2000  +   NA  NA  NA  NA  NA   NA   CC  CC  CT 
+  MRK03  C/G  Chr5  3000  +   NA  NA  NA  NA  NA   NA   CC  GG  CG 
+
+  Example Structure (default)
+  MRK01 MRK02 MRK03
+  -9 1000 1000
+  S1 A A C C C C
+  S2 T T C C G G
+  S3 A A C T C G
+
+  Genotypes may be used as logic -L (0|1), numeric -N (N=-9, A=1, C=2, G=4 
+  and T=8, or sum of these values for degenerated SNPs), or character (default) 
+  (A,T,C,G).
+
+  Example Structure (-L)
+  MRK01 MRK02 MRK03
+  -9 1000 1000
+  S1 0 0 0 0 0 0
+  S2 1 1 0 0 1 1
+  S3 0 0 0 1 0 1
+
+  Example Structure (-N)
+  MRK01 MRK02 MRK03
+  -9 1000 1000
+  S1 1 1 2 2 2 2  
+  S2 8 8 2 2 4 4
+  S3 1 1 2 8 2 4
+
+  Biallelic (-B) option filter the non-biallelic SNPs. By default it will
+  take the first SNP from the alleles column as reference, but a sample name
+  can be specified as a reference using the option -r <reference>  
+
+  The program can also print one line per haplotype instead one line per
+  individual genotype (-M)
+
+  MRK01 MRK02 MRK03
+  -9 1000 1000
+  S1 A C C
+  S1 A C C
+  S2 T C G
+  S2 T C G
+  S3 A C C
+  S3 A T G 
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ Hapmap2Structure
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use List::Util 'shuffle';
+
+our ($opt_i, $opt_o, $opt_r, $opt_B, $opt_L, $opt_N, $opt_M, $opt_V, $opt_h);
+getopts("i:o:r:BLNMVh");
+if (!$opt_i && !$opt_o && !$opt_r && !$opt_B && !$opt_L && !$opt_N && !$opt_M
+    && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Hapmap2Structure Starts ($date)  ##\n";
+print STDERR "############################################################\n\n";
+
+print_header("0) Checking arguments");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+## Get the arguments and check them
+
+my $input = $opt_i || 
+    die("INPUT ARG. ERROR: -i <hapmap_input> argument was not supplied.\n");
+
+print STDERR "\tInput file: $input\n";
+
+my $output = $opt_o ||
+    die("INPUT ARG. ERROR: -o <structure_output> argument was not supplied.\n");
+
+print STDERR "\tOutput file: $output\n";
+    
+my $refname = '';
+if ($opt_r) {
+
+    $refname = $opt_r;
+    print STDERR "\tRef.name [enabled]: $refname\n";
+}
+if ($opt_B) {
+
+    print STDERR "\tBiallelic filter [enabled]\n";
+}
+if ($opt_L && $opt_N) {
+
+    die("ERROR: Only one of the parameters -L -N can be used.\n");
+}
+elsif ($opt_L) {
+
+    print STDERR "\tLogic genotype output [enabled]\n";
+}
+elsif ($opt_N) {
+
+    print STDERR "\tNumeric genotype output [enabled]\n";
+}
+if ($opt_M) {
+
+    print STDERR "\tOne line per Haplotype [enabled]\n";
+}
+
+
+
+my %genotypes = (
+    A => 1,
+    C => 2,
+    G => 4,
+    T => 8,
+    R => 5,
+    Y => 10,
+    S => 6,
+    W => 9,
+    K => 12,	
+    M => 3,
+    B => 14,	
+    D => 13,
+    H => 11,
+    V => 7,
+    N => -9,	
+    '.' => -9,
+    '-' => -9,
+    );
+
+my %invgenotypes = ();
+foreach my $nt (keys %genotypes) {
+    $invgenotypes{$genotypes{$nt}} = $nt;
+}
+
+###############################################################################
+## PARSE THE HAPMAP
+###############################################################################
+## The data will be stored with this structure:
+##
+## $markerloc{$chrom} = { $id => $pos };
+## $markergen{$genot} = { $id => \@genotypes }; 
+## $markerref{$id} = $genotype
+###############################################################################
+
+print_header("1) Parsing Hapmap input file");
+
+my ($mloc_href, $mgen_href, $mref_href) = parse_hapmap($input);
+
+my %mloc = %{$mloc_href};
+my %mgen = %{$mgen_href};
+my %mref = %{$mref_href};
+
+
+print_header("2) Calculating distances");
+
+my ($mrk_aref, $dist_aref) = calculate_distances($mloc_href);
+
+###############################################################################
+## PRODUCE THE OUTPUT
+###############################################################################
+
+print_header("3) Printing Structure output");
+
+open my $ofh, '>', $output;
+
+my $mrk_line = join(" ", @{$mrk_aref});
+my $dis_line = join(" ", @{$dist_aref});
+
+print $ofh "$mrk_line\n";
+print $ofh "$dis_line\n";
+
+my $l = 2;
+
+foreach my $genot (sort {$a cmp $b} keys %mgen) {
+
+    my %gmarks = %{$mgen{$genot}};
+
+    ## Define the variable for store the genotypes
+
+    my @gline = ();
+
+    ## Calculate the number of haplotypes per individual and store
+    ## one arrayref per hapolotype if -M
+
+    my $firstmrk = $mrk_aref->[0];
+    my @firstall = @{$gmarks{$firstmrk}};
+   
+    if ($opt_M) {
+	foreach my $allel (@firstall) {
+    
+	    push @gline, [$genot];
+	}
+    }
+    else {
+    
+	push @gline, [$genot];
+    }
+
+    foreach my $mrk (@{$mrk_aref}) {
+    
+	my $ref_al = $mref{$mrk};
+	
+	my $a = 0;
+	foreach my $al (@{$gmarks{$mrk}}) {
+	
+	    if ($opt_L) {
+	    
+		if ($al eq $ref_al) {
+					
+		    push @{$gline[$a]}, 0;
+		    
+		}
+		else {
+		
+		    push @{$gline[$a]}, 1;
+		}	    
+	    }
+	    elsif ($opt_N) {
+	    
+		push @{$gline[$a]}, $genotypes{$al};
+	    }
+	    else {
+	    
+		push @{$gline[$a]}, $al;
+	    }
+
+	    if ($opt_M) {  ## Increase the a counter only for -M
+	
+		$a++;
+	    }
+	}    
+    }
+
+    foreach my $genoline (@gline) {
+	
+	my $gline = join(" ", @{$genoline});
+	print $ofh "$gline\n";
+	$l++;
+    }
+}
+
+print STDERR "\tPrinted output file with $l lines formated as:\n\n";
+
+my $numind = scalar(keys %mgen);
+print STDERR "\t#define NUMINDS $numind\n";
+my $numloci = scalar(@{$mrk_aref});
+print STDERR "\t#define NUMLOCI $numloci\n";
+print STDERR "\t#define LABEL 1\n";
+print STDERR "\t#define POPDATA 0\n";
+print STDERR "\t#define LOCDATA 0\n";
+print STDERR "\t#define PHENOTYPE 0\n";
+print STDERR "\t#define MARKERNAMES 1\n";
+print STDERR "\t#define MAPDISTANCES 1\n";
+
+if ($opt_M) {
+    print STDERR "\t#define ONEROWPERIND 0\n";
+}
+else {
+    print STDERR "\t#define ONEROWPERIND 1\n";
+}
+print STDERR "\t#define EXTRACOLS 0\n";
+print STDERR "\t#define MISSING -9\n\n";
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Hapmap2Structure Ends ($date)   ##\n";
+print STDERR "############################################################\n\n";
+exit;
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+       This script trasforms a hapmap file into a Structure compatible file.
+
+       Hapmap format is a tabular format file with the following columns:
+        C1:   rs#
+        C2:   alleles
+        C3:   chrom
+        C4:   pos
+        C5:   strand
+        C6:   assembly
+        C7:   center
+        C8:   protLSID
+        C9:   assyLSID	
+        C10:  panelLSID	
+        C11:  QCcode	
+        C12+: Genotypes
+
+       Structure compatible file will be file with the following lines:
+        L1:   markernames separated by spaces (equivalent to rs# from hapmap)
+        L2:   distance beetween markers separated by spaces (-9 if distance 
+              is not applicable for example between different chromosomes)
+        L3+:  accession name and genotypes separated by spaces.
+              for diploid genotypes the alleles will be consecutive.
+
+       Example hapmap:
+        C1     C2   C3    C4    C5  C6  C7  C8  C9  C10  C11  S1  S2  S3
+        MRK01  A/T  Chr5  1000  +   NA  NA  NA  NA  NA   NA   AA  TT  AA 
+        MRK02  C/T  Chr5  2000  +   NA  NA  NA  NA  NA   NA   CC  CC  CT 
+        MRK03  C/G  Chr5  3000  +   NA  NA  NA  NA  NA   NA   CC  GG  CG 
+
+       Example Structure (default)
+        MRK01 MRK02 MRK03
+        -9 1000 1000
+        S1 A A C C C C
+        S2 T T C C G G
+        S3 A A C T C G
+
+       Genotypes may be used as logic -L (0|1), numeric -N (N=-9, A=1, C=2, G=4 
+       and T=8, or sum of these values for degenerated SNPs), or character 
+       (A,T,C,G) (default).
+
+       Example Structure (-L)
+        MRK01 MRK02 MRK03
+        -9 1000 1000
+        S1 0 0 0 0 0 0
+        S2 1 1 0 0 1 1
+        S3 0 0 0 1 0 1
+
+       Example Structure (-N)
+        MRK01 MRK02 MRK03
+        -9 1000 1000
+        S1 1 1 2 2 2 2  
+        S2 8 8 2 2 4 4
+        S3 1 1 2 8 2 4
+
+      Biallelic (-B) option filter the non-biallelic SNPs. By default it will
+      take the first SNP from the alleles column as reference, but a sample name
+      can be specified as a reference using the option -r <reference>  
+
+      The program can also print one line per haplotype instead one line per
+      individual genotype (-M)
+
+       MRK01 MRK02 MRK03
+       -9 1000 1000
+       S1 A C C
+       S1 A C C
+       S2 T C G
+       S2 T C G
+       S3 A C C
+       S3 A T G 
+       
+    Usage:
+
+      Hapmap2Structure [-h] -i <hapmap_inputfile> -o <structure_outputfile>
+                            -r <reference> [-B] [-L | -N] [-M] 
+
+    Flags:
+
+      -i <hapmap_inputfile>       hapmap input file (mandatory)
+      -o <structure_outputfile>   structure output filename (mandatory)
+      -r <reference_name>         reference name for biallelic markers
+      -B <biallelic_filter>       filter out the non biallelic genotypes.
+      -L <logic_output>           use logic (0, 1) genotypes for output
+      -N <numeric_output>         use numeric (-9,1,2,4,8) genotypes for output.
+      -M <multiple_lines_ind>     print one line per haplotype (multiple lines)
+      -V <be_verbose>             be verbose and print the parsing status
+      -h <help>                   print the help
+
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+=head2 parse_hapmap
+
+  Usage: my ($mloc_href, $mgen_href) = parse_hapmap($input);
+
+  Desc: Parse a hapmap file and returns two hashrefs.
+
+  Ret: $mloc_href, a hash ref. with key=$chrom and value={$id => $pos }; 
+       $mgen_href, a hash ref. with key=$genot and value={$id => \@genotypes };
+       $mref_href, a hash ref. with key=$id and value=$ref_allele 
+
+  Args: $input, a filename
+        $refname, a reference name
+
+  Side_Effects: Die if something is wrong.
+                It takes the refname from $opt_r
+
+  Example: my ($mloc_href, $mgen_href) = parse_hapmap($input);
+
+=cut
+
+sub parse_hapmap {
+    my $in = shift ||
+	die("ERROR: No inputfile was supplied to parse_hapmap function.\n");
+
+    ## Define the variables
+
+    my %loc = ();
+    my %gen = ();
+    my %ref = ();
+
+    ## First open the file
+
+    open my $ifh, '<', $in;
+
+    my ($H, $h, $bi) = (0,0,0);
+    if ($opt_V) {
+    
+	$H = `cut -f1 $in | wc -l`;
+	chomp($H);
+    }
+
+    my %manfields = (
+	'rs#'       => 1,	
+	'alleles'   => 2,	
+	'chrom'	    => 3,
+	'pos'	    => 4,
+	'strand'    => 5,	
+	'assembly'  => 6,	
+	'center'    => 7,	
+	'protLSID'  => 8,	
+	'assyLSID'  => 9,	
+	'panelLSID' => 10,	
+	'QCcode'    => 11
+	);
+    my $mancnt = scalar(keys %manfields);
+   
+    my @headers = ();
+    my %smpf = ();
+    my %smpr = ();
+
+    while(<$ifh>) {
+	
+	chomp($_);
+	$h++;
+    
+	
+	if ($_ =~ m/^rs#/) {
+	
+	    my $f = 0;
+	    foreach my $head (split(/\t/, $_)) {
+	    
+		$f++;
+		if ($f > 0 && $f < 12) {
+		
+		    unless (exists $manfields{$head}) {
+		    
+			my @mfields = sort {$manfields{$a} <=> $manfields{$b}} 
+			keys %manfields;
+			my $mfline = join(",", @mfields);
+			die("ERROR: wrong header field $head isnt ($mfline)\n");
+		    }
+		}
+		else {
+		
+		    $smpf{$head} = $f;
+		    $smpr{$f} = $head;
+		}
+	    }
+
+	    if ($opt_r) {
+	    
+		unless (exists $smpf{$opt_r}) {
+		
+		    die("ERROR: Reference name doesnt exist in the header.\n");
+		}
+	    }
+
+	    if ($opt_V) {
+	    
+		my $samplecnt = scalar(keys %smpf);
+		print STDERR "\n\t$samplecnt genoypes have been found in the ";
+		print STDERR " hapmap file:\n\n";
+		foreach my $smp (sort {$smpf{$a} <=> $smpf{$b}} keys %smpf) {
+		    
+		    print STDERR "\t\t$smp\n";
+		}
+		print STDERR "\n\n";
+	    }
+	}
+	else {
+	
+	    my ($mkid, $alle, $chro, $posi, $stra, $asse, $cent, $prot, 
+		$assy, $pane, $qcco, @geno) = split(/\t/, $_);
+	
+	    ## First check the biallelic filter
+
+	    my @alleles = split(/\//, $alle);
+
+	    ## By default it will take as reference the first allele
+
+	    $ref{$mkid} = $alleles[0];
+
+	    unless ($opt_B && scalar(@alleles) > 2) { 
+
+		## Add the location information
+
+		if (exists $loc{$chro}) {
+	    
+		    $loc{$chro}->{$mkid} = $posi;
+		}
+		else {
+	    
+		    $loc{$chro} = { $mkid => $posi };
+		}
+	    
+		## Add the genotype information
+
+		my $g = 0;
+		foreach my $gn (sort {$a <=> $b} keys %smpr) {
+		
+		    my @genotype = split(//, uc($geno[$g]));
+
+		    if ($opt_r && $smpr{$gn} eq $opt_r) {
+			
+			$ref{$mkid} = $genotype[0];
+		    }
+		
+		    if (exists $gen{$smpr{$gn}}) {
+			    
+			$gen{$smpr{$gn}}->{$mkid} = \@genotype;
+		    }
+		    else {
+			
+			$gen{$smpr{$gn}} = { $mkid => \@genotype };
+		    }
+		    
+		    $g++;
+		}
+	    }
+	    else {
+	    
+		$bi++;
+	    }
+	}    
+	
+	if ($opt_V) {
+	
+	    print STDERR "\tParsing line: $h of $H                   \r";
+	}	    
+    }
+
+    if ($opt_V) {
+	
+	print STDERR "\n\n";
+    }
+    
+    if ($opt_B) {
+    
+	print STDERR "\t$bi markers discarded by biallelic filter\n\n";
+    }
+
+    return (\%loc, \%gen, \%ref);
+}
+
+
+=head2 calculate_distances
+
+  Usage: my ($mrk_aref, $dist_aref) = calculate_distances($loc_href);
+
+  Desc: Calculate the distances between markers
+
+  Ret: $mrk_aref, an arrayref with the markers
+       $dist_aref, an arrayref with the distances
+
+  Args: $loc_href, a hashref with keys=chrom, value={ $id => $pos}
+
+  Side_Effects: Die if something is wrong.
+
+  Example: my ($mrk_aref, $dist_aref) = calculate_distances($loc_href);
+
+=cut
+
+sub calculate_distances {
+    my $loc_href = shift ||
+	die("ERROR: No loc_href variable was supplied to calculate_distances.");
+    
+    if (ref($loc_href) ne 'HASH') {
+    
+	die("ERROR: $loc_href var supplied to calculate_distances isnt href.");
+    }
+
+    my %loc = %{$loc_href};
+
+    ## Define the variables
+ 
+    my @mrks = ();
+    my @dist = ();
+
+    foreach my $chr (sort keys %loc) {
+    
+	my ($pmrk, $ppos);
+	my %mrks = %{$loc{$chr}};
+
+	foreach my $mrk (sort {$mrks{$a} <=> $mrks{$b}} keys %mrks) {
+	
+	    if ($opt_V) {
+	    
+		print STDERR "\tCalculating distance for marker $mrk     \r";
+	    }
+
+	    unless (defined $ppos) {
+	    
+		push @mrks, $mrk;
+		push @dist, '-9';
+	    }
+	    else {
+	    
+		push @mrks, $mrk;
+		push @dist, $mrks{$mrk} - $ppos;
+	    }
+	
+	    $pmrk = $mrk;
+	    $ppos = $mrks{$mrk};
+	}
+    }
+
+    if ($opt_V) {
+    
+	my $cnt = scalar(@mrks);
+	print STDERR "\n\n\t$cnt markers have been processed\n\n";
+    }
+
+    return(\@mrks, \@dist);
+}
