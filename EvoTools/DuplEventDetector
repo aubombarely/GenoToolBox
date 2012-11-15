@@ -1,0 +1,1515 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ DuplEventDetector
+ Pipeline to detect duplication events based in Ks profiles
+
+=cut
+
+our $VERSION = '0.1';
+$VERSION = eval $VERSION;
+
+=head1 SYPNOSIS
+
+ DuplEventDetector [-h] [-v] -f <cdnafastafile> [-t <threads>] [-o <output>]
+                             [-B <blat_arguments>] [-i <min_identity>]
+                             [-l <min_length>] [-c <min_coverage>] 
+                             [-a <annotation_gff>] [-b <min_geneblock_size>]
+                             [-g <max_genegap>] [-d <min_block_distance>]
+                             [-M <muscle_arguments>] [-P <paml_arguments>]
+                             [-K] [-C] [-V]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -f
+
+B<cdnafastafile>                input cDNA fasta file (mandatory)
+
+=item -t
+
+B<threads>                      number of threads (2 by default)
+
+=item -o
+
+B<output>                       output basename (duplrun+date. by default)
+
+=item -B
+
+B<blat_arguments>               blat arguments (example -B '-fine,-minScore=20')
+
+=item -i
+
+B<min_identity>                 min. identity to filter a blat hit
+
+=item -l
+
+B<min_length>                   min. lenght to filter a blat hit
+
+=item -c
+
+B<min_coverage>                 min. coverage to filter a blat hit
+
+=item -a
+
+B<gff_file>                     gff annotation file with gene positions
+
+=item -b
+
+B<min_gene_block>               min. number of gene per block
+
+=item -g
+
+B<max_gene_gap>                 max. number of gene gaps per block
+
+=item -d
+
+B<min_distance>                 min. distance (Kb) between blocks
+
+=item -M
+
+B<muscle_arguments>             muscle arguments (ex. -M '-maxiters 1,-diags')
+
+=item -P
+
+B<PAML_arguments>               PAML arguments separated by comma
+
+=item -C
+
+B<force_codon_alignment>        Force codon alignment removing codon with gaps
+
+=item -K
+
+B<keep_all_files>               keep the intermediate files
+
+=item -V
+
+B<be_verbose>                   be verbose
+
+=item -h
+
+B<help>                         print the help
+
+=item -v
+
+B<version>                      print version
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ DuplEventDetector is an analysis pipeline designed to calculate the
+ Ks of duplicates genes from a fasta file and represent them grafically
+ to find possible Whole Genome Duplication (WGD) events.
+
+ Arguments for used programs (Blat, Muscle and PAML) should be separated
+ by comma.
+
+ This pipeline involves several steps:
+
+ 1) Paralog/Homeolog search using a reciprocal Blat of the protein sequences.
+
+    The blat default arguments can be modified using the -B option
+    (example -B '-fine,-minScore=50') 
+  
+    This homolog search is filtered based in two parameters:
+      -i <min_identity>
+      -l <min_length>
+      -c <min_coverage>
+
+    Additionally synthenic block information can be used to parse the 
+    the paralog/homoeolog genes. This could be supplied as a gff3 file
+    with the locations of each gene (-a <gff_file>). 
+    In this case three parameters could be used to define a synthenic block:
+
+      -b <min_gene_block>, min. number of genes to define a synthenic block.
+      -g <max_gene_gap>, max. number of genes to define a gap.
+      
+    For example to detect the following microsynthenic block:
+               
+      ---A1---B1-B2---C1---D1-----
+         ||   ||//         ||
+      ---A2---B3-----------D2-----
+
+    B1-B2 will be identified as a tandem duplication.
+    The pairs A1-A2, B1-B3, D1-D2 will define a block with 3 hits.
+    C1 will be one gap in the block.
+
+    So this block will be detected as -b 3 -g 1 or lower b values and higher
+    g values (still g < b).
+    In this example 4 pairs will be returned (A1-A2, B1-B3, B2-B3 and D1-D2).
+    The pair B1-B2 will return as a tandem duplication event (TDE).
+
+    Additionally tandem duplications can be defined as single gene tandem
+    duplication (SGTD) or a multiple gene tandem duplication (MGTD). A
+    multiple gene tandem duplication will be defined by blocks in the same
+    chromosome than doesnt meet the -d <min_block_distance requeriment>.
+
+    For example:
+
+      -----A1---B1---C1---D1---|20Kb|---A2---B2---D2-----      
+      
+      if -b 3 -g 1 -d 10 the pairs A1-A2, B1-B2, D1-D2 will be defined as WGD
+      if -b 3 -g 1 -d 50 the pairs A1-A2, B1-B2, D1-D2 will be defined as MGTD
+
+ 2) Sequence alignment using Muscle.
+
+    First the script will translate the cDNA sequences to proteins. If the
+    sequence has an early stop codon, the sequence will be truncated to the
+    stop codon. Finally it will be aligned using Muscle.
+
+    The muscle arguments can be modified using the -M option.
+    (-M '-maxiters 2').
+
+    PAML doesnt accept STOP codons. The script will remove the last stop
+    codon. Additionally if the sequence has a middle stop codon, the script
+    will truncate the sequence.
+
+    seq1 ATGCGCTGA    =>  seq1 ATGCGC
+    seq2 ATGCCCTGA        seq2 ATGCCC
+
+    seq1 ATGCGCTGA    =>  seq1 ATGCGC
+    seq2 ATGTGACCG        seq2 ATG---
+
+    PAML doesn't accept alignments where the length is not L=3X. The script
+    add '-' by default. Using -C option codons with gaps plus the last 
+    incomplete codon will be removed
+ 
+    seq1 --ATGGGCTTATTACCGCCTCCTGA
+    seq2 ATGTGG-CTTATTACCGCCTCCTGA
+           
+    seq1 --A TGG GCT TAT TAC CGC CTC CTG A
+    seq2 ATG TGG -CT TAT TAC CGC CTC CTG A
+
+    seq1 --- TGG --- TAT TAC CGC CTC CTG
+    seq2 --- TGG --- TAT TAC CGC CTC CTG
+
+ 3) Ks, Kn and Ks/Kn calculation for each of the pair using PAML.
+
+ 4) Analysis of the Ks values using R.
+
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ DuplEventDetector
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Config;
+use threads;
+
+use File::Basename;
+use File::Spec;
+use File::Path qw(remove_tree);
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::SeqIO;
+use Bio::AlignIO;
+
+our ($opt_f, $opt_t, $opt_o, $opt_B, $opt_i, $opt_l, $opt_c, $opt_a, $opt_b,
+     $opt_g, $opt_d, $opt_M, $opt_P, $opt_C, $opt_K, $opt_V, $opt_v, $opt_h);
+getopts("f:t:o:B:i:l:c:a:b:g:d:M:P:CKVvh");
+
+$Config{useithreads} or 
+    die('THREAD ERROR: Recompile Perl with threads to run this program.');
+
+if (!$opt_f && !$opt_t && !$opt_o && !$opt_B && !$opt_i && !$opt_l && !$opt_c 
+    && !$opt_a && !$opt_b && !$opt_g && !$opt_d && !$opt_M && !$opt_P 
+    && !$opt_C && !$opt_K && !$opt_V && !$opt_v && !$opt_h) {
+    print STDERR "There are n\'t any tags. Print help\n\n";
+    help();
+}
+elsif ($opt_h) {
+    help();
+}
+elsif ($opt_v) {
+    print STDERR "\nMultiThreadBlat version: $VERSION\n\n";
+    exit(1);
+}
+
+my $date = `date`;
+chomp($date);
+
+print STDERR "\n\n#########################################################\n";
+print STDERR "## DuplEventDetector version:$VERSION                      ##\n";
+print STDERR "## $date                        ##\n";
+print STDERR "#########################################################\n\n";
+
+## First argument checking
+
+print_header("0) Argument Validation");
+
+my $fasta = $opt_f ||
+    die("ERROR: Mandatory argument -f <cds_fastafile> was not supplied");
+
+## Create the default outname
+
+my @ltime = localtime(time);
+$ltime[5] += 1900;
+my @ftline = ($ltime[5]);
+foreach my $tm (reverse(@ltime[0..4])) {
+
+    push @ftline, sprintf("%02s", $tm); 
+}
+my $outbase = $opt_o || 'duplrun' . join("", @ftline);
+
+
+## Check blat arguments
+
+our $blat_exec = $ENV{BLAT_EXEC} || 'blat';
+
+my $blat_h = `$blat_exec`;
+my @blatopt = ();
+
+unless (defined $blat_h) {
+    die("ERROR: No blat executable was accessible.More info at -h argument.\n");
+}
+else {
+    print STDERR "\tBlat executable:\tOk\n";
+
+    ## Use the blat help to retrieve the options and check the arguments
+    ## Check if exists type or nohead. Overwrite them
+
+    my ($nohead, $pslout) = (0, 0);
+
+    if ($opt_B) {
+
+	my @blathelp = split(/\n/, $blat_h);
+	my %blat_args = ();
+	my $opt = 0;
+
+	foreach my $blat_hline (@blathelp) {
+	    
+	    if ($blat_hline =~ /options:/) {
+		$opt = 1;
+	    }
+	    	    
+	    if ($opt == 1 && $blat_hline =~ m/(\-\w+)=(.+?)\s+/) {
+		$blat_args{$1} = $2;
+	    }
+	    elsif ($opt == 1 && $blat_hline =~ m/(\-\w+?)\s+/) {
+		$blat_args{$1} = 1;
+	    }
+	}
+
+	my @blat_args = split(/,/, $opt_B);
+
+	foreach my $blat_arg (@blat_args) {
+	    
+	    if ($blat_arg =~ m/^-noHead$/) {
+
+		$nohead = 1;
+	    }
+	    elsif ($blat_arg =~ m/^-out=(.+)$/) {
+	    
+		my $fout = $1;
+		if ($fout !~ m/^psl$/) {
+		
+		    print STDERR "\tOverwritting blat out to -out=psl\n\n";
+		    $blat_arg = '-out=psl';
+		}	
+		$pslout = 1;		
+	    }
+	    elsif ($blat_arg =~ m/^(.+?)=(.+)$/) {
+
+		unless (exists $blat_args{$1}) {
+		    die("ERROR: $1 is not a blat valid option.\n");
+		}
+	    }
+	    else {
+		
+		unless (exists $blat_args{$blat_arg}) {
+		    die("ERROR: $blat_arg is not a blat valid option.\n");
+		}
+		if ($blat_args{$blat_arg} ne 1) {
+		    die("ERROR: $blat_arg doesnt have format $blat_arg=val.\n");
+		}
+	    }
+
+	    push @blatopt, $blat_arg;
+	}   
+    
+	print STDERR "\tBlat options:\t\tOk\n";
+    }
+    else {
+	print STDERR "\tBlat options:\t\tDefault\n";
+    }
+
+    if ($nohead == 0) {
+	
+	push @blatopt, '-noHead';
+    }
+    if ($pslout == 0) {
+	
+	push @blatopt, '-out=psl';
+    }
+}
+
+my $threads = $opt_t || 2;
+if ($threads !~ m/^\d+$/) {
+    die("ERROR: -t <threads> is not an integer.\n");
+}
+else {
+    print STDERR "\tThreads:\t\t$threads\n";
+}
+
+## Blat filter check
+
+my $min_ident = $opt_i || 70;
+if ($min_ident !~ m/^\d+$/) {
+
+    die("ERROR: -i <min_identity> doesnt have a numeric value ($min_ident).\n");
+}
+else {
+
+    print STDERR "\n\tMin. blat hit identity:\t$min_ident\n";
+}
+
+my $min_length = $opt_l || 100;
+if ($min_length !~ m/^\d+$/) {
+
+    die("ERROR: -l <min_length> doesn't have a numeric value ($min_length).\n");
+}
+else {
+
+    print STDERR "\n\tMin. blat hit length:\t$min_length\n";
+}
+
+my $min_cov = $opt_c || 75;
+if ($min_ident !~ m/^\d+$/) {
+
+    die("ERROR: -c <min_coverage> doesn't have a numeric value ($min_cov).\n");
+}
+else {
+
+    print STDERR "\n\tMin. blat hit coverage:\t$min_cov\n";
+}
+
+our $muscle_exec = $ENV{MUSCLE_EXEC} || 'muscle';
+
+my $muscle_h = `$muscle_exec -version`;
+my @muscleopt = ();
+
+unless (defined $muscle_h) {
+    die("ERROR: No muscle executable was accessible. For more info use -h.\n");
+}
+else {
+
+    print STDERR "\n\tMuscle executable:\tOk\n";
+
+    ## The only options usable by -M will be:
+    ## -diags, -maxiters, -maxhours, -stable, -group, -maxmb
+
+    my %perm_m = (
+	'-diags'    => 1, 
+	'-maxiters' => 2, 
+	'-maxhours' => 2,
+	'-stable'   => 1, 
+	'-group'    => 1, 
+	'-maxmb'    => 2
+	);
+
+    if ($opt_M) {
+
+	my @m_opts = split(/,/, $opt_M);
+	foreach my $m_opt (@m_opts) {
+	
+	    my @pars = split(/ /, $m_opt);
+	    unless (exists $perm_m{$pars[0]}) {
+	    
+		print STDERR "WARN: $pars[0] is not a permitted Muscle ";
+		print STDERR "argument for this script. Ignoring argument.\n";
+	    }
+	    else {
+	    
+		if ($perm_m{$m_opt} == 2) {
+		
+		    unless ($pars[1] =~ m/^\d+$/) {
+		    
+			die("ERROR: $pars[0] doesnt have an integer value.\n");
+		    }
+		}
+		else {
+		
+		    push @muscleopt, $m_opt;
+		}
+	    }	    
+	}
+    }
+    else {
+    
+	print STDERR "\tMuscle will run with default parameters.\n";
+    }
+
+    ## Additionally two arguments will be added
+
+    push @muscleopt, '-clwstrict';
+    push @muscleopt, '-quiet';
+}
+
+our $yn00_exec = $ENV{YN00_EXEC} || 'yn00';
+
+my $yn00_h = `$yn00_exec -version`;
+my @yn00opt = ();
+
+unless (defined $yn00_h) {
+    die("ERROR: No yn00 executable was accessible. For more info use -h.\n");
+}
+else {
+
+    print STDERR "\n\tYn00 executable:\tOk\n";
+
+    ## The only options usable by -P will be:
+    ## 
+
+    my %perm_p = (
+	verbose    => 0,  	
+        icode      => 0,
+	weighting  => 0,
+	commonf3x4 => 0
+	);
+
+    if ($opt_P) {
+
+	my @p_opts = split(/,/, $opt_P);
+	foreach my $p_opt (@p_opts) {
+	
+	    my @pars = split(/ /, $p_opt);
+	    unless (exists $perm_p{$pars[0]}) {
+	    
+		print STDERR "WARN: $pars[0] is not a permitted YN00 ";
+		print STDERR "argument for this script. Ignoring argument.\n";
+	    }
+	    else {
+	    				
+		push @yn00opt, $p_opt;	    
+	    }	    
+	}
+    }
+    else {
+    
+	print STDERR "\tYN00 will run with default parameters.\n";
+	foreach my $parg (keys %perm_p) {
+	
+	    push @yn00opt, sprintf("%13s", $parg) . ' = ' . $perm_p{$parg};
+	}
+    }
+}
+
+
+
+
+
+
+## Create the dir ############################################################
+
+mkdir($outbase);
+
+
+#### Run blat ################################################################
+
+print_header("1) Running Blat");
+
+my $blatdir =  File::Spec->catfile($outbase, '01_blatsearch');
+mkdir($blatdir);
+
+my $batchdir = File::Spec->catfile($blatdir, 'dbbatches');
+mkdir($batchdir);
+
+## The program will divide the sequence set based in the number of
+## threads. It is a self blat.
+
+print STDERR "\n\n1) Creating fasta sequence batches\n\n";
+
+my @subfastalist = create_batches($batchdir, $fasta, $threads);
+
+## Transfrom subfastalist in a hash
+
+my %subfiles = ();
+my $subf = 0;
+foreach my $subfile (@subfastalist) {
+
+    $subf++;
+    $subfiles{$subf} = $subfile;
+}
+
+
+print STDERR "\n\n2) Running the batch jobs\n\n";
+
+## It will divide the jobs in packages
+## based in the number of threads
+## It will be as many jobs in a package as threads have been especified.
+
+my @packages = packing(\%subfiles, $batchdir, $threads, 'blatjob');
+my $packcount1 = scalar(@packages);
+my $jobcount1 = scalar(keys %subfiles);
+print STDERR "\tBatches have been organized in $packcount1 packages and ";
+print STDERR "$jobcount1 jobs\n";
+
+my @blatoptplus = ($fasta, @blatopt);
+
+my %outfiles = multithread_run(\&run_batchblat, $threads, $jobcount1, 
+			       \@packages, \@blatoptplus);
+
+my @outfiles = sort values(%outfiles);
+print STDERR "\n\t$jobcount1 jobs have been executed in $packcount1 packages\n";
+
+print STDERR "\n\n1.4) Joining the batch jobs results\n\n";
+
+my $f_outfile = File::Spec->catfile($blatdir, 'blatresult.psl');
+
+## It will simply concatenate the files.
+
+my $cat_cmd = 'cat ' . join(" ", @outfiles) . " > $f_outfile";
+system($cat_cmd);
+
+print STDERR "\tOutfile:\t$f_outfile\n";
+
+unless ($opt_K) {
+
+    remove_tree($batchdir, { verbose => 0, safe => 1 });
+    print STDERR "\tBatch files have been removed\n";
+}
+else {
+    print STDERR "\tKeep batch files:\tEnabled\n";
+    print STDERR "\tBatch files stored at: $batchdir\n";
+}
+
+###############################################################################
+## Parse and filter the blat file
+###############################################################################
+
+print_header("2) Parsing Blat Output");
+
+my %clusters = parse_blat($f_outfile, $min_ident, $min_length, $min_cov);
+
+
+##############################################################################
+## Create and run alignments
+##############################################################################
+
+print_header("3) Extracting Seq Clusters");
+
+## Invert the cluster hash (key=cluster, values=arrayref with seqid)
+
+print STDERR "3.1) Generating the seqid list\n\n";
+
+my %seqcl = ();
+foreach my $seqid (keys %clusters) {
+
+    my $cl = $clusters{$seqid};
+
+    if (exists $seqcl{$cl}) {
+    
+	push @{$seqcl{$cl}}, $seqid;
+    }
+    else {
+    
+	$seqcl{$cl} = [$seqid];
+    }
+}
+
+print STDERR "3.2) Parsing fasta file and translating the cDNA to protein\n";
+
+print STDERR "\n\tNote: Stop codons will be removed from the end of ";
+print STDERR "\n\tthe sequence\n\n";
+
+my %cdnaseq = ();
+my $seqio = Bio::SeqIO->new( -file => $fasta, -format => 'fasta');
+my $seqcnt = `grep '^>' $fasta | wc -l`;
+chomp($seqcnt);
+
+
+my %seqequiv = ();
+my %protseq = ();
+
+my $cnt = 0;
+while( my $seqobj = $seqio->next_seq() ) {
+    
+    $cnt++;
+    my $id = $seqobj->id();
+
+    ## Change to a simple ID (phylip format doesnt accept big IDs)
+    my $newid = 'seq' . sprintf("%0" . length($seqcnt) . "s", $cnt);
+    
+    $seqobj->id($newid);
+
+    my $seql = $seqobj->length();
+    
+    my $pepobj = $seqobj->translate();
+    my $pepseq = $pepobj->seq();
+    
+    ## Store cdnaseq with the new id to be able to recover it based in the
+    ## future alignment
+
+    if ($seql > 3) {
+	if ($pepseq =~ m/\*/) {
+
+	    if ($pepseq =~ m/\*$/) {              ## Remove the stop codon
+
+		$cdnaseq{$newid} = $seqobj->trunc(1, $seql - 3);
+		$protseq{$id} = $pepobj->trunc(1, $pepobj->length() - 1);
+	    }
+	    else {                                ## Break the sequence
+		
+		my @fragpep = split(/\*/, $pepseq);
+		my $firstfrag = shift(@fragpep);
+		my $peplength = length($firstfrag);
+
+		$cdnaseq{$newid} = $seqobj->trunc(1, $peplength * 3);
+		$protseq{$id} = $pepobj->trunc(1, $peplength);
+	    }
+	}
+	else {
+	
+	    $cdnaseq{$newid} = $seqobj;
+	    $protseq{$id} = $pepobj;
+	}
+    }
+
+    if ($opt_V) {
+    
+	print STDERR "\tParsing $id ($newid)              \r";
+    }
+}
+
+my $fastan = scalar(keys %cdnaseq);
+print STDERR "\n\n\t$fastan sequences have been parsed\n\n";
+
+
+print STDERR "3.3) Grouping sequences\n";
+
+my $clusdir =  File::Spec->catfile($outbase, '02_clusterdir');
+mkdir($clusdir);
+
+my $cllen = length(scalar(keys %seqcl));
+
+my %clfiles = ();
+
+foreach my $clid (sort {$a <=> $b } keys %seqcl) {
+
+    ## Create the file
+
+    my $clusterid = 'CL' . sprintf("%0" . $cllen . "s", $clid);
+    my $ofile = File::Spec->catfile($clusdir, $clusterid . '.fasta');    
+    $clfiles{$clusterid} = $ofile;
+    my $seqout = Bio::SeqIO->new( -file => ">$ofile", -format => 'fasta');
+    
+    foreach my $seqid (@{$seqcl{$clid}}) {
+    
+	$seqout->write_seq($protseq{$seqid});
+    }
+}
+
+print_header("4) Running alignments");
+
+my $aligndir =  File::Spec->catfile($outbase, '03_aligndir');
+mkdir($aligndir);
+
+print STDERR "\n\n4.1) Running the batch jobs\n\n";
+
+## It will divide the jobs in packages
+## based in the number of threads
+## It will be as many jobs in a package as threads have been especified.
+
+#my @msc_packages = packing(\%clfiles, $aligndir, $threads);
+
+my @msc_packages = packing(\%clfiles, $aligndir, $threads, 'protalign.clw');
+my $packcount2 = scalar(@msc_packages);
+my $jobcount2 = scalar(keys %clfiles);
+print STDERR "\tBatches have been organized in $packcount2 packages and ";
+print STDERR "$jobcount2 jobs\n";
+
+my %alnfiles = multithread_run(\&run_batchmuscle, $threads, $jobcount2, 
+			       \@msc_packages, \@muscleopt);
+
+print STDERR "\n\t$jobcount2 jobs have been executed in $packcount2 packages\n";
+
+print STDERR "\n\n4.2) Using protein alignment to align cDNA\n\n";
+
+my %alncdna_files = align_cdna_by_prot(\%alnfiles, \%cdnaseq);
+
+###############################################################################
+## Running the Kn/Ks analysis
+###############################################################################
+
+print_header("5) Running Kn/Ks analysis");
+
+my $pamldir =  File::Spec->catfile($outbase, '04_pamldir');
+mkdir($pamldir);
+
+print STDERR "5.1) Preparing yn00 ctl files\n\n";
+
+my %ynctlfiles = ();
+my %pamlfiles = ();
+
+foreach my $clid (sort keys %alncdna_files) {
+
+    ## Define a conf file
+
+    my $ynconf = File::Spec->catfile($pamldir, $clid . '.yn00.ctl');
+    my $outfile = File::Spec->catfile($pamldir, $clid . '.yn00.results');
+    
+    open my $yncfio, '>', $ynconf;
+    print $yncfio "* Configuration file for YN00\n";
+    print $yncfio "* File made for DuplEventDetector script\n\n";
+
+    print $yncfio "      seqfile = $alncdna_files{$clid}\n";
+    print $yncfio "      outfile = $outfile\n";
+
+    foreach my $ynarg (@yn00opt) {
+    
+	print $yncfio "$ynarg\n";
+    }
+
+    $ynctlfiles{$clid} = $ynconf;
+    $pamlfiles{$clid} = $outfile;
+}
+
+my $ynctl_cnt = scalar(keys %ynctlfiles);
+print STDERR "\n\t$ynctl_cnt yn00.ctl files have been created.\n";
+
+print STDERR "\n\n5.2) Running the batch jobs for yn00\n\n";
+
+my @yn_packages = packing(\%ynctlfiles, $pamldir, $threads, 'yn00.log');
+my $packcount3 = scalar(@yn_packages);
+my $jobcount3 = scalar(keys %ynctlfiles);
+print STDERR "\tBatches have been organized in $packcount3 packages and ";
+print STDERR "$jobcount3 jobs\n";
+
+my %yn00logfiles = multithread_run(\&run_batchyn00, $threads, $jobcount3, 
+			       \@yn_packages, \@yn00opt);
+
+print STDERR "\n\t$jobcount3 jobs have been executed in $packcount3 packages\n";
+
+###############################################################################
+## Now it will parse the YN00 output to extract the different results
+## It will be done with one core (small files)
+###############################################################################
+
+print STDERR "\n\n5.3) Parsing yn00 results\n\n";
+
+my %pamlresults = ();
+foreach my $clid (keys %pamlfiles) {
+
+    if ($opt_V) {
+    
+	print STDERR "\tParsing file:$pamlfiles{$clid}          \r";
+    }
+
+    #my %yn_results = parse_yn00out($pamlfiles{$clid});
+    #$pamlresults{$clid} = \%pamlresults;
+}
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n#########################################################\n";
+print STDERR "## End of the DuplEventDetector execution              ##\n";
+print STDERR "## $date                        ##\n";
+print STDERR "#########################################################\n\n";
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+     
+
+    Note: 
+       
+    
+
+    Usage:
+      
+  
+    Flags:
+     
+     -h <help>                  print this help
+     -v <version>               print the script version
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+=head2 create_batches
+
+  Usage: my @filelist = create_batches($dir, $seqfile, $batches)
+  Desc: create batch for a sequence file
+  Ret: an array with the list of subfiles
+  Args: $dir, dir to create the files
+        $seqfile, file to split
+        $batches, number of batches to create.
+  Side_Effects: die of something is wrong
+  Example: my @qufilelist = create_batches($batchdir, $quseq, $qubch);
+
+=cut
+
+sub create_batches {
+
+    my $dir = shift || 
+	die("ERROR: No dir was supplied to create_batches function.\n");
+    my $seqfile = shift ||
+	die("ERROR: No seqfile was supplied to create_batches function.\n");
+    my $batches = shift ||
+	die("ERROR: No batches was supplied to create_batches function.\n");
+
+    ## Check that the file exists with Bioperl and count seq
+
+    my $seq_io = Bio::SeqIO->new( -file => $seqfile, -format => 'fasta');
+    my $seqcount = `grep -c '^>' $seqfile`;
+    chomp($seqcount);
+
+    ## Calculate the size of the batch
+
+    my $batch_size = Math::BigFloat->new($seqcount / $batches)->bfround(0);
+    print STDERR "\tBatch size:\t$batch_size sequences\n";
+
+    ## Declare variables used in the batch
+
+    my @seq_batch = ();
+
+    if ($batches == 1) {
+
+	push @seq_batch, $seqfile;
+	print STDERR "\tNo batch requested for $seqfile\n";
+    }
+    else {
+
+	my ($s, $b) = (1, 1);
+	my $basenm = basename($seqfile);
+	
+	my $outseq_io = '';
+
+	while(my $seq_o = $seq_io->next_seq() ) {
+
+	    ## Three posibilities:
+	    ## 1) SeqN == 1, create a new file
+	    ## 2) SeqN < BatchSize, add sequences to the batch
+	    ## 3) SeqN == BatchSize, add the last sequence if is not the last
+	    ##    batch and set SeqN to zero to create a new file in th next
+	    ##    iteraction.
+
+	    
+	    if ($s == 1 ) {
+	
+		my $newseqfile = File::Spec->catfile($dir, $basenm .'_sub'. $b);
+		$outseq_io = Bio::SeqIO->new( 
+		    -file   => ">$newseqfile", 
+		    -format => 'fasta'
+		    );
+		$outseq_io->write_seq($seq_o);
+		$s++;
+		
+		push @seq_batch, $newseqfile;
+		print STDERR "\tCreated file batch: $newseqfile\n";
+
+		if ($batch_size == 1) {
+		    $s = 1;
+		    $b++;
+		}
+	    }
+	    elsif ($s < $batch_size) {
+		
+		$outseq_io->write_seq($seq_o);
+		$s++;
+	    }
+	    else {
+		
+		$outseq_io->write_seq($seq_o);
+		
+		if ($b < $batches) {
+		    $s = 1;
+		}
+		$b++;
+	    }
+	}
+    }
+    return @seq_batch;    
+}
+
+=head2 packing
+
+  Usage: my @packages = packing(\%files, $outdir, $threads, $postfix);
+  Desc: package the files in an array of arrays depending of threads
+  Ret: @package, an array of arraref with n.threads x [$id, $infile, $outfile]
+  Args: \%files, a hashref with key=id and value=file
+        $outdir, a dirname for output files
+        $threads, number of threads
+        $postfix, to add to the output files.          
+  Side_Effects: die of something is wrong
+  Example: my @packages = packing(\%files, $outdir, $threads, $postfix);
+
+=cut
+
+sub packing {
+    
+    my $href = shift ||
+	die("ERROR: No href was supplied to packing() function");
+    my $outdir = shift ||
+	die("ERROR: No outdir was supplied to packing() function");
+    my $threads = shift ||
+	die("ERROR: No threads was supplied to packing() function");
+    my $postfix = shift || 'pack';
+
+
+    if (ref($href) ne 'HASH') {
+    
+	die("ERROR: href=$href supplied to packing is not a HASHREF.\n");
+    }
+
+    ## declare the package variable
+    
+    my @packages = ();
+
+    ## the max number of jobs will be the number of elements
+
+    my $max_j = scalar(keys %{$href});
+
+    ## declare the jobs and the counters
+
+    my @jobs = ();
+    my ($j, $v) = (0, 0);
+
+    foreach my $id (sort keys %{$href}) {
+    
+	my $infile = $href->{$id};
+	my $outfile = File::Spec->catfile($outdir, $id . '.' . $postfix);
+	
+	my @files = ($id, $infile, $outfile);
+	push @jobs, \@files;
+
+	$j++;
+
+	if ($v + 1 == $max_j || $j == $threads) {        ## It is the last job
+
+	    my @pack_jobs = @jobs;
+	    push @packages, \@pack_jobs;
+	    $j = 0;
+	    @jobs = ();
+	}
+	$v++;
+    }
+
+    return @packages;
+}
+
+=head2 multithread_run
+
+  Usage: my %outfiles = multithread_run($function, $threads, $num_jobs, 
+                                        \@packages, \@arg);
+  Desc: run with multithread the specified function
+  Ret: a hash with key=id and value=outfiles
+  Args: $function name
+        $threads, number of threads
+        $num_jobs, number of jobs
+        \@packages, array ref with the data packages (files)
+        \@arg, an arrar ref with the arguments to run the function    
+  Side_Effects: die of something is wrong
+  Example: my %outfiles = multithread_run($function, $threads,\@packages,\@arg);
+
+=cut
+
+sub multithread_run {
+    
+    my $function = shift ||
+	die("ERROR: No function name was supplied to multithread_run function");
+    my $threads = shift ||
+	die("ERROR: No threads was supplied to multithread_run function");
+    my $num_jobs = shift ||
+	die("ERROR: No job number was supplied to multithread_run function");
+    my $pack_aref = shift ||
+	die("ERROR: No package aref was supplied to multithread_run function");
+    my $arg_aref = shift ||
+	die("ERROR: No argument aref was supplied to multithread_run function");
+
+    if (ref($pack_aref) ne 'ARRAY') {
+    
+	die("ERROR: $pack_aref supplied to multithread_run isnt ARRAYREF");
+    }
+    if (ref($arg_aref) ne 'ARRAY') {
+    
+	die("ERROR: $arg_aref supplied to multithread_run isnt ARRAYREF");
+    }
+
+    my @packages = @{$pack_aref};
+
+    my %out = ();
+    my $j_exec = 0;
+    my $p = 0;
+    
+    foreach my $pack (@packages) {
+
+	$p++;
+	my @exjobs = @{$pack};
+	my ($n, $j_run) = (0, 0);
+	my @th_procs = ();
+	
+	my $all_j = scalar(@exjobs);
+	print STDERR "\tRunning package $p ($threads threads)    \r";
+	
+	while($n < $threads && $j_exec <= $num_jobs && $j_run < $all_j)  {	
+
+	    $j_run++;
+	    my @jobfiles = @{$exjobs[$n]};
+	    my $jobid = shift(@jobfiles);
+	    
+	    my $th_proc = threads->create($function, @jobfiles, $arg_aref);
+	    push @th_procs, $th_proc;
+	    $n++;
+	    
+	    $out{$jobid} = $jobfiles[1];
+	}
+
+	foreach my $th (@th_procs) {
+	    my $th_id = $th->tid();
+	    my $th_res = $th->join();
+
+	    unless (defined($th_res)) {
+		warning("\tExecution error for thread $th_id\n");
+		my $error = $th->error();
+		print "\n===== ERROR $th_id =====\n$error\n================\n";
+	    }
+	    $j_exec++;
+	}
+    }
+    
+    return %out;
+}
+
+
+
+
+=head2 run_batchblat
+
+  Usage: run_batchblat($dbfile, $qufile, $oufile, $arguments_aref);
+  Desc: run blat with the specified parameters
+  Ret: nothing
+  Args: $dbfile, database filename
+        $qufile, query filename
+        $outfile, name for the outputfile
+        $arguments, as array ref
+  Side_Effects: die of something is wrong
+  Example: run_batchblat($dbfile, $qufile, $oufile, $arguments_aref);
+
+=cut
+
+sub run_batchblat {
+    
+    my $qufile = shift ||
+	die("ERROR: No qufile was supplied to run_batchblat");
+    my $outfile = shift ||
+	die("ERROR: No outfile was supplied to run_batchblat");
+    my $argaref = shift ||
+	die("ERROR: No argument arrayref was suppplied to run_batchblat");
+
+    if (ref($argaref) ne 'ARRAY') {
+    
+	die("ERROR: arg. arrayref supplied to run_batchblat isnt ARRAYREF.\n");
+    }
+
+    my @args = @{$argaref};
+    my $dbfile = shift(@args);
+
+    my $cmd = "$blat_exec $dbfile $qufile";
+    
+    if (scalar(@args) > 0) {
+
+	my $blatopts = join(" ", @args);
+	$cmd .= " $blatopts";
+    }
+    
+    $cmd .= " $outfile";
+    $cmd .= " 1> " . $outfile . ".runblat.log";
+
+    #print STDERR "\tRunning: $cmd\n";
+    system($cmd);
+ 
+    return 1;
+}
+
+
+=head2 parse_blat
+
+  Usage: my %clusters = parse_blat($f_outfile, $ident, $length, $cov);
+  Desc: Parse the blat output and returns clusters
+  Ret: A hash with key=$seqid, value=$clusterid
+  Args: $f_outfile, a filename of the blat result file (psl)
+        $ident, a min. identity to accept a hit
+        $length, a min. length to accept a hit
+        $cov, a min coverage to accespt a hit
+  Side_Effects: die of something is wrong
+  Example: my %clusters = parse_blat($f_outfile, $ident, $length, $cov);
+
+=cut
+
+sub parse_blat {
+    my $input = shift ||
+	die("ERROR: No input file was supplied to parse_blat.\n");
+    my $ident = shift ||
+	die("ERROR: No min. identity hit was supplied to parse_blat.\n");
+    my $length = shift ||
+	die("ERROR: No min. length hit was supplied to parse_blat.\n");
+    my $cover = shift ||
+	die("ERROR: No min. coverage hit was supplied to parse_blat.\n");
+
+    open my $ifh, '<', $input;
+    my $L = `grep '^[0-9]' $input | wc -l`;
+    chomp($L);
+
+    my ($l, $c, $members) = (0, 0, 0);
+    my %cls = ();
+    my $parsesign = 0;
+
+    while(<$ifh>) {
+    
+	chomp($_);
+	$l++;
+
+	if ($opt_V) {
+	
+	    print STDERR "\tParsing line $l of $L        \r";
+	}
+		
+	my @data = split(/\t/, $_);
+	
+	## Ignore selfhits
+
+	if ($data[9] ne $data[13]) {
+	    
+	    ## get the filtering options
+	    my $hlength = $data[0] + $data[1];
+	    my $seq1cov = $data[0] * 100 / $data[10];
+	    my $seq2cov = $data[0] * 100 / $data[14];
+	    my $hident = $data[0] * 100 / $hlength;
+	    
+	    if ($hlength >= $length && $hident >= $ident) {
+		
+		if ($seq1cov >= $cover && $seq2cov >= $cover) {
+		    
+		    ## That will be selected;
+
+		    if (exists $cls{$data[9]} && exists $cls{$data[13]}) {
+			
+			## Just ignore
+		    }
+		    elsif (exists $cls{$data[9]}) {
+			
+			$cls{$data[13]} = $cls{$data[9]};
+			$members++;
+		    }
+		    elsif (exists $cls{$data[13]}) {
+			
+			$cls{$data[9]} = $cls{$data[13]};
+			$members++;
+		    }
+		    else {
+			
+			$c++;
+			$members += 2;
+			$cls{$data[13]} = $c;
+			$cls{$data[9]} = $c;
+		    }
+		}		
+	    }		    		
+	}
+    }
+
+    ## At this point all the sequences should be in clusters
+
+    print STDERR "\n\n\tBlat result file parsed\n";
+    ;
+    print STDERR "\n\tTotal Clusters:\t$c\n";
+    print STDERR "\tMembers in clusters:\t$members\n";
+
+    return %cls;
+}
+
+
+=head2 run_batchmuscle
+
+  Usage: run_batchmuscle($infile, $oufile, $arguments_aref);
+  Desc: run muscle with the specified parameters
+  Ret: nothing
+  Args: $infile, query filename
+        $outfile, name for the outputfile
+        $arguments, as arrayref
+  Side_Effects: die of something is wrong
+  Example:  run_batchmuscle($infile, $oufile, $arguments_aref);
+
+=cut
+
+sub run_batchmuscle {
+ 
+    my $in = shift ||
+	die("ERROR: No infile was supplied to run_batchmuscle");
+    my $out = shift ||
+	die("ERROR: No outfile was supplied to run_batchmuscle");
+    my $argaref = shift;
+
+    ## $muscle_exec was declare for the whole script
+
+    my $cmd = "$muscle_exec -in $in -out $out";
+    
+    if (defined $argaref && ref($argaref) eq 'ARRAY') {
+
+	my $muscleopts = join(" ", @{$argaref});
+	$cmd .= " $muscleopts";
+    }
+    
+    $cmd .= " &> " . $out . ".runblat.log";
+
+    #print STDERR "\tRunning: $cmd\n";
+    system($cmd);
+ 
+    return 1;
+}
+
+
+=head2 align_cdna_by_prot
+
+  Usage: my %cdna_align = align_cdna_by_prot(\%alnfiles, \%cdnaseq)
+  Desc: uses the protein alignment to align cdna sequences
+  Ret: a hash with key=cluster_id, value=cdna_alignment_file
+  Args: \%alnfiles, a hashref with key=cluster_id, value=protein alignment file
+        (clustalw)
+        \%cdnaseq, a hashref with key=seq_id, value=cdna_obj
+  Side_Effects: die of something is wrong
+  Example: my %cdna_align = align_cdna_by_prot(\%alnfiles, \%cdnaseq)
+
+=cut
+
+sub align_cdna_by_prot {
+ 
+    my $aln_href = shift ||
+	die("ERROR: No align href was supplied to align_cdna_by_prot");
+    my $cdna_href = shift ||
+	die("ERROR: No cdna href was supplied to align_cdna_by_prot");
+
+    if (ref($aln_href) ne 'HASH') {
+	
+	die("ERROR: $aln_href supplied to align_cdna_by_prot isnt hashref\n");
+    }
+    if (ref($cdna_href) ne 'HASH') {
+	
+	die("ERROR: $cdna_href supplied to align_cdna_by_prot isnt hashref\n");
+    }
+
+    my %p_aln = %{$aln_href};
+    my %cdnaseq = %{$cdna_href};
+    my %c_aln = ();
+
+    foreach my $clid (sort keys %p_aln) {
+
+	## open objects and filehandles
+    
+	my $aln_io = Bio::AlignIO->new( -file   => "$p_aln{$clid}", 
+					-format => 'clustalw'
+	    );
+	
+	my $c_aln_file = $p_aln{$clid};
+	$c_aln_file =~ s/protalign\.clw/cdnaalign.phy/;
+	$c_aln{$clid} = $c_aln_file;
+	
+	open my $ofh, '>', $c_aln_file;
+
+	while(my $aln = $aln_io->next_aln() ) {
+	
+	    my $seqn = $aln->num_sequences();
+	    my $length = $aln->length() * 3;
+	    
+	    print $ofh "   $seqn $length\n";
+    
+	    foreach my $alnseq ($aln->each_seq) {
+		   
+		my $alnseq_id = $alnseq->id();
+		my $cdnaseq = $cdnaseq{$alnseq_id}->seq();
+		
+		## Now it will split the cdna seq in codons
+		$cdnaseq =~ s/(.{3})/$1,/g;
+		my @codons = split(/,/, $cdnaseq);
+
+		##It will create a new sequence
+		my $cdna_aln = '';
+		   
+		my $aa_n = 0;
+		foreach my $aa (split(//, $alnseq->seq())) {
+		   
+		    if ($aa eq '-') {
+			   
+			$cdna_aln .= '---';
+		    }
+		    else {
+			
+			## starts in 0
+			$cdna_aln .= $codons[$aa_n];
+			$aa_n++;
+		    }
+		}
+
+		## Once the sequence has been reconstructed it will
+		## print it in 60 char columns
+		  
+		my $com_cdna_aln = $cdna_aln;
+		$com_cdna_aln =~ s/(.{60})/$1,/g;
+		my $line60 = join("\n", split(/,/, $com_cdna_aln));
+		
+		print $ofh "$alnseq_id\n$line60\n";
+	    }
+	}  	
+    }
+
+    return %c_aln;
+}
+
+
+
+=head2 run_batchyn00
+
+  Usage: run_batchyn00($conffile, logfile);
+  Desc: run yn00 with the parameters from the conf file
+  Ret: nothing
+  Args: $conffile, configuration filename
+        $logfile, name for the logfile
+  Side_Effects: die of something is wrong
+  Example: run_batchyn00($conffile, logfile); 
+
+=cut
+
+sub run_batchyn00 {
+ 
+    my $cnf = shift ||
+	die("ERROR: No config. file was supplied to run_batchyn00");
+    my $log = shift ||
+	die("ERROR: No log file was supplied to run_batchyn00");
+    my $argaref = shift;
+
+    ## $yn00_exec was declare for the whole script
+
+    my $cmd = "$yn00_exec $cnf 1> $log";
+    
+    #print STDERR "\tRunning: $cmd\n";
+    system($cmd);
+ 
+    return 1;
+}
+
+
+=head2 parse_yn00out
+
+  Usage: my %yn_results = parse_yn00out($yn00_resultfile);
+  Desc: Parse the yn00 output
+  Ret: A hash with the following structure
+       key=$method (NG86, YN00, LWL85, LPB93, LWL85m)
+       value=hashref with key=$pair (separated by '-') 
+                          value=hashref with key=datatype
+                                             value=data
+
+        The datatypes will depend of the method, for example NG86 
+        (Nei & Gojobori, 1986) only produces dN/dS, dN and dS.
+  Args: $ym00_resultsfile, a filename
+  Side_Effects: die of something is wrong
+  Example: my %yn_results = parse_yn00out($yn00_resultfile);
+
+=cut
+
+sub parse_yn00out {
+ 
+    my $res = shift ||
+	die("ERROR: No result file was supplied to parse_yn00");
+    
+    my %ynres = ();
+
+    open my $res_io, '<', $res;
+    
+    ## declare the switches and the list of seqids
+    
+    my @seqids = ();
+    my ($a_method, $b_method, $c_method) = (0, 0, 0);    
+
+    while(<$res_io>) {
+    
+	chomp($_);
+    
+	## Enable parsing switches
+
+	if ($_ =~ m/^\(A\)\s+Nei/) {
+	    
+	    ($a_method, $b_method, $c_method) = (1, 0, 0);
+	}
+	elsif ($_ =~ m/^\(B\)\s+Yang/) {
+	    
+	    ($a_method, $b_method, $c_method) = (0, 1, 0);
+	}
+	elsif ($_ =~ m/^\(C\)\s+LWL/) {
+	    
+	    ($a_method, $b_method, $c_method) = (0, 0, 1);
+	}
+    
+	## Note all the sequence names will start with seq because
+	## they were formated before the alignment
+
+	if ($a_method == 1 && $_ =~ m/^seq/i) {
+	
+	    
+	}
+    }
+}
