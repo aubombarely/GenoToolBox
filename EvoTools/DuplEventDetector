@@ -217,13 +217,20 @@ use autodie;
 use Config;
 use threads;
 
+## Perl Core Modules
 use File::Basename;
 use File::Spec;
 use File::Path qw(remove_tree);
 use Getopt::Std;
 use Math::BigFloat;
+
+## BioPerl Modules
 use Bio::SeqIO;
 use Bio::AlignIO;
+
+## R::YapRI Modules
+use R::YapRI::Base;
+use R::YapRI::Data::Matrix;
 
 our ($opt_f, $opt_t, $opt_o, $opt_B, $opt_i, $opt_l, $opt_c, $opt_a, $opt_b,
      $opt_g, $opt_d, $opt_M, $opt_P, $opt_C, $opt_K, $opt_V, $opt_v, $opt_h);
@@ -719,6 +726,10 @@ foreach my $clid (sort {$a <=> $b } keys %seqcl) {
 	$seqout->write_seq($protseq{$seqid});
     }
 }
+
+###############################################################################
+## Run de Alignments
+###############################################################################
 
 print_header("4) Running alignments");
 
@@ -1483,6 +1494,10 @@ sub parse_yn00out {
     ## declare the switches and the list of seqids
     
     my @seqids = ();
+    my %a_matrix = ();
+    my %b_matrix = ();
+    my %c_matrix = ();
+
     my ($a_method, $b_method, $c_method) = (0, 0, 0);    
 
     while(<$res_io>) {
@@ -1509,7 +1524,201 @@ sub parse_yn00out {
 
 	if ($a_method == 1 && $_ =~ m/^seq/i) {
 	
+	    #################################################################
+	    ## (A) Nei-Gojobori (1986) method results parsing        ########
+	    #################################################################
+
+	    if ($_ !~ m/\(.+\)/) {  ## First IDs doesnt have dN/dS data
+		
+		$_ =~ s/\s+//g;
+		push @seqids, $_;
+		$a_matrix{$_} = '';
+	    }
+	    else {
 	    
+		## Parse and change to be able to separate ID from
+		## data.
+
+		$_ =~ s/\s+/;/;
+		my ($curr_id, $data) = split(/;/, $data);
+		$data =~ s/\)\s+/\),/g;
+
+		## It will store the data in a hash with key=ID and
+		## value=aref with data as dN/dS (dN dS)
+
+		my @data = split(/,/, $data);
+		$a_matrix{$curr_id} = \@data;
+		push @seqids, $curr_id;
+	    }
 	}
+	elsif ($a_method == 1 && scalar(@seqids) > 0) {
+
+	    #################################################################
+	    ## (A) Nei-Gojobori (1986) method results reformating    ########
+	    #################################################################
+
+	    ## Now it will transform the %a_matrix in 
+	    ## $ynres{'NG86'} = { $datatype = R::YapRI::Matrix object }
+	    
+	    $ynres{NG86} = _a_method2matrix(\%a_matrix, \@seqids);	    
+	    $a_method = 0;
+	    
+	    ## Additionally it will prepare the %b_matrix and %c_matrix
+
+	    my @b_method_f = ('S', 'N', 't', 'kappa', 'omega', 'dN', 'dN_SE',
+			      'dS', 'dS_SE');
+	    
+	    foreach my $bfield (@b_method_f) {
+	    
+		my $edata = { name => 'YN00_' . $bfield,
+			      coln => $c,
+			      rown => $r,
+			      colnames => \@seqids,
+			      rownames => \@seqids,
+		}
+		
+		my $mtx = R::YapRI::Matrix->new($edata);
+		$b_matrix{$bfield} = $mtx;		
+	    }
+
+	    my %c_method_f = ( 
+		'LWL85'  => ['dS', 'dN', 'w', 'S', 'N'], 
+		'LWL85m' => ['dS', 'dN', 'w', 'S', 'N', 'rho'],
+		'LPB93'  => ['dS', 'dN', 'w']
+		);
+	    foreach my $submethod (keys %c_method_f) {
+	    
+		my %c_submtx = ();
+
+		foreach my $cfield (@{$c_method_f{$submethod}}) {
+ 
+		    my $edata = { name => $submethod . '_' . $cfield,
+				  coln => $c,
+				  rown => $r,
+				  colnames => \@seqids,
+				  rownames => \@seqids,
+		    }
+		
+		    my $mtx = R::YapRI::Matrix->new($edata);
+		    $c_submtx{$cfield} = $mtx;		
+		}
+		    
+		$c_matrix{$submethod} = \%_c_submtx;		
+	    }
+	}
+	elsif ($b_method == 1 && $_ =~ m/^\s+(\d+)\s+(\d+)/) {
+	
+	    $_ =~ s/^\s+//;
+	    $_ =~ s/\s+/\t/g;
+	    my @bdata = split(/\t/, $_);
+	    my $seqid1 = $seqids[shift(@bdata) - 1];
+	    my $seqid2 = $seqids[shift(@bdata) - 1];
+	
+	    
+
+	}
+	
     }
+}
+
+
+=head2 _a_method2matrix
+
+  Usage: my $matrix_href = a_method2matrix(\%data, \@seqids)
+  Desc: Reformat a parsing matrix into a matrix structure using R::YapRI::Matrix
+  Ret: A hashref with key=datatype (dNdS, dN or dS) and 
+                      value=R::YapRI::Matrix object with column/row names
+                      for seqids 
+  Args: \%data, a hashref with key=sequenceid and value=arrayref with 
+        parsed dNdS data in the format 'dNdS (dN dS)' 
+  Side_Effects: die of something is wrong
+  Example:  my $matrix_href = a_method2matrix(\%data, \@seqids)
+
+=cut
+
+sub _a_method2matrix {
+
+    my $data_href = shift ||
+	die("ERROR: No data hashref was supplied to _a_method2matrix()");
+    my $seq_aref = shift ||
+	die("ERROR: No seqid arrayref was supplied to _a_method2matrix()");
+
+    if (ref($data_href) ne 'HASH') {
+    
+	die("ERROR: $data_href supplied to _a_method2matrix isnt a hashref");
+    }
+    if (ref($seq_aref) ne 'ARRAY') {
+    
+	die("ERROR: $seq_aref supplied to _a_method2matrix isnt an arrayref");
+    }
+
+    my %pdata = %{$data_href};
+    my @seqids = @{$seq_aref};
+
+    my %matrix = ();
+
+    my %datatypes = ('dNdS' => [], 'dN' => [], 'dS' => []);
+
+    ## Retrieve the data ans structure in a matrix array order by
+    ## rows. Example: 1 2 3
+    ##                4 5 6 => ( 1 2 3 4 5 6 7 8 9 ) 
+    ##                7 8 9
+    
+    my ($r, $c) = (0, 0);
+    foreach my $sid_r (@seqids) {
+	    
+	$c = 0;                                 ## Restart the column
+	foreach my $sid_c (@seqids) {
+	    
+	    if ($sid_r eq $sid_c) {             ## Diagonal will be 0
+		
+		foreach my $dk (keys %datatypes) {
+		    
+		    push @{$datatypes{$dk}}, 0;
+		}
+	    }
+	    else {
+		
+		if (ref($pdata{$sid_r}) eq 'ARRAY') {
+		    
+		    my @dt_r = @{$pdata{$sid_r}};
+		    if ($dt_r[$r] =~ m/(\d.+)\s+\((\d.+)\s+(\d.+)\)/) {
+			
+			push @{$datatypes{dNdS}}, $1;
+			push @{$datatypes{dN}}, $2;
+			push @{$datatypes{dS}}, $3;
+		    }
+		}
+		elsif (ref($pdata{$sid_c}) eq 'ARRAY') {
+		    
+		    my @dt_c = @{$pdata{$sid_c}};
+		    if ($dt_c[$c] =~ m/(\d.+)\s+\((\d.+)\s+(\d.+)\)/) {
+			
+			push @{$datatypes{dNdS}}, $1;
+			push @{$datatypes{dN}}, $2;
+			push @{$datatypes{dS}}, $3;
+		    }
+		}
+	    }
+	    
+	    $c++;
+	}
+	$r++;
+    }
+	    
+    foreach my $dttype (keys %datatypes) {
+	
+	my $data = { name => 'NG86_' . $dttype,
+		     coln => $c,
+		     rown => $r,
+		     colnames => \@seqids,
+		     rownames => \@seqids,
+		     data => $datatypes{$dttype}
+	}
+	
+	my $mtx = R::YapRI::Matrix->new($data);
+	$matrix{$dttype} = $mtx;
+    }
+    
+    return \%matrix;
 }
