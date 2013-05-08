@@ -49,6 +49,16 @@ B<extract_by_composition> by nucleotide content (for example: GC=50)
 B<cut_sequence>           cut a part of the sequence extracted (coordinates)
                           from the input filename (-i)
 
+=item -O
+
+B<orientate_strand>       orientate the sequence based in the strand specified
+                          in the ID list filename (-i)
+
+=item -I
+
+B<replace_ids>            replace ID for the id specified in the ID list
+                          file (-i)
+
 =item -R
 
 B<revcom>                 return reverse complemetary of the sequence
@@ -100,6 +110,11 @@ B<help>                   print the help
    To create one file per read, use -S option, in this case -o will be 
    overwrite with sequence id name
 
+   -i <id_list> can be a file with 1 column (just the IDs), 3 columns (ID plus
+   start and end coordinates to use with -C), 4 columns (ID + start + end + 
+   strand, to get the specific strand -O) or 5 columns (ID + start + end + 
+   strand + NewID, use with -I option)
+
 =cut
 
 =head1 AUTHORS
@@ -124,11 +139,11 @@ use Bio::SeqIO;
 use Bio::SeqUtils;
 use Bio::Tools::IUPAC;
 
-our ($opt_f, $opt_o, $opt_i, $opt_l, $opt_c, $opt_r, $opt_v, $opt_C, $opt_R, 
-     $opt_S, $opt_h);
-getopts("f:o:i:l:c:r:vCRSh");
+our ($opt_f, $opt_o, $opt_i, $opt_l, $opt_c, $opt_r, $opt_v, $opt_C, $opt_O,
+     $opt_I, $opt_R, $opt_S, $opt_h);
+getopts("f:o:i:l:c:r:vCOIRSh");
 if (!$opt_f && !$opt_o && !$opt_i && !$opt_l && !$opt_c && !$opt_r && !$opt_v 
-    && !$opt_C && !$opt_R && !$opt_S && !$opt_h) {
+    && !$opt_C && !$opt_O && !$opt_I && !$opt_R && !$opt_S && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -184,34 +199,93 @@ if (defined $idfile) {
     open my $idfh, '<', $idfile || 
 	die("OPEN FILE ERROR: File=$idfile can not be openned (error:$!)\n");
 
+    my $L = `cut -f1 $idfile | wc -l`;
+    chomp($L);
+    my $l = 0;
+
     while (<$idfh>) {
 	chomp($_);
 
 	## It will take only the first column and remove the rest
-
+	$l++;
+	
 	my @data = split(/\t/, $_);
+	my $fc = scalar(@data);
 
 	## It will ignore the duplications overwritting the ids
 
 	if (defined $data[0]) {
 	    $ids{$data[0]} = 1;
-	    if ($opt_C && defined $data[1] && defined $data[2]) {
-		if ($data[2] <= $data[1]) {
-		    my $err = "ERROR: end trim coord:$data[2] should be lower ";
-		    $err .= "than start trim coord:$data[1]\n";
-		    die($err);
+
+	    if ($opt_C) {
+	    
+		my $start = $data[1];
+		my $end = $data[2];
+		my %metadata = ( start => $start, end => $end);
+
+		if ($start > $end) {
+		    die("ERROR: $l line, start=$start > end=$end\n");
 		}
+
+		if ($opt_O) {
 		
-		my $coords_href = { start => $data[1], end => $data[2] };
-		if (exists $trims{$data[0]}) {
+		    my $orient = $data[3];
+		    if ($orient !~ m/^(\+|-)$/) {
 		    
-		    push @{$trims{$data[0]}}, $coords_href;
+			die("ERROR: $l line, strand has wrong format (+|-)\n");
+		    }
+		    else {
+		    
+			$metadata{strand} = $orient;
+		    }
+
+		    if ($opt_I) {
+		    
+			if (scalar(@data) != 5) {
+			    
+			    print STDERR "\n\nOptions -C -O -I Enabled.\n";
+			    die("ERROR: $l line doesnt have 5 fields");
+			}
+
+			$metadata{newid} = $data[4];
+		    }
+		    else {
+		    
+			unless (scalar(@data) >= 4) {
+			
+			    print STDERR "\n\nOptions -C -O Enabled.\n";
+			    die("ERROR: $l line doesnt have 4 or more fields");
+			}
+		    }
 		}
 		else {
-		    $trims{$data[0]} = [$coords_href];
+		
+		    unless (scalar(@data) >= 3) {
+			
+			print STDERR "\n\nOptions -C Enabled.\n";
+			die("ERROR: $l line doesnt have 3 or more fields");
+		    }
+		}
+	    
+		if (exists $trims{$data[0]}) {
+		    
+		    push @{$trims{$data[0]}}, \%metadata;
+		}
+		else {
+		    $trims{$data[0]} = [\%metadata];
 		}
 		$trimsc++;
+	    
 	    }
+	    else {
+	    
+		unless (scalar(@data) >= 1) {
+		    
+		    print STDERR "\n\nOptions -C Enabled.\n";
+		    die("ERROR: $l line doesnt have 1 or more fields");
+		}		
+	    }		
+	    
 	}
     }
 
@@ -355,12 +429,22 @@ while (my $seqobj = $inio->next_seq()) {
 		    my $st = $coord->{start};
 		    my $en = $coord->{end};
 		    my $newid = $id . '_subseq_from' . $st . '_to' . $en;
+
+		    if ($opt_I) {
+		    
+			$newid = $coord->{newid};
+		    }
 		    my $newseq = $seqobj->trunc($st,$en);
 		    $newseq->id($newid);
 
+		    if ($opt_O && $coord->{strand} =~ /^-$/) {
+		    
+			$newseq = $newseq->revcom();
+		    }
 		    if ($opt_R) {
 			$newseq = $newseq->revcom();
 		    }
+		    
 
 		    if ($opt_S) {
 		    
