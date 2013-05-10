@@ -18,7 +18,7 @@ $VERSION = eval $VERSION;
                              [-a <annotation_gff>] [-b <min_geneblock_size>]
                              [-g <max_genegap>] [-d <min_block_distance>]
                              [-M <muscle_arguments>] [-P <paml_arguments>]
-                             [-K] [-C] [-V]
+                             [-K] [-V]
 
 =head2 I<Flags:>
 
@@ -76,10 +76,6 @@ B<muscle_arguments>             muscle arguments (ex. -M '-maxiters 1,-diags')
 =item -P
 
 B<PAML_arguments>               PAML arguments separated by comma
-
-=item -C
-
-B<force_codon_alignment>        Force codon alignment removing codon with gaps
 
 =item -K
 
@@ -233,15 +229,15 @@ use R::YapRI::Base;
 use R::YapRI::Data::Matrix;
 
 our ($opt_f, $opt_t, $opt_o, $opt_B, $opt_i, $opt_l, $opt_c, $opt_a, $opt_b,
-     $opt_g, $opt_d, $opt_M, $opt_P, $opt_C, $opt_K, $opt_V, $opt_v, $opt_h);
-getopts("f:t:o:B:i:l:c:a:b:g:d:M:P:CKVvh");
+     $opt_g, $opt_d, $opt_M, $opt_P, $opt_K, $opt_V, $opt_v, $opt_h);
+getopts("f:t:o:B:i:l:c:a:b:g:d:M:P:KVvh");
 
 $Config{useithreads} or 
     die('THREAD ERROR: Recompile Perl with threads to run this program.');
 
 if (!$opt_f && !$opt_t && !$opt_o && !$opt_B && !$opt_i && !$opt_l && !$opt_c 
     && !$opt_a && !$opt_b && !$opt_g && !$opt_d && !$opt_M && !$opt_P 
-    && !$opt_C && !$opt_K && !$opt_V && !$opt_v && !$opt_h) {
+    && !$opt_K && !$opt_V && !$opt_v && !$opt_h) {
     print STDERR "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -658,6 +654,8 @@ while( my $seqobj = $seqio->next_seq() ) {
     ## Change to a simple ID (phylip format doesnt accept big IDs)
     my $newid = 'seq' . sprintf("%0" . length($seqcnt) . "s", $cnt);
     
+    $seqequiv{$newid} = $id;
+
     $seqobj->id($newid);
 
     my $seql = $seqobj->length();
@@ -682,6 +680,7 @@ while( my $seqobj = $seqio->next_seq() ) {
 		my $firstfrag = shift(@fragpep);
 		my $peplength = length($firstfrag);
 
+		#print STDERR "\n\nTEST1:\n$id\t$newid\n$pepseq\n$firstfrag\n$peplength\n";
 		$cdnaseq{$newid} = $seqobj->trunc(1, $peplength * 3);
 		$protseq{$id} = $pepobj->trunc(1, $peplength);
 	    }
@@ -725,6 +724,16 @@ foreach my $clid (sort {$a <=> $b } keys %seqcl) {
     
 	$seqout->write_seq($protseq{$seqid});
     }
+}
+
+## Write the equivalence file
+
+my $eqfile = File::Spec->catfile($clusdir, 'seqid_equivalence.txt');
+open my $eqfh, '>', $eqfile;
+
+foreach my $seqid (sort keys %seqequiv) {
+
+    print $eqfh "$seqid\t$seqequiv{$seqid}\n";
 }
 
 ###############################################################################
@@ -820,17 +829,61 @@ print STDERR "\n\t$jobcount3 jobs have been executed in $packcount3 packages\n";
 print STDERR "\n\n5.3) Parsing yn00 results\n\n";
 
 my %pamlresults = ();
-foreach my $clid (keys %pamlfiles) {
+foreach my $clid (sort keys %pamlfiles) {
 
     if ($opt_V) {
     
 	print STDERR "\tParsing file:$pamlfiles{$clid}          \r";
     }
 
-    #my %yn_results = parse_yn00out($pamlfiles{$clid});
-    #$pamlresults{$clid} = \%pamlresults;
+    my %yn_results = parse_yn00out($pamlfiles{$clid});
+    $pamlresults{$clid} = \%yn_results;
 }
 
+print STDERR "\n\n5.4) Printing results\n\n";
+my $resdir =  File::Spec->catfile($outbase, '05_resultdir');
+mkdir($resdir);
+
+my $results1 =  File::Spec->catfile($resdir, 'yn00_results.txt');
+open my $ofh1, '>', $results1;
+
+foreach my $clid (sort keys %pamlresults) {
+
+    my %ynmtx = %{$pamlresults{$clid}};
+    foreach my $method (sort keys %ynmtx) {
+    
+	my %datatypes = %{$ynmtx{$method}};
+	foreach my $dtype (sort keys %datatypes) {
+	
+	    my $mtx = $datatypes{$dtype};
+	    my @colnames = @{$mtx->get_colnames()};
+	    my @rownames = @{$mtx->get_rownames()};
+
+	    my $c = 0;
+	    foreach my $cname (@colnames) {
+	    
+		my $r = 0;
+		foreach my $rname (@rownames) {
+		
+		    if ($cname ne $rname && $c > $r) {
+		    
+			my $dt = $mtx->get_element($rname, $cname) || 'ND';
+
+			## Change the name of the seuqnce back to the original
+			## name
+
+			my $rid = $seqequiv{$rname};
+			my $cid = $seqequiv{$cname};
+
+			print $ofh1 "$clid\t$method\t$rid\t$cid\t$dtype\t$dt\n";
+		    }
+		    $r++;
+		}
+		$c++;
+	    }
+	}
+    }
+}
 
 $date = `date`;
 chomp($date);
@@ -858,17 +911,124 @@ sub help {
 
     Description:
       
-     
+     DuplEventDetector is an analysis pipeline designed to calculate the
+     Ks of duplicates genes from a fasta file and represent them grafically
+     to find possible Whole Genome Duplication (WGD) events.
 
-    Note: 
-       
-    
+     Arguments for used programs (Blat, Muscle and PAML) should be separated
+     by comma.
+
+     This pipeline involves several steps:
+
+     1) Paralog/Homeolog search using a reciprocal Blat of the protein 
+        sequences.
+
+        The blat default arguments can be modified using the -B option
+        (example -B '-fine,-minScore=50') 
+  
+        This homolog search is filtered based in two parameters:
+          -i <min_identity>
+          -l <min_length>
+          -c <min_coverage>
+
+        Additionally synthenic block information can be used to parse the 
+        the paralog/homoeolog genes. This could be supplied as a gff3 file
+        with the locations of each gene (-a <gff_file>). 
+        In this case three parameters could be used to define a synthenic block:
+
+          -b <min_gene_block>, min. number of genes to define a synthenic block.
+          -g <max_gene_gap>, max. number of genes to define a gap.
+      
+        For example to detect the following microsynthenic block:
+               
+           ---A1---B1-B2---C1---D1-----
+              ||   ||//         ||
+           ---A2---B3-----------D2-----
+
+        B1-B2 will be identified as a tandem duplication.
+        The pairs A1-A2, B1-B3, D1-D2 will define a block with 3 hits.
+        C1 will be one gap in the block.
+
+        So this block will be detected as -b 3 -g 1 or lower b values and higher
+        g values (still g < b).
+        In this example 4 pairs will be returned (A1-A2, B1-B3, B2-B3 and 
+        D1-D2).
+        The pair B1-B2 will return as a tandem duplication event (TDE).
+
+        Additionally tandem duplications can be defined as single gene tandem
+        duplication (SGTD) or a multiple gene tandem duplication (MGTD). A
+        multiple gene tandem duplication will be defined by blocks in the same
+        chromosome than doesnt meet the -d <min_block_distance requeriment>.
+
+        For example:
+
+          -----A1---B1---C1---D1---|20Kb|---A2---B2---D2-----      
+      
+        if -b 3 -g 1 -d 10 the pairs A1-A2, B1-B2, D1-D2 will be defined as WGD
+        if -b 3 -g 1 -d 50 the pairs A1-A2, B1-B2, D1-D2 will be defined as MGTD
+
+     2) Sequence alignment using Muscle.
+
+        First the script will translate the cDNA sequences to proteins. If the
+        sequence has an early stop codon, the sequence will be truncated to the
+        stop codon. Finally it will be aligned using Muscle.
+
+        The muscle arguments can be modified using the -M option.
+        (-M '-maxiters 2').
+
+        PAML doesnt accept STOP codons. The script will remove the last stop
+        codon. Additionally if the sequence has a middle stop codon, the script
+        will truncate the sequence.
+
+         seq1 ATGCGCTGA    =>  seq1 ATGCGC
+         seq2 ATGCCCTGA        seq2 ATGCCC
+
+         seq1 ATGCGCTGA    =>  seq1 ATGCGC
+         seq2 ATGTGACCG        seq2 ATG---
+
+        PAML doesnt accept alignments where the length is not L=3X. The script
+        add '-' by default. Using -C option codons with gaps plus the last 
+        incomplete codon will be removed
+ 
+         seq1 --ATGGGCTTATTACCGCCTCCTGA
+         seq2 ATGTGG-CTTATTACCGCCTCCTGA
+           
+         seq1 --A TGG GCT TAT TAC CGC CTC CTG A
+         seq2 ATG TGG -CT TAT TAC CGC CTC CTG A
+
+         seq1 --- TGG --- TAT TAC CGC CTC CTG
+         seq2 --- TGG --- TAT TAC CGC CTC CTG
+
+     3) Ks, Kn and Ks/Kn calculation for each of the pair using PAML.
+
+     4) Analysis of the Ks values using R.
 
     Usage:
       
+     DuplEventDetector [-h] [-v] -f <cdnafastafile> [-t <threads>] [-o <output>]
+                            [-B <blat_arguments>] [-i <min_identity>]
+                            [-l <min_length>] [-c <min_coverage>] 
+                            [-a <annotation_gff>] [-b <min_geneblock_size>]
+                            [-g <max_genegap>] [-d <min_block_distance>]
+                            [-M <muscle_arguments>] [-P <paml_arguments>]
+                            [-K] [-V]
   
     Flags:
-     
+     -f <cdnafastafile>         input cDNA fasta file (mandatory)
+     -t <threads>               number of threads (2 by default)
+     -o <output>                output basename (duplrun+date.by default)
+     -B <blat_arguments>        blat arguments (example -B '-fine,-minScore=20')
+     -i <min_identity>          min. identity to filter a blat hit
+     -l <min_length>            min. lenght to filter a blat hit
+     -c <min_coverage>          min. coverage to filter a blat hit
+     -a <gff_file>              gff annotation file with gene positions
+     -b <min_gene_block>        min. number of gene per block
+     -g <max_gene_gap>          max. number of gene gaps per block
+     -d <min_distance>          min. distance (Kb) between blocks
+     -M <muscle_arguments>      muscle arguments (ex. -M '-maxiters 1,-diags')
+     -P <PAML_arguments>        PAML (YN00) arguments separated by comma
+     -K <keep_all_files>        keep the intermediate files
+     -V <be_verbose>            be verbose
      -h <help>                  print this help
      -v <version>               print the script version
 
@@ -1470,10 +1630,8 @@ sub run_batchyn00 {
   Desc: Parse the yn00 output
   Ret: A hash with the following structure
        key=$method (NG86, YN00, LWL85, LPB93, LWL85m)
-       value=hashref with key=$pair (separated by '-') 
-                          value=hashref with key=datatype
-                                             value=data
-
+       value=hash ref with key = type and
+                           value = R::YapRI::Data::Matrix object
         The datatypes will depend of the method, for example NG86 
         (Nei & Gojobori, 1986) only produces dN/dS, dN and dS.
   Args: $ym00_resultsfile, a filename
@@ -1498,6 +1656,10 @@ sub parse_yn00out {
     my %b_matrix = ();
     my %c_matrix = ();
 
+    ## declare multiswitch for c_sequences
+
+    my ($c_seq1idx, $c_seq1id, $c_seq2idx, $c_seq2id) = ('', '', '', '');
+
     my ($a_method, $b_method, $c_method) = (0, 0, 0);    
 
     while(<$res_io>) {
@@ -1513,6 +1675,7 @@ sub parse_yn00out {
 	elsif ($_ =~ m/^\(B\)\s+Yang/) {
 	    
 	    ($a_method, $b_method, $c_method) = (0, 1, 0);
+
 	}
 	elsif ($_ =~ m/^\(C\)\s+LWL/) {
 	    
@@ -1540,7 +1703,9 @@ sub parse_yn00out {
 		## data.
 
 		$_ =~ s/\s+/;/;
-		my ($curr_id, $data) = split(/;/, $data);
+		my ($curr_id, $data) = split(/;/, $_);
+		$data =~ s/\)/\) /g;      ## To separate some that have been 
+		                          ## written without spaces
 		$data =~ s/\)\s+/\),/g;
 
 		## It will store the data in a hash with key=ID and
@@ -1568,16 +1733,31 @@ sub parse_yn00out {
 	    my @b_method_f = ('S', 'N', 't', 'kappa', 'omega', 'dN', 'dN_SE',
 			      'dS', 'dS_SE');
 	    
+	    my $nc = scalar(@seqids);
+
+	    ## it will create an array with coln x rown elements because
+	    ## by default data is empty.
+
+	    my @emdata = ();
+	    foreach my $eseqid1 (@seqids) {
+		foreach my $eseqid2 (@seqids) {
+		
+		    push @emdata, '';
+		}
+	    }
+
 	    foreach my $bfield (@b_method_f) {
 	    
+		my @new_emdata = @emdata;
 		my $edata = { name => 'YN00_' . $bfield,
-			      coln => $c,
-			      rown => $r,
+			      coln => $nc,
+			      rown => $nc,
 			      colnames => \@seqids,
 			      rownames => \@seqids,
-		}
+			      data     => \@new_emdata
+		};
 		
-		my $mtx = R::YapRI::Matrix->new($edata);
+		my $mtx = R::YapRI::Data::Matrix->new($edata);
 		$b_matrix{$bfield} = $mtx;		
 	    }
 
@@ -1592,33 +1772,113 @@ sub parse_yn00out {
 
 		foreach my $cfield (@{$c_method_f{$submethod}}) {
  
+		    my @new_emdata = @emdata;
 		    my $edata = { name => $submethod . '_' . $cfield,
-				  coln => $c,
-				  rown => $r,
+				  coln => $nc,
+				  rown => $nc,
 				  colnames => \@seqids,
 				  rownames => \@seqids,
-		    }
+				  data     => \@new_emdata
+		    };
 		
-		    my $mtx = R::YapRI::Matrix->new($edata);
+		    my $mtx = R::YapRI::Data::Matrix->new($edata);
 		    $c_submtx{$cfield} = $mtx;		
 		}
 		    
-		$c_matrix{$submethod} = \%_c_submtx;		
+		$c_matrix{$submethod} = \%c_submtx;		
 	    }
 	}
 	elsif ($b_method == 1 && $_ =~ m/^\s+(\d+)\s+(\d+)/) {
 	
+	    #################################################################
+	    ## (B) Yang & Nielsen (2000) method                      ########
+	    #################################################################
+
 	    $_ =~ s/^\s+//;
 	    $_ =~ s/\s+/\t/g;
 	    my @bdata = split(/\t/, $_);
-	    my $seqid1 = $seqids[shift(@bdata) - 1];
-	    my $seqid2 = $seqids[shift(@bdata) - 1];
+	    my $test = join(",", @bdata);
+	    my $seqidx1 = shift(@bdata) - 1;
+	    my $seqidx2 = shift(@bdata) - 1;
+	    my $seqid1 = $seqids[$seqidx1];
+	    my $seqid2 = $seqids[$seqidx2];
 	
+	    ## Clean the @bdata and remove +- and the empty spaces
+	    my @newbd = ();
+	    foreach my $elem (@bdata) {
 	    
+		$elem =~ s/\s+//g;
+		if ($elem !~ m/^\+-$/) {
+		    
+		    push @newbd, $elem;
+		}	    
+	    }
+	    @bdata = @newbd;
 
+	    ## Now it will add the data to the matrix
+
+	    my @b_method_f = ('S', 'N', 't', 'kappa', 'omega', 'dN', 'dN_SE',
+			       'dS', 'dS_SE');
+
+	    my $idx = 0;
+	    foreach my $type (@b_method_f) {
+	    
+		my $b_mtx = $b_matrix{$type};
+		my @col1 = $b_mtx->get_column($seqid1);
+		$col1[$seqidx2] = $bdata[$idx];
+		$b_mtx->set_coldata($seqid1, \@col1);
+		
+		my @col2 = $b_mtx->get_column($seqid2);
+		$col2[$seqidx1] = $bdata[$idx];
+		$b_mtx->set_coldata($seqid2, \@col2);
+		$idx++;
+	    }
 	}
-	
+	elsif ($c_method == 1) {
+
+	    if ($_ =~ m/(\d+)\s+\((.+?)\)\s+vs\.\s+(\d+)\s+\((.+?)\)/) {
+
+		($c_seq1idx, $c_seq1id, $c_seq2idx, $c_seq2id) = 
+		    ($1 - 1, $2, $3 -1 ,$4);
+		
+	    }
+	    elsif ($_ =~ m/^(\w+):\s+(.+)$/) {
+
+		my $mt = $1;
+		my $line1 = $2;
+		$line1 =~ s/\s+=\s+/=/g;
+		$line1 =~ s/\(//g;
+		$line1 =~ s/\)//g;
+		foreach my $subdata (split(/\s+/, $line1)) {
+		    if ($subdata =~ m/^(.+)=(.+)$/) {
+		    
+			my ($type, $data) = ($1, $2);
+			my $c_mtx = $c_matrix{$mt}->{$type};
+			my @col1 = $c_mtx->get_column($c_seq1id);	
+			$col1[$c_seq2idx] = $data;
+
+			$c_mtx->set_coldata($c_seq1id, \@col1);
+			my @col2 = $c_mtx->get_column($c_seq2id);
+
+			$col2[$c_seq1idx] = $data;
+			$c_mtx->set_coldata($c_seq2id, \@col2);
+		    }
+		}
+	    }	    
+	}	
     }
+
+    ## Now it will create a %data with all the methods
+
+    $ynres{YN00} = \%b_matrix;
+
+    foreach my $c_method (keys %c_matrix) {
+    
+	$ynres{$c_method} = $c_matrix{$c_method};
+    }
+    
+
+    return %ynres;
 }
 
 
@@ -1680,9 +1940,10 @@ sub _a_method2matrix {
 	    else {
 		
 		if (ref($pdata{$sid_r}) eq 'ARRAY') {
-		    
+		    		    
 		    my @dt_r = @{$pdata{$sid_r}};
-		    if ($dt_r[$r] =~ m/(\d.+)\s+\((\d.+)\s+(\d.+)\)/) {
+		    if ($dt_r[$r - 1] =~ 
+			m/(-?\d.+)\s+\((-?\d.+)\s+(-?\d.+)\)/) {
 			
 			push @{$datatypes{dNdS}}, $1;
 			push @{$datatypes{dN}}, $2;
@@ -1692,7 +1953,8 @@ sub _a_method2matrix {
 		elsif (ref($pdata{$sid_c}) eq 'ARRAY') {
 		    
 		    my @dt_c = @{$pdata{$sid_c}};
-		    if ($dt_c[$c] =~ m/(\d.+)\s+\((\d.+)\s+(\d.+)\)/) {
+		    if ($dt_c[$c - 1] =~ 
+			m/(-?\d.+)\s+\((-?\d.+)\s+(-?\d.+)\)/) {
 			
 			push @{$datatypes{dNdS}}, $1;
 			push @{$datatypes{dN}}, $2;
@@ -1714,9 +1976,9 @@ sub _a_method2matrix {
 		     colnames => \@seqids,
 		     rownames => \@seqids,
 		     data => $datatypes{$dttype}
-	}
+	};
 	
-	my $mtx = R::YapRI::Matrix->new($data);
+	my $mtx = R::YapRI::Data::Matrix->new($data);
 	$matrix{$dttype} = $mtx;
     }
     
