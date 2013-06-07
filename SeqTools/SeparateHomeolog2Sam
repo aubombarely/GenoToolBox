@@ -11,7 +11,9 @@
 
  SeparateHomeolog2Sam [-h] -s <samfile> -p <homeolog_ref_prefix> 
                            -o <output_basename>
-                           [-a <xs_as_score_ratio>] [-U] [-V]
+                           [-a <xs_as_score_ratio>]
+                           [-g <xs_as_score_sum>]
+                           [-U] [-V]
 
 
 =head2 I<Flags:>
@@ -34,6 +36,10 @@ B<output_basename>        output basename (mandatory)
 =item -r
 
 B<xs_as_score_ratio>     min.ratio between AS XS scores to select the alignment.
+
+=item -g
+
+B<xs_as_score_sum>       sum of AS XS scores.
 
 =item -U
 
@@ -83,7 +89,9 @@ B<help>                   print the help
 
 
   The use of the -V option will reverse the selection (for example -U -V
-  will select non-unique alignments).
+  will select non-unique alignments). 
+
+  To select non-unique alignments with same map score use -g 0
 
   The script will create 2*prefix files (for example -p prefix1,prefix2):
    + outbasename.prefix1.sam
@@ -117,9 +125,10 @@ use autodie;
 
 use Getopt::Std;
 
-our ($opt_s, $opt_p, $opt_o, $opt_r, $opt_U, $opt_V, $opt_h);
-getopts("s:p:o:r:UVh");
-if (!$opt_s && !$opt_p && !$opt_o && !$opt_r && !$opt_U && !$opt_V && !$opt_h) {
+our ($opt_s, $opt_p, $opt_o, $opt_r, $opt_g, $opt_U, $opt_V, $opt_h);
+getopts("s:p:o:r:g:UVh");
+if (!$opt_s && !$opt_p && !$opt_o && !$opt_r && !$opt_g && !$opt_U && !$opt_V 
+    && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -147,6 +156,14 @@ if (defined $opt_r) {
 	die("ARGUMENT ERROR: -r <xsas_score_ratio> is not a numeric value.\n");
     }
 } 
+if (defined $opt_g) {
+
+    if ($opt_g !~ m/^-?\d+$/) {
+    
+	die("ARGUMENT ERROR: -g <xsas_score_sum> is not a numeric value.\n");
+    }
+} 
+
 
 print STDERR "\n\n##################################################\n";
 print STDERR "## SeparateHomeolog2Sam script begins.          ##\n";
@@ -209,7 +226,7 @@ while (<$samio>) {
 			$selection = 1;
 		    }
 		}
-		elsif ($opt_r =~ m/^\d+$/) {
+		elsif (defined $opt_r && $opt_r =~ m/^\d+$/) {
 		
 		    my $as = $f[11];
 		    $as =~ s/AS:i://;
@@ -233,6 +250,18 @@ while (<$samio>) {
 			$selection = 1;
 		    }
 		    elsif ($xs * $as < 0 && -($xs/$as) >= $opt_r) {
+			$selection = 1;
+		    }
+		}
+		elsif (defined $opt_g && $opt_g =~ m/^\d+$/) {
+		
+		    my $as = $f[11];
+		    $as =~ s/AS:i://;
+		    my $xs = $f[12];
+		    $xs =~ s/XS:i://;
+
+		    if ($as + $xs >= $opt_g) {
+		    
 			$selection = 1;
 		    }
 		}
@@ -314,6 +343,8 @@ sub help {
     The use of the -V option will reverse the selection (for example -U -V
     will select non-unique alignments).
 
+    To select non-unique alignments with same map score use -U -V -g 0
+
     The script will create 2*prefix files (for example -p prefix1,prefix2):
        + outbasename.prefix1.sam
        + outbasename.prefix2.sam
@@ -327,7 +358,9 @@ sub help {
        
        SeparateHomeolog2Sam [-h] -s <samfile> -p <homeolog_ref_prefix> 
                              -o <output_basename>
-                             [-a <xs_as_score_ratio>] [-U] [-V]
+                             [-a <xs_as_score_ratio>] 
+                             [-g <xs_as_score_sum>]
+                             [-U] [-V]
 
     Flags:
 
@@ -337,6 +370,7 @@ sub help {
       -o <output_basename>       output basename (mandatory)
       -r <xs_as_score_ratio>     min.ratio between AS XS scores to select 
                                  the alignment.
+      -g <xs_as_score_sum>       AS XS score sum
       -U <select_unique>         select only unique alignments
       -V <invert_selection>      invert selection
       -h <help>                  print the help

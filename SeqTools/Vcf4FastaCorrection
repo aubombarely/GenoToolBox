@@ -158,7 +158,7 @@ else {
 
 my $afreq = $opt_a;
 if (defined $afreq) {
-    if ($afreq !~ m/^\d+$/) {
+    if ($afreq !~ m/^\d+\.?\d?$/) {
 	die("ERROR: -a <min_allele_freq> doesnt have a numeric value.\n");
     }
     else {
@@ -461,7 +461,7 @@ sub parse_vcf {
 	    
 		$select = 0;
 	    }
-	    if ($opt_a && $feats{AF} < $opt_a) {
+	    if ($opt_a && $feats{AF1} < $opt_a) {
 	    
 		$select = 0;
 	    }
