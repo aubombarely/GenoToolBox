@@ -13,7 +13,7 @@
                        [-i <extract_by_id>] [-l <extract_by_length>] 
                        [-r <extract_by_regexp>]
                        [-c <extract_by_composition>]
-                       [-v] [-C] [-R] [-S]
+                       [-v] [-C] [-O] [-R] [-I] [-S]
 
 =head2 I<Flags:>
 
@@ -428,41 +428,44 @@ while (my $seqobj = $inio->next_seq()) {
 
 		    my $st = $coord->{start};
 		    my $en = $coord->{end};
-		    my $newid = $id . '_subseq_from' . $st . '_to' . $en;
 
-		    if ($opt_I) {
-		    
-			$newid = $coord->{newid};
-		    }
-		    my $newseq = $seqobj->trunc($st,$en);
-		    $newseq->id($newid);
+		    if ($st < $en) {
 
-		    if ($opt_O && $coord->{strand} =~ /^-$/) {
-		    
-			$newseq = $newseq->revcom();
-		    }
-		    if ($opt_R) {
-			$newseq = $newseq->revcom();
-		    }
-		    
+			my $newid = $id . '_subseq_from' . $st . '_to' . $en;
 
-		    if ($opt_S) {
+			if ($opt_I) {
 		    
-			my $outs_fasta = $id . '.fasta';
-			if (defined $out) {
-			    $outs_fasta = $out . '.' . $id . '.fasta';
+			    $newid = $coord->{newid};
 			}
-			my $s_outio = Bio::SeqIO->new( 
-			    -file   => ">$outs_fasta",
-			    -format => 'fasta'
-			    );
-			$s_outio->write_seq($newseq);
-		    }
-		    else {
+			my $newseq = $seqobj->trunc($st,$en);
+			$newseq->id($newid);
+			
+			if ($opt_O && $coord->{strand} =~ /^-$/) {
+			    
+			    $newseq = $newseq->revcom();
+			}
+			if ($opt_R) {
+			    $newseq = $newseq->revcom();
+			}
+
+			if ($opt_S) {
 		    
-			$outio->write_seq($newseq);
+			    my $outs_fasta = $id . '.fasta';
+			    if (defined $out) {
+				$outs_fasta = $out . '.' . $id . '.fasta';
+			    }
+			    my $s_outio = Bio::SeqIO->new( 
+				-file   => ">$outs_fasta",
+				-format => 'fasta'
+				);
+			    $s_outio->write_seq($newseq);
+			}
+			else {
+			    
+			    $outio->write_seq($newseq);
+			}
+			$c++;
 		    }
-		    $c++;
 		}
 	    }
 	}
@@ -532,11 +535,20 @@ sub help {
        To create one file per read, use -S option, in this case -o will be 
        overwrite with sequence id name
 
+      -i <id_list> can be a file with: 
+         1 column (just the IDs), 
+         3 columns (ID plus start and end coordinates to use with -C), 
+         4 columns (ID + start + end + strand, to get the specific strand -O) 
+         5 columns (ID + start + end + strand + NewID, use with -I option)
+
     Usage:
      
-      FastaExtract.pl [-h] -f <input_fasta_file> [-o <output_basename>] 
-                       [-i <filter_by_id>] [-l <filter_by_length>] 
-	               [-r <filter_by_regexp>] [-v] [-C] [-S]
+      FastaExtract.pl [-h] -f <input_fasta_file> [-o output_basename]
+                       [-i <extract_by_id>] [-l <extract_by_length>] 
+                       [-r <extract_by_regexp>]
+                       [-c <extract_by_composition>]
+                       [-v] [-C] [-O] [-R] [-I] [-S]
+
       
     Examples:
 
@@ -562,6 +574,10 @@ sub help {
       -c <extract_by_composition> nt/aa min composition
       -r <regexp>                 regular expression to extract the sequences
       -C <enable_trimming>        trim seqs according -i file.
+      -O <orientate_strand>       orientate the sequence based in the strand 
+                                  specified in the ID list filename (-i)
+      -I <replace_ids>            replace ID for the id specified in the ID list
+                                  file (-i)
       -R <revcom>                 get reverse complementary
       -S <onefile_per_read>       split the output as one file per read
       -v <invert_selection>       invert the selection
