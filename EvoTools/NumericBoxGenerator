@@ -1,0 +1,179 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ NumericBoxGenerator
+ Tool to create numeric boxes to represent Ks
+
+=cut
+
+=head1 SYPNOSIS
+
+ NumericBoxGenerator [-h] -i <input_file> -b <box_size> [-m <max_value>] -P
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<input_file>             input file, one column (mandatory)
+
+=item -b
+
+B<box_size>               box size
+
+=item -m
+
+B<max_value>              max. value to represent boxes
+
+=item -P
+
+B<represent_percentage>   represents percent instead count
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script divide a list of values by box size (-b) and count them (or 
+ return the percentage)
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ NumericBoxGenerator
+
+
+=cut
+
+use strict;
+use warnings;
+
+use Getopt::Std;
+use Math::BigFloat;
+
+our ($opt_i, $opt_b, $opt_m, $opt_P, $opt_h);
+getopts("i:b:m:Ph");
+if (!$opt_i && !$opt_b && !$opt_m && !$opt_P && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Get the arguments and check them
+
+my $infile = $opt_i || 
+    die("INPUT ARG. ERROR: -i <input_file> argument was not supplied.\n");
+
+my $boxsz = $opt_b ||
+    die("INPUT ARG. ERROR: -b <box_size> argument was not supplied.\n");
+
+
+my %box = ();
+
+open my $ifh, '<', $infile;
+my $total = 0;
+
+while(<$ifh>) {
+
+    chomp($_);
+    my @data = split(/\t/, $_);
+
+    my $s = 1;
+    if ($opt_m && $data[0] > $opt_m) {
+    
+	$s = 0;
+    }
+
+    if ($s == 1) {
+
+	$total++;
+	my $n = Math::BigFloat->new($data[0]);
+	my ($q, $r) = $n->bdiv($boxsz);
+    
+	my $num = $q->bfround(1)->bstr();
+	
+	if (exists $box{$num}) {
+	    
+	    $box{$num}++;
+	}
+	else {
+	    
+	    $box{$num} = 1;
+	}
+    }
+}
+
+## Now it will print the boxes
+
+foreach my $bx (sort {$a <=> $b} keys %box) {
+
+    my $val = $box{$bx};
+    if ($opt_P) {
+    
+	my $perc = $val * 100 / $total;
+	$val = Math::BigFloat->new($perc)->bfround(-2)->bstr();
+    }
+
+    my $pbx = $bx * $boxsz;
+    print STDOUT "$pbx\t$val\n";
+}
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+     This script divide a list of values by box size (-b) and count them (or 
+     return the percentage)
+
+    Usage:
+     
+      NumericBoxGenerator [-h] -i <input_file> -b <box_size> [-m <max_value>] -P
+
+    Flags:
+
+      -i <input_file>             input file, one column (mandatory)
+      -b <box_size>               box size
+      -m <max_value>              max. value to represent boxes
+      -P <represent_percentage>   represents percent instead count
+      -h <help>                   print the help
+     
+
+EOF
+exit (1);
+}
+
