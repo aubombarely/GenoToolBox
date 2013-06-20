@@ -1,0 +1,269 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GffFeatSelector
+ Script to select GFF3 lines based in a list of feature IDs
+
+=cut
+
+=head1 SYPNOSIS
+
+ GffFeatSelector [-h] -g <gff3_file> -i <id_list> [-N][-C][-V]
+
+
+=head2 I<Flags:>
+
+=over
+
+=item -g
+
+B<gff3_file>              gff3 input file (mandatory)
+
+=item -i
+
+B<feat_id_list>           feat id list (mandatory)
+
+=item -N
+
+B<select_by_name>         select by Name tag instead ID tag (optional)
+
+=item -C
+
+B<select_children>        select children features associated with selected feat
+
+=item -V
+
+B<invert_selection>       invert selection
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This is a script to select GFF3 lines based in the feature ID (or name) list.
+  
+ Parent and children features can be selected too using the options -P and -C
+ respectivelly.
+
+ The results will be printed as STDOUT.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ GffFeatSelector
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::Tools::GFF;
+
+our ($opt_g, $opt_i, $opt_N, $opt_P, $opt_C, $opt_V, $opt_h);
+
+getopts("g:i:NPCVh");
+
+if (!$opt_g && !$opt_i && !$opt_N && !$opt_P && !$opt_C && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Print header
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GffFeatSelector Starts ($date)      ##";
+print STDERR "\n############################################################\n";
+
+## STEP0: Check arguments ####################################################
+
+print_header("Step 0: Checking arguments");
+
+## Check variables.
+
+my $gff_file = $opt_g ||
+    die("DATA ARGUMENT: -g <gff3_file> was not supplied.\n");
+
+my $list_file = $opt_i ||
+    die("DATA ARGUMENT: -i <list_file> was not supplied.\n");
+
+
+print_header("Step 1: Processing ID list file");
+
+my %ids = ();
+
+open my $ifh, '<', $list_file;
+
+while(<$ifh>) {
+
+    chomp($_);
+    my @dt = split(/\t/, $_);
+    $ids{$dt[0]} = 1;
+}
+
+my @ids = keys(%ids);
+my $id_count = scalar(@ids);
+
+print STDERR "\n\t$id_count IDs have been parsed.\n";
+
+print_header("Step 2: Processing GFF3 file");
+
+my $gffio = Bio::Tools::GFF->new(-file => $gff_file, -gff_version => 3);
+my $gffout = Bio::Tools::GFF->new(-fh => \*STDOUT, -gff_version => 3);
+    
+my %deriv_ids = ();
+my $count = 0;
+
+my $feature;
+while($feature = $gffio->next_feature()) {
+    
+    my @tag_val = $feature->get_tag_values("ID");
+    my $sel = $tag_val[0];
+    
+    ## Use name if -N option is used
+
+    if ($opt_N && $feature->has_tag('Name'))  {
+    
+	@tag_val = $feature->get_tag_values("Name");
+	$sel = $tag_val[0];
+    }
+    
+
+    ## Check for the children terms, and add them
+    
+    my @newtags;
+    if($opt_C && $feature->has_tag('Parent')) {
+    
+	@tag_val = $feature->get_tag_values("Parent");
+	$sel = $tag_val[0];
+    }
+
+    if (exists $ids{$sel}) { 
+
+	$count++;
+	$gffout->write_feature($feature);
+
+	if ($opt_C) {
+
+	    my @newtags = $feature->get_tag_values("ID");
+	    $deriv_ids{$newtags[0]} = 1;
+	}
+    }
+    elsif ($opt_C && $deriv_ids{$sel}) {
+    
+	$count++;
+	$gffout->write_feature($feature);
+    }
+   
+}
+$gffio->close();
+
+print STDERR "\tDone, $count features has been printed as STDOUT.\n";
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GffIdRename Ends   ($date)      ##\n";
+print STDERR "############################################################\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+       
+        This is a script to select GFF3 lines based in the feature ID (or name)
+      list.
+         Children features can be selected too using the options -P 
+      and -C respectivelly.
+
+        The results will be printed as STDOUT.
+
+    Usage:
+     
+       GffFeatSelector [-h] -g <gff3_file> -i <id_list> [-N][-C][-V]
+      
+    Flags:
+ 
+      -g <gff3_file>              gff3 file (mandatory)
+      -i <feat_id_list>           feat id list (mandatory)
+      -N <select_by_name>         select by Name tag instead ID tag (optional)
+      -P <select_parent>          select parent features associated with 
+                                  the selected feat
+      -V <invert_selection>       invert selection
+      -h <help>                   print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+
+####
+1; #
+####
