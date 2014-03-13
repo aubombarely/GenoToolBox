@@ -1,0 +1,799 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ Hapmap2Mapmaker
+ Tool to change Hapmap format to Mapmaker input format
+
+=cut
+
+=head1 SYPNOSIS
+
+ Hapmap2Mapmaker [-h]  -i <hapmap_inputfile> -o <outputfile>
+                       -a <donor_a> -b <donor_b> -t <data_type>
+                       [-k <keys>]
+                       [-e <samples_to_exclude>] [-d <distance_snps>] [-B]
+                       
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<hapmap_inputfile>       hapmap input file (mandatory)
+
+=item -o
+
+B<outputfile>             output filename (mandatory)
+
+=item -a
+
+B<donor_a>                donor a name(s) (separated by commas) (mandatory)
+
+=item -b
+
+B<donor_b>                donor b name(s) (separated by commas) (mandatory)
+
+=item -t
+
+B<data_type>              data type for mapmaker (ex. f2) (f2 by default)
+
+=item -k
+
+B<keys>                   keys to code SNPs (aa=1;bb=2;ab=3...) 
+
+=item -e
+
+B<samples_to_exclude>     list of samples to exclude (sep. by comma)
+
+=item -B
+
+B<biallelic_filter>       filter out the non biallelic genotypes.
+
+=item -d
+
+B<distance_snps>          filter snps closer than this distance
+
+=item -V
+
+B<be_verbose>             be verbose and print the parsing status.
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script trasforms a hapmap file into a Mapmaker format
+
+ Hapmap format is a tabular format file with the following columns:
+  C1:   rs#
+  C2:   alleles
+  C3:   chrom
+  C4:   pos
+  C5:   strand
+  C6:   assembly
+  C7:   center
+  C8:   protLSID
+  C9:   assyLSID	
+  C10:  panelLSID	
+  C11:  QCcode	
+  C12+: Genotypes
+
+ Mapmaker format with two header lines:
+  line1: "data type XXXX"
+         where XXXX can be "f2 intercross", "f2 backcross", "f3 self", 
+         "ri self" or "ri sib" (remember that Antmap do not use: "ri sib" 
+         but it can use "dh").
+  line2: XXX YYY ZZZ Additional_AAAA
+         where XXX is the number of the progeny (C12+ hapmap excluding 
+         progenitors and -e accessions).
+         where YYY is the number of genetic loci
+         where ZZZ number of quantitative traits
+         where Additional_AAAA is aditional information such as the coding
+         scheme (keys), for example: "symbols 1=A 2=B 3=H 0=-")
+  
+   After these two lines, the raw input file contains one line per locus
+   where it starts with "*" plus the locus name, space (tab...) and the 
+   genotypes, for example "*L1 ABABBBHH" or "*L1 A B A B B B H H". Locus names
+   are limited to alphanumeric characters + underscores "_" or periods "." and
+   must start with an aplhanumeric character.
+
+   Comments can be inserted as "#". 
+         
+  Example hapmap:
+  C1     C2   C3    C4    C5  C6  C7  C8  C9  C10  C11  S1  S2  S3  S4  S5  S6
+  MRK01  A/T  Chr5  1000  +   NA  NA  NA  NA  NA   NA   AA  TT  AA  AT  AT  AA
+  MRK02  C/T  Chr5  2000  +   NA  NA  NA  NA  NA   NA   CC  TT  CT  TT  CC  CC
+  MRK03  C/G  Chr5  3000  +   NA  NA  NA  NA  NA   NA   CC  GG  CG  CG  GG  CG
+
+  Using Hapmap2Mapmaker -a S1 -b S2 -e S6 -k aa=1;bb=2;ab=3;ac=4;bc=5;cc=6;-=0
+  will produce: 
+
+  Example mapmaker:
+  data type f2 intercross
+  3 3 0 symbols 1=A 2=B 3=H 4=C 5=D 0=-
+  *MRK01 1 3 3
+  *MRK02 3 2 1
+  *MRK03 3 3 1
+
+  If no key is used:
+
+  Example mapmaker:
+  data type f2 intercross
+  3 3 0
+  *MRK01 A H H
+  *MRK02 H B A
+  *MRK03 H H A
+  
+  Note: cc will be ignored because it is not one of the f2 defined marker types
+
+  If more than one progenitor is used (for example -a S1,S6 it will try to find
+  a consensus, if do not it will ignore that marker printing a comment).
+ 
+  Example mapmaker:
+  data type f2 intercross
+  3 3 0
+  *MRK01 A H H
+  *MRK02 H B A
+  ## MRK03 has different genotypes for progenitor a (S1,S6) CC,CG
+
+  Biallelic (-B) option filter the non-biallelic SNPs (recommended).
+
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+=head1 METHODS
+
+ Hapmap2Mapmaker
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use List::Util 'shuffle';
+
+our ($opt_i, $opt_o, $opt_a, $opt_b, $opt_t, $opt_k, $opt_e, $opt_d, $opt_B, 
+     $opt_V, $opt_h);
+getopts("i:o:a:b:t:k:e:d:BVh");
+if (!$opt_i && !$opt_o && !$opt_a && !$opt_b && !$opt_t && !$opt_k && !$opt_e
+    && !$opt_d && !$opt_B && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Hapmap2FastaLike Starts ($date)  ##\n";
+print STDERR "############################################################\n\n";
+
+print_header("0) Checking arguments");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+## Get the arguments and check them
+
+my $input = $opt_i || 
+    die("INPUT ARG. ERROR: -i <hapmap_input> argument was not supplied.\n");
+
+print STDERR "\tInput file: $input\n";
+
+my $output = $opt_o ||
+    die("INPUT ARG. ERROR: -o <outputfile> argument was not supplied.\n");
+
+print STDERR "\tOutput file: $output\n";
+    
+my $a_donor_line = $opt_a ||
+    die("INPUT ARG. ERROR: -a <donor_a> argument was not supplied.\n");
+
+my %a_donors = (); 
+foreach my $ad (split(/,/, $a_donor_line)) {
+
+    $a_donors{$ad} = 1;
+}
+my $a_donor_c = scalar(keys %a_donors);
+
+print STDERR "\tA Donors ($a_donor_c): $a_donor_line\n";
+
+my $b_donor_line = $opt_a ||
+    die("INPUT ARG. ERROR: -b <donor_b> argument was not supplied.\n");
+
+my %b_donors = ();
+foreach my $bd (split(/,/, $b_donor_line)) {
+
+    $b_donors{$bd} = 1;
+}
+my $b_donor_c = scalar(keys %b_donors);
+
+print STDERR "\tB Donors ($b_donor_c): $b_donor_line\n";
+
+my %types = (
+    "f2 intercross" => 1, 
+    "f2 backcross"  => 1, 
+    "f3 self"       => 1, 
+    "ri self"       => 1,
+    "ri sib"        => 1,
+    "dh"            => 1,
+);
+
+my $mtype = "f2 intercross";
+if ($opt_t) {
+
+    if (exists $types{$opt_t}) {
+    
+	$mtype = $opt_t;
+    }
+    else {
+    
+	die("ERROR: -t $opt_t is not a valid parameter. Check -h for options.");
+    }
+}
+
+my %excluded = ();
+if ($opt_e) {
+
+    my @excluded = split(/,/, $opt_e);
+    foreach my $exc (@excluded) {
+    
+	$excluded{$exc} = 1;
+    }
+}
+
+if ($opt_B) {
+
+    print STDERR "\tBiallelic filter [enabled]\n";
+}
+
+if ($opt_d) {
+
+    if ($opt_d !~ m/^\d+$/) {
+    
+	die("ERROR: -d <filter_distance> is not a numeric value.\n");
+    }
+}
+
+
+
+###############################################################################
+## PARSE THE HAPMAP
+###############################################################################
+## The data will be stored with this structure:
+##
+## $markerloc{$chrom} = { $id => $pos };
+## $markergen{$genot} = { $id => \@genotypes }; 
+## $markerref{$id} = $genotype
+###############################################################################
+
+print_header("1) Parsing Hapmap input file");
+
+my ($mloc_href, $mgen_href, $mref_href) = parse_hapmap($input);
+
+my %mloc = %{$mloc_href};
+my %mgen = %{$mgen_href};
+my %mref = %{$mref_href};
+
+my $nmrks = scalar(keys %mref);
+print STDERR "\t$nmrks makers have been extracted from the hapmap file.\n";
+
+## Order the markers by position and filter according -d
+
+print_header("2) Order markers and filter by distance");
+
+my %chr_markers = sort_markers(\%mloc, $opt_d);
+
+
+###############################################################################
+## PRODUCE THE OUTPUT
+###############################################################################
+
+print_header("3) Filtering and Printing Output");
+
+## First get the info to print the headers.
+
+open my $ofh, '>', $opt_o;
+
+print STDERR "TEST: data type $mtype\n";
+
+## Get the number of individuals
+
+my @pop = ();
+foreach my $ind (sort keys %mgen) {
+
+    if ($excluded{$ind}) {
+    
+	## Do nothing, just ignore it
+    }
+    elsif ($a_donors{$ind}) {
+    
+    }
+    elsif ($b_donors{$ind}) {
+    
+    }
+    else {
+    
+	push @pop, $ind;
+    }
+}
+
+my $pop_n = scalar(@pop);
+my $marks_n = scalar(keys %mref);
+
+print STDERR "TEST: $pop_n $marks_n 0\n";
+
+foreach my $mrk_id (sort keys %mref) {
+
+    print STDERR "TEST1: $mrk_id\t$mref{$mrk_id}\n";
+
+
+}
+
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Hapmap2Mapmaker Ends ($date)   ##\n";
+print STDERR "############################################################\n\n";
+exit;
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+       This script trasforms a hapmap file into a Mapmaker format
+
+       Hapmap format is a tabular format file with the following columns:
+        C1:   rs#
+        C2:   alleles
+        C3:   chrom
+        C4:   pos
+        C5:   strand
+        C6:   assembly
+        C7:   center
+        C8:   protLSID
+        C9:   assyLSID	
+        C10:  panelLSID	
+        C11:  QCcode	
+        C12+: Genotypes
+
+       Mapmaker format with two header lines:
+        line1: "data type XXXX"
+               where XXXX can be "f2 intercross", "f2 backcross", "f3 self", 
+               "ri self" or "ri sib" (remember that Antmap do not use: "ri sib" 
+               but it can use "dh").
+        line2: XXX YYY ZZZ Additional_AAAA
+               where XXX is the number of the progeny (C12+ hapmap excluding 
+               progenitors and -e accessions).
+               where YYY is the number of genetic loci
+               where ZZZ number of quantitative traits
+               where Additional_AAAA is aditional information such as the coding
+               scheme (keys), for example: "symbols 1=A 2=B 3=H 0=-")
+  
+       After these two lines, the raw input file contains one line per locus
+       where it starts with "*" plus the locus name, space (tab...) and the 
+       genotypes, for example "*L1 ABABBBHH" or "*L1 A B A B B B H H". Locus 
+       names are limited to alphanumeric characters + underscores "_" or 
+       periods "." and must start with an aplhanumeric character.
+
+       Comments can be inserted as "#". 
+         
+       Example hapmap:
+     C1     C2   C3    C4   C5  C6  C7  C8  C9  C10  C11  S1  S2  S3  S4  S5  S6
+     MRK01  A/T  Chr5  100  +   NA  NA  NA  NA  NA   NA   AA  TT  AA  AT  AT  AA
+     MRK02  C/T  Chr5  200  +   NA  NA  NA  NA  NA   NA   CC  TT  CT  TT  CC  CC
+     MRK03  C/G  Chr5  300  +   NA  NA  NA  NA  NA   NA   CC  GG  CG  CG  GG  CG
+
+       Using Hapmap2Mapmaker -a S1 -b S2 -e S6 -k aa=1;bb=2;ab=3;ac=4;bc=5;
+       cc=6;-=0 will produce: 
+
+       Example mapmaker:
+       data type f2 intercross
+       3 3 0 symbols 1=A 2=B 3=H 4=C 5=D 0=-
+       *MRK01 1 3 3
+       *MRK02 3 2 1
+       *MRK03 3 3 1
+
+       If no key is used:
+
+       Example mapmaker:
+       data type f2 intercross
+       3 3 0
+       *MRK01 A H H
+       *MRK02 H B A
+       *MRK03 H H A
+  
+       Note: cc will be ignored because it is not one of the f2 defined marker
+       types
+
+       If more than one progenitor is used (for example -a S1,S6 it will try 
+       to find  a consensus, if do not it will ignore that marker printing a 
+       comment).
+ 
+       Example mapmaker:
+       data type f2 intercross
+       3 3 0
+       *MRK01 A H H
+       *MRK02 H B A
+       ## MRK03 has different genotypes for progenitor a (S1,S6) CC,CG
+
+       Biallelic (-B) option filter the non-biallelic SNPs (recommended).
+       
+
+    Usage:
+
+       Hapmap2Mapmaker [-h]  -i <hapmap_inputfile> -o <outputfile>
+                       -a <donor_a> -b <donor_b> -t <data_type>
+                       [-k <keys>]
+                       [-e <samples_to_exclude>] [-d <distance_snps>] [-B]
+ 
+    Flags:
+
+      -i <hapmap_inputfile>     hapmap input file (mandatory)
+      -o <outputfile>           output filename (mandatory)
+      -a <donor_a>              donor a name(s)(separated by commas) (mandatory)
+      -b <donor_b>              donor b name(s)(separated by commas) (mandatory)
+      -t <data_type>            data type for mapmaker (ex. f2) (f2 by default)
+      -k <keys>                 keys to code SNPs (aa=1;bb=2;ab=3...) 
+      -e <samples_to_exclude>   list of samples to exclude (sep. by comma)
+      -B <biallelic_filter>     filter out the non biallelic genotypes.
+      -d <distance_snps>        filter snps closer than this distance
+      -V <be_verbose>           be verbose and print the parsing status.
+      -h <help>                 print the help
+
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+=head2 parse_hapmap
+
+  Usage: my ($mloc_href, $mgen_href) = parse_hapmap($input);
+
+  Desc: Parse a hapmap file and returns two hashrefs.
+
+  Ret: $mloc_href, a hash ref. with key=$chrom and value={$id => $pos }; 
+       $mgen_href, a hash ref. with key=$genot and value={$id => \@genotypes };
+       $mref_href, a hash ref. with key=$id and value=$ref_allele 
+
+  Args: $input, a filename
+        $refname, a reference name
+
+  Side_Effects: Die if something is wrong.
+                It takes the refname from $opt_r
+
+  Example: my ($mloc_href, $mgen_href) = parse_hapmap($input);
+
+=cut
+
+sub parse_hapmap {
+    my $in = shift ||
+	die("ERROR: No inputfile was supplied to parse_hapmap function.\n");
+
+    ## Define the variables
+
+    my %loc = ();
+    my %gen = ();
+    my %ref = ();
+
+    ## First open the file
+
+    open my $ifh, '<', $in;
+
+    my ($H, $h, $bi) = (0,0,0);
+    if ($opt_V) {
+    
+	$H = `cut -f1 $in | wc -l`;
+	chomp($H);
+    }
+
+    my %manfields = (
+	'rs#'       => 1,	
+	'alleles'   => 2,	
+	'chrom'	    => 3,
+	'pos'	    => 4,
+	'strand'    => 5,	
+	'assembly'  => 6,	
+	'center'    => 7,	
+	'protLSID'  => 8,	
+	'assyLSID'  => 9,	
+	'panelLSID' => 10,	
+	'QCcode'    => 11
+	);
+    my $mancnt = scalar(keys %manfields);
+   
+    my @headers = ();
+    my %smpf = ();
+    my %smpr = ();
+
+    while(<$ifh>) {
+	
+	chomp($_);
+	$h++;
+    
+	
+	if ($_ =~ m/^rs#/) {
+	
+	    my $f = 0;
+	    foreach my $head (split(/\t/, $_)) {
+	    
+		$f++;
+		if ($f > 0 && $f < 12) {
+		
+		    unless (exists $manfields{$head}) {
+		    
+			my @mfields = sort {$manfields{$a} <=> $manfields{$b}} 
+			keys %manfields;
+			my $mfline = join(",", @mfields);
+			die("ERROR: wrong header field $head isnt ($mfline)\n");
+		    }
+		}
+		else {
+		
+		    $smpf{$head} = $f;
+		    $smpr{$f} = $head;
+		}
+	    }
+
+
+	    if ($opt_V) {
+	    
+		my $samplecnt = scalar(keys %smpf);
+		print STDERR "\n\t$samplecnt genoypes have been found in the ";
+		print STDERR " hapmap file:\n\n";
+		foreach my $smp (sort {$smpf{$a} <=> $smpf{$b}} keys %smpf) {
+		    
+		    print STDERR "\t\t$smp\n";
+		}
+		print STDERR "\n\n";
+	    }
+	}
+	else {
+	
+	    my ($mkid, $alle, $chro, $posi, $stra, $asse, $cent, $prot, 
+		$assy, $pane, $qcco, @geno) = split(/\t/, $_);
+	
+	    ## First check the biallelic filter
+
+	    my @alleles = split(/\//, $alle);
+
+	    ## By default it will take as reference the first allele
+
+	    $ref{$mkid} = $alleles[0];
+
+	    unless ($opt_B && scalar(@alleles) > 2) { 
+
+		## Add the location information
+
+		if (exists $loc{$chro}) {
+	    
+		    $loc{$chro}->{$mkid} = $posi;
+		}
+		else {
+	    
+		    $loc{$chro} = { $mkid => $posi };
+		}
+	    
+		## Add the genotype information
+
+		my $g = 0;
+		foreach my $gn (sort {$a <=> $b} keys %smpr) {
+		
+		    my @genotype = split(//, uc($geno[$g]));
+
+		    if (exists $gen{$smpr{$gn}}) {
+			    
+			$gen{$smpr{$gn}}->{$mkid} = \@genotype;
+		    }
+		    else {
+			
+			$gen{$smpr{$gn}} = { $mkid => \@genotype };
+		    }
+		    
+		    $g++;
+		}
+	    }
+	    else {
+	    
+		$bi++;
+	    }
+	}    
+	
+	if ($opt_V) {
+	
+	    print STDERR "\tParsing line: $h of $H                   \r";
+	}	    
+    }
+
+    if ($opt_V) {
+	
+	print STDERR "\n\n";
+    }
+    
+    if ($opt_B) {
+    
+	print STDERR "\t$bi markers discarded by biallelic filter\n\n";
+    }
+
+    return (\%loc, \%gen, \%ref);
+}
+
+
+=head2 sort_markers
+
+  Usage: my @markers = sort_markers(\%marks, $distance);
+
+  Desc: Sort markers and filter by distance
+
+  Ret: An array with arrayref with markers IDs
+
+  Args: \%marks, a hashref with key=chromosome, value=hashref with id, position
+
+  Side_Effects: None
+
+  Example: my @markers = sort_markers(\%marks, $distance);
+
+=cut
+
+sub sort_markers {
+    my $mrks_href = shift ||
+	die("ERROR: No marks_href variable was supplied to sort_markers()\n");
+    my $dist = shift;
+
+    if (ref($mrks_href) ne 'HASH') {
+    
+	die("ERROR: $mrks_href supplied to sort_markers() isnt hashref.\n");
+    }
+
+    my %mloc = %{$mrks_href};
+    my %mrks = ();
+
+    my $mrks_count = 0;
+
+    foreach my $chr (sort keys %mloc) {
+
+	my @chr_mrks = ();
+
+	my %mrks_c = %{$mloc{$chr}};
+
+	my $n = 0;
+
+	foreach my $mrk_id (sort { $mrks_c{$a} <=> $mrks_c{$b} } keys %mrks_c) {
+    		    
+	    if ($dist) {
+		
+		if ($n == 0) {
+
+		    push(@chr_mrks, $mrk_id);
+		    $mrks_count++;
+		}
+		else {
+		    
+		    my $diff = $mrks_c{$mrk_id} - $mrks_c{$chr_mrks[-1]};
+		    if ($diff > $dist) {
+			
+			push(@chr_mrks, $mrk_id);
+			$mrks_count++;
+		    }
+		}
+	    }
+	    else {
+	
+		push(@chr_mrks, $mrk_id);
+		$mrks_count++;
+	    }
+	    
+	    $n++;
+	}
+
+	$mrks{$chr} = \@chr_mrks;
+    }
+
+    print STDERR "\t$mrks_count markers have been selected\n";
+
+    return %mrks;
+}
+
+=head2 callsingle
+
+  Usage: my $single = callsingle(\@genotypes);
+
+  Desc: Reduce the genotypes to non-redundant call, for example:
+        AA => A, AT => AT, AACC => AC, ACCT => ACT...
+
+  Ret: An scalar with the SNP
+
+  Args: \@genotypes, an arrayref with the genotypes
+
+  Side_Effects: None
+
+  Example:  my $single = callsingle(\@genotypes);
+
+=cut
+
+sub callsingle {
+
+    my $geno_aref = shift ||
+	die("ERROR: No genotypes arrayref variable was supplied to callsingle");
+
+    if (ref($geno_aref) ne 'ARRAY') {
+    
+	die("ERROR: $geno_aref supplied to callsingle() isnt arrayref.\n");
+    }
+
+    my %dif = ();
+    foreach my $allele (@{$geno_aref}) {
+	
+	$dif{$allele} = 1;
+    }
+
+    my $singeno = join("", sort(keys(%dif)));
+    return $singeno;
+}
