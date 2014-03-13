@@ -10,11 +10,19 @@
 =head1 SYPNOSIS
 
  MultiVcfTool [-h] -i <vcffiles> -c <coveragefiles> -o <outputbasename> 
-                   [-d <deepfilter>] [-q <qscorefilter>] [-g <groups>]
+                   -g <groups> [-d <deepfilter>] [-q <qscorefilter>] 
                    [-f <outputformat>] [-p <ploidy>] [-m <max_markers>]
                    [-s <num_structure_sets>] [-e <excluding_seqID>]
                    [-l <marker_list> | -b <bp_boxsize> | -S] 
                    [-V] [-H] [-B]
+
+=head1 EXAMPLE
+
+      MultiVcfTool  [-h] -i S1=s1.vcf,S2=s2.vcf,S3=s3.vcf,S4=s4.vcf 
+                         -c S1=s1.cov,S2=s2.cov,S3=s3.cov,S4=s4.cov 
+                         -g G1=(S1,S2),G2=(S3,S4)
+                         -o multivcf_out
+                         -f var,hapmap 
 
 =head2 I<Flags:>
 
@@ -46,7 +54,7 @@ B<qscorefilter>           filter by qscore (optional)
 =item -g
 
 B<groups>                 groups for analysis as groupname1=(name1,name2),
-                          groupname2=(name3,name4) (optional)
+                          groupname2=(name3,name4) (mandatory)
 
 =item -f
 
@@ -198,11 +206,11 @@ foreach my $format (split(/,/, $outformat)) {
 	$outf{$format} = 1;
     }
 
-    if ($format eq 'phase') {
+    if ($format =~ m/phase/) {
     
 	unless ($opt_S) {
 	    
-	    die("ERROR: 'phase' format only can be used with -S option.\n");
+	    die("ERROR: Any 'phase' format only can be used with -S option.\n");
 	}
     }
 }
@@ -322,6 +330,13 @@ my $ploidy = $opt_p || 2;
 if ($ploidy !~ m/^\d+$/) {
 
     die("INPUT ERROR: -p <ploidy> is not an integer.\n");
+}
+else {
+
+    if ($ploidy > 6) {
+    
+    print STDERR "WARNING: Not all the features are available for ploidy > 6\n";
+    }
 }
 print STDERR "$ploidy\n";
 if ($opt_H) {
@@ -504,17 +519,132 @@ foreach my $name (sort keys %vcffile) {
 	    ## Process the allele frequency information
 	    ## This programs usually are designed for diploid
 	    ## so we'll keep it simple adding only the ref var if
-	    ## AF < 0.95
+	    ## AF1 < 0.95
 
-	    if ($info =~ m/AF1=(.+?);/) {
+	    ## Note: some programs produce AF and other AF1 so keep
+	    ## this as AF1?
+
+	    ## Ranges of variation
+	    ## 2n=2x => AF =>[0.05..0.95] => two alleles (alt + ref) (AB)
+	    ## 2n=4x => AF =>[0.05..0.35] => two alleles (alt + ref) (ABBB)
+	    ## 2n=4x => AF =>[0.35..0.65] => two alleles (alt + ref) (AABB)
+	    ## 2n=4x => AF =>[0.65..0.95] => two alleles (alt + ref) (AAAB)
+	    ## 2n=6x => AF =>[0.05..0.20] => two alleles (alt + ref) (ABBBBB)
+	    ## 2n=6x => AF =>[0.20..0.40] => two alleles (alt + ref) (AABBBB)
+	    ## 2n=6x => AF =>[0.40..0.60] => two alleles (alt + ref) (AAABBB)
+	    ## 2n=6x => AF =>[0.60..0.80] => two alleles (alt + ref) (AAAABB)
+	    ## 2n=6x => AF =>[0.80..0.95] => two alleles (alt + ref) (AAAAAB)
+
+
+	    if ($info =~ m/AF1?=(.+?);/) {
 	    
-		my $af = $1;
-		if ($af < 0.95) {
-		    
-		    $altvar .= ',' . $refvar;
-		    $vcf_row[4] = $altvar;
+		my $af = $1;	      
+		my @altvar = split(/,/, $altvar);
+
+		if ($ploidy == 2) {		   
+			
+		    if ($af ge 0.05 && $af le 0.95) {
+		
+			push(@altvar, $refvar);
+		    }
 		}
-	    }
+		elsif ($ploidy == 4) {
+		    
+		    if ($af ge 0.05 && $af le 0.35) {
+			
+			push(@altvar, ($refvar, $refvar, $refvar));
+		    }
+		    elsif ($af gt 0.35 && $af le 0.65) {
+			
+			if (scalar(@altvar) == 1) {
+			    
+			    push( @altvar, 
+				  ($altvar[0], $refvar, $refvar) );
+			}
+			else {
+			
+			    push( @altvar, 
+				  ($refvar, $refvar) );
+			}
+		    }
+		    elsif ($af gt 0.65 && $af le 0.95) {
+			    
+			if (scalar(@altvar) == 1) {
+
+			    push( @altvar, 
+				  ($altvar[0], $altvar[0], $refvar));
+			}
+			else {
+			    push( @altvar, ($refvar, $refvar));
+			}
+		    }
+		}
+		elsif ($ploidy == 6) {
+			
+		    if ($af ge 0.05 && $af le 0.20) {
+			
+			push(@altvar, ($refvar, $refvar, $refvar, 
+					   $refvar, $refvar));
+		    }
+		    elsif ($af gt 0.20 && $af le 0.40) {
+			    
+			if (scalar(@altvar) == 1) {
+			    
+			    push(@altvar, ($altvar[0], $refvar, 
+					       $refvar, $refvar, $refvar));
+			}
+			else {
+			    
+			    push(@altvar, (@altvar, $refvar, 
+					       $refvar, $refvar));
+			}
+			
+		    }
+		    elsif ($af gt 0.40 && $af le 0.60) {
+			
+			if (scalar(@altvar) == 1) {
+			    
+			    push(@altvar, ($altvar[0], $refvar, 
+					       $refvar, $refvar, $refvar));
+			}
+			elsif (scalar(@altvar) == 2) {
+			    
+			    push(@altvar, (@altvar, $refvar, 
+					       $refvar, $refvar));
+			}
+			else {
+			    
+			    push(@altvar, (@altvar, 
+					       $refvar, $refvar));
+			}
+		    }
+		    elsif ($af gt 0.60 && $af le 0.80) {
+			
+			if (scalar(@altvar) == 1) {
+			    push(@altvar, ($altvar[0], $altvar[0], $altvar[0], 
+					   $refvar, $refvar));
+			}
+			else {
+			    
+			    push(@altvar, (@altvar, @altvar, $refvar, $refvar));
+			}
+		    }
+		    elsif ($af gt 0.80 && $af le 0.95) {
+			
+			push(@altvar, ($altvar[0], $altvar[0], $altvar[0], 
+				       $altvar[0],$refvar));
+		    }
+		}
+		else {		   
+					    
+		    if ($af ge 0.05 && $af le 0.95) {
+		
+			push(@altvar, $refvar);
+		    }	    
+		}	 
+   
+		$vcf_row[4] = join(",", @altvar);
+	    }	
 
 	    ## Filters
 	    
@@ -1217,7 +1347,7 @@ sub help {
 
        Available formats: .var     (columnar txt format with notes).
                           .hapmap  (hapmap format).
-                          .struct  (Structure program input format).
+                          .structure  (Structure program input format).
                           .mphase  (Phase program input format) (numeric SNP).
                           .sphase  (Phase program input format) (character SNP) 
  
@@ -1238,11 +1368,19 @@ sub help {
     Usage:
 
      MultiVcfTool  [-h] -i <vcffiles> -c <coveragefiles> -o <outputbasename> 
-                   [-d <deepfilter>] [-q <qscorefilter>] [-g <groups>]
+                   -g <groups> [-d <deepfilter>] [-q <qscorefilter>] 
                    [-f <outputformat>] [-p <ploidy>] [-m <max_markers>]
                    [-s <num_structure_sets>] [-e <excluding_seqID>]
                    [-l <marker_list> | -b <bp_boxsize> | -S] 
                    [-V] [-H] [-B]
+
+    Example:
+
+      MultiVcfTool  [-h] -i S1=s1.vcf,S2=s2.vcf,S3=s3.vcf,S4=s4.vcf 
+                         -c S1=s1.cov,S2=s2.cov,S3=s3.cov,S4=s4.cov 
+                         -g G1=(S1,S2),G2=(S3,S4)
+                         -o multivcf_out
+                         -f var,hapmap 
 
     Flags:
 
@@ -1254,7 +1392,7 @@ sub help {
       -d <deepfilter>             filter by min. deep (optional)
       -q <qscorefilter>           filter by qscore (optional)
       -g <groups>                 groups for analysis as groupname1=(name1,
-                                  name2),groupname2=(name3,name4) (optional)
+                                  name2),groupname2=(name3,name4) (mandatory)
       -f <outputformat>           outputformat (var.txt by default)
       -p <ploidy>                 ploidy (an integer, 2 by default)
       -m <max_markers>            max.number of markers selected for structure 
