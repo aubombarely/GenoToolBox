@@ -11,8 +11,8 @@
 
  Hapmap2Mapmaker [-h]  -i <hapmap_inputfile> -o <outputfile>
                        -a <donor_a> -b <donor_b> -t <data_type>
-                       [-k <keys>]
-                       [-e <samples_to_exclude>] [-d <distance_snps>] [-B]
+                       [-k <keys>] [-f <outformat>] [-p <chisqr_pvalue>]
+                       [-e <samples_to_exclude>] [-d <distance_snps>] [-B][-H]
                        
 
 =head2 I<Flags:>
@@ -27,6 +27,10 @@ B<hapmap_inputfile>       hapmap input file (mandatory)
 =item -o
 
 B<outputfile>             output filename (mandatory)
+
+=item -f
+
+B<output_format>          outout format: mapmaker (default) or jointmap4
 
 =item -a
 
@@ -44,6 +48,14 @@ B<data_type>              data type for mapmaker (ex. f2) (f2 by default)
 
 B<keys>                   keys to code SNPs (aa=1;bb=2;ab=3...) 
 
+=item -s
+
+B<filter_segregation>     filter by expected segregation (optional)
+
+=item -p
+
+B<chisqr_pvalue>          chi square p-value for segregation test (0.01 default)
+
 =item -e
 
 B<samples_to_exclude>     list of samples to exclude (sep. by comma)
@@ -51,6 +63,10 @@ B<samples_to_exclude>     list of samples to exclude (sep. by comma)
 =item -B
 
 B<biallelic_filter>       filter out the non biallelic genotypes.
+
+=item -H
+
+B<homozygous_donor>       select only homozygous markers for donors
 
 =item -d
 
@@ -98,7 +114,17 @@ B<help>                   print the help
          where ZZZ number of quantitative traits
          where Additional_AAAA is aditional information such as the coding
          scheme (keys), for example: "symbols 1=A 2=B 3=H 0=-")
-  
+
+   The standard key is:
+    KEY     DESCRIPTION
+    a       homozygote or haploid as the first donor (A)
+    b       homozygote or haploid as the second donor (B)
+    h       heterozygote
+    c       not genotype a (the b-allele is dominant)
+    d       not genotype b (the a-allele is dominant)
+    –       genotype unknown
+    x       genotype is not A or B
+
    After these two lines, the raw input file contains one line per locus
    where it starts with "*" plus the locus name, space (tab...) and the 
    genotypes, for example "*L1 ABABBBHH" or "*L1 A B A B B B H H". Locus names
@@ -146,6 +172,16 @@ B<help>                   print the help
 
   Biallelic (-B) option filter the non-biallelic SNPs (recommended).
 
+  Filter for expected segregations:
+    KEY             RATIO
+    (a,b)           1:1
+    (a,h)           1:1
+    (a,c)           1:3
+    (h,b)           1:1
+    (b,d)           1:3
+    (a,h,b)         1:2:1
+    (ac,ad,bc,bd)   1:1:1:1
+    (ee,ef,eg,fg)   1:1:1:1
 
 =cut
 
@@ -170,11 +206,16 @@ use autodie;
 use Getopt::Std;
 use List::Util 'shuffle';
 
-our ($opt_i, $opt_o, $opt_a, $opt_b, $opt_t, $opt_k, $opt_e, $opt_d, $opt_B, 
-     $opt_V, $opt_h);
-getopts("i:o:a:b:t:k:e:d:BVh");
-if (!$opt_i && !$opt_o && !$opt_a && !$opt_b && !$opt_t && !$opt_k && !$opt_e
-    && !$opt_d && !$opt_B && !$opt_V && !$opt_h) {
+## It will calculate the chi square
+use Statistics::Distributions;
+
+
+our ($opt_i, $opt_o, $opt_f, $opt_a, $opt_b, $opt_t, $opt_k, $opt_e, $opt_d, 
+     $opt_s, $opt_p, $opt_B, $opt_H, $opt_V, $opt_h);
+getopts("i:o:f:a:b:t:k:e:d:s:p:BHVh");
+if (!$opt_i && !$opt_o && !$opt_f && !$opt_a && !$opt_b && !$opt_t && !$opt_k 
+    && !$opt_e && !$opt_d && !$opt_s && !$opt_p && !$opt_B && !$opt_H 
+    && !$opt_V && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -209,6 +250,26 @@ print STDERR "\tOutput file: $output\n";
 my $a_donor_line = $opt_a ||
     die("INPUT ARG. ERROR: -a <donor_a> argument was not supplied.\n");
 
+## Check output format -f
+
+my %oformats = (
+    'jointmap4' => 1,
+    'mapmaker'  => 1
+    );
+
+my $oformat = 'mapmaker';
+if ($opt_f) {
+
+    unless (exists $oformats{$opt_f}) {
+    
+	die("ERROR: -f $opt_f is not a valid formta\n");
+    }
+    else {
+    
+	$oformat = $opt_f;
+    }
+}
+
 my %a_donors = (); 
 foreach my $ad (split(/,/, $a_donor_line)) {
 
@@ -218,7 +279,7 @@ my $a_donor_c = scalar(keys %a_donors);
 
 print STDERR "\tA Donors ($a_donor_c): $a_donor_line\n";
 
-my $b_donor_line = $opt_a ||
+my $b_donor_line = $opt_b ||
     die("INPUT ARG. ERROR: -b <donor_b> argument was not supplied.\n");
 
 my %b_donors = ();
@@ -252,6 +313,8 @@ if ($opt_t) {
     }
 }
 
+print STDERR "\tPopulation type: $mtype\n";
+
 my %excluded = ();
 if ($opt_e) {
 
@@ -260,11 +323,20 @@ if ($opt_e) {
     
 	$excluded{$exc} = 1;
     }
+    print STDERR "\tExcluded individuals: $opt_e\n";
+}
+else {
+
+     print STDERR "\tNo excluded individuals\n";
 }
 
 if ($opt_B) {
 
     print STDERR "\tBiallelic filter [enabled]\n";
+}
+else {
+
+    print STDERR "\tBiallelic filter [disabled]\n";
 }
 
 if ($opt_d) {
@@ -273,6 +345,62 @@ if ($opt_d) {
     
 	die("ERROR: -d <filter_distance> is not a numeric value.\n");
     }
+    else {
+    
+	print STDERR "\tDistance filter [enabled] ($opt_d bp)\n";
+    }
+}
+
+if ($opt_H) {
+
+    print STDERR "\tHomozygous donor selection [enabled]\n";
+}
+else {
+
+    print STDERR "\tHomozygous donor selection [disabled]\n";
+}
+
+## segregation values will be order alphabetically
+
+my %segreg = (
+    "(a,b)"         =>  "1:1",
+    "(a,h)"         =>  "1:1",
+    "(a,c)"         =>  "1:3",
+    "(b,h)"         =>  "1:1",
+    "(b,d)"         =>  "1:3",
+    "(a,b,h)"       =>  "1:1:2",
+    "(ac,ad,bc,bd)" =>  "1:1:1:1",
+    "(ee,ef,eg,fg)" =>  "1:1:1:1"    
+    );
+
+
+my $chisq_pvalue = 0.01;
+
+if ($opt_s) {
+
+    if ($opt_s =~ m/\(a,h,b\)/) {
+    
+	print STDERR "\tNote: Segregation reordered from (a,h,b) to (a,b,h)\n";
+	$opt_s = '(a,b,h)';
+    }
+
+    unless (exists $segreg{$opt_s}) {
+    
+	die("ERROR: segregation -s $opt_s is no valid.\n");
+    }
+    else {
+    
+	print STDERR "\tFilter by segregation [enabled]: $opt_s\n";
+
+	if ($opt_p) {
+	    $chisq_pvalue = $opt_p; 
+	}
+	print STDERR "\tChi Square p-value: $chisq_pvalue\n";
+    }
+}
+else {
+
+    print STDERR "\tFilter by segregation [disabled]\n";
 }
 
 
@@ -282,75 +410,278 @@ if ($opt_d) {
 ###############################################################################
 ## The data will be stored with this structure:
 ##
-## $markerloc{$chrom} = { $id => $pos };
-## $markergen{$genot} = { $id => \@genotypes }; 
-## $markerref{$id} = $genotype
+## $marker_loc{$chrom} = { $id => $pos };
+## $marker_abh{$id} = { $sample => $genotype };
 ###############################################################################
 
 print_header("1) Parsing Hapmap input file");
 
-my ($mloc_href, $mgen_href, $mref_href) = parse_hapmap($input);
+my ($mk_abh_href, $mk_loc_href) = parse_hapmap($input, \%a_donors, \%b_donors, 
+					       \%excluded);
 
-my %mloc = %{$mloc_href};
-my %mgen = %{$mgen_href};
-my %mref = %{$mref_href};
+my %marks = %{$mk_abh_href};
 
-my $nmrks = scalar(keys %mref);
+my $nmrks = scalar(keys %marks);
 print STDERR "\t$nmrks makers have been extracted from the hapmap file.\n";
 
 ## Order the markers by position and filter according -d
 
 print_header("2) Order markers and filter by distance");
 
-my %chr_markers = sort_markers(\%mloc, $opt_d);
+my %chr_markers = sort_markers($mk_loc_href, $opt_d);
+
+## Get all the info
+
+my @chrs = sort keys %chr_markers;
+my @first_marks = sort @{$chr_markers{$chrs[0]}};
+my %first_genotypes = %{$marks{$first_marks[0]}};
+my @indiv = sort keys %first_genotypes;
+
+my $indiv_n = scalar(@indiv);
 
 
 ###############################################################################
 ## PRODUCE THE OUTPUT
 ###############################################################################
 
-print_header("3) Filtering and Printing Output");
+print_header("3) Filtering no biallelic markers");
+
+if ($opt_B) {
+
+    foreach my $mrk_id (sort keys %marks) {
+    
+	my %gnt = %{$marks{$mrk_id}};
+	
+	## Biallelic genotypes exclude 'X' ('C' and 'D' are not used)
+
+	my $x_genotype = 0;
+	foreach my $ind (sort keys %gnt) {
+
+	    my $ind_gnt = $gnt{$ind};
+	    if ($ind_gnt =~ m/^X$/i) {
+	    
+		$x_genotype = 1;
+	    }
+	}
+
+	if ($x_genotype == 1) {
+	
+	    delete($marks{$mrk_id});
+	}
+    }
+}
+else {
+    
+    print STDERR "\tBiallelic filtering disabled.\n\tSkipping Step 3\n";
+}
+my $nmrks_r = scalar(keys %marks);
+my $removed = $nmrks - $nmrks_r;
+print STDERR "\t$removed makers have been filtered (biallelic).\n";
+
+
+print_header("4) Filtering by segregation");
+
+my %segregation = ();
+my %segregation_stats = ();
+    
+## It will classify markers according their segregation ratio
+## It will use a Chi-square rati
+
+my %selected_marks = ();
+
+foreach my $mid (sort keys %marks) {
+
+    my %gnt_count = count_genotypes($marks{$mid});
+    my @genotypes = keys(%gnt_count);
+    my $genotypes_line = "(" . lc(join(",", sort(@genotypes))) . ")";
+    
+    if (exists $segreg{$genotypes_line}) {
+	    
+	my $segregation = $segreg{$genotypes_line};
+	my @segr_value = split(/:/, $segregation);
+	my $total = 0;
+	foreach my $sg (@segr_value) {
+	    
+	    $total += $sg;
+	}
+	my $df = scalar(@segr_value) - 1;
+	
+	## build a segregation hash
+	my $i = 0;
+	my $x2 = 0;
+	
+	my @test = ();
+	
+	foreach my $sg (sort @genotypes) {
+	    
+	    my $obs = $gnt_count{$sg};
+	    my $exp = ($segr_value[$i]/$total) * $indiv_n;
+	    
+	    my $single_x2 = (($obs - $exp)*($obs - $exp))/$exp;
+	    $x2 += $single_x2;
+	    push @test, ($sg, $gnt_count{$sg});
+	    $i++;
+	}    	    
+
+	my $p_value = Statistics::Distributions::chisqrprob($df,$x2);
+	my $testline = join(",", @test);
+
+	if ($p_value > $chisq_pvalue) {
+	    
+	    $segregation{$mid} = $genotypes_line;
+	    $segregation_stats{$genotypes_line}++;
+
+	    if ($opt_s eq $genotypes_line) {
+	    
+		$selected_marks{$mid} = $marks{$mid};
+	    }
+		
+	    # print STDERR "Hypothesis ACCEPTED ($p_value > $chisq_pvalue)";
+	    # print STDERR "($testline) (It is a mendelian pattern)\n";
+	}
+	else {
+	    
+	    $segregation{$mid} = 'None';
+	    $segregation_stats{"None"}++;	
+
+	    # print STDERR "Hypothesis REJECTED ($p_value < $chisq_pvalue)"; 
+	    # print STDERR "($testline) (It is a random distribution)\n"; 
+	}
+    }
+}
+
+print STDERR "\n\tSegregations Stats (Chi Square with p-value=";
+print STDERR "$chisq_pvalue):\n";
+foreach my $sgr (sort keys %segregation_stats) {
+    
+    print STDERR "\t$sgr\t$segregation_stats{$sgr}\n";
+}
+
+if ($opt_s) {
+
+    print STDERR "\n\n\tSegregation filter $opt_s segregation $segreg{$opt_s}\n";
+    my $marks_n = scalar(keys %selected_marks);
+    print STDERR "\t$marks_n markers have been selected ($opt_s)\n";
+}
+else {
+    
+    print STDERR "\tSegregation filtering disabled.\n\tSkipping Step 4\n";
+}
+
+
+print_header("5) Printing Output");
+
+## Only remains to get information about the number of markers
+
+my $marks_n = scalar(keys %selected_marks);
 
 ## First get the info to print the headers.
 
 open my $ofh, '>', $opt_o;
 
-print STDERR "TEST: data type $mtype\n";
+if ($oformat eq 'mapmaker') {
+    
+    print $ofh "data type $mtype\n";
+    
+    print $ofh "$indiv_n $marks_n 0\n\n";
 
-## Get the number of individuals
+    foreach my $chr (@chrs) {
 
-my @pop = ();
-foreach my $ind (sort keys %mgen) {
+	foreach my $mrk (@{$chr_markers{$chr}}) {
+    
+	    if (exists $selected_marks{$mrk}) {
 
-    if ($excluded{$ind}) {
-    
-	## Do nothing, just ignore it
-    }
-    elsif ($a_donors{$ind}) {
-    
-    }
-    elsif ($b_donors{$ind}) {
-    
-    }
-    else {
-    
-	push @pop, $ind;
+		my %genotps = %{$marks{$mrk}};
+		my @genotypes = ();
+		foreach my $ind (@indiv) {
+	
+		    push @genotypes, $genotps{$ind};
+		}
+		my $geno_line = join(" ", @genotypes);
+		print $ofh "*$mrk $geno_line\n";
+	    }
+	}
     }
 }
+elsif ($oformat eq 'jointmap4') {
 
-my $pop_n = scalar(@pop);
-my $marks_n = scalar(keys %mref);
+    ## jointmap has an specific format for the populations
 
-print STDERR "TEST: $pop_n $marks_n 0\n";
+    my %jm4_poptype = (
+	"f2 intercross" => "F2", 
+	"f2 backcross"  => "BC1", 
+	#"f3 self"       => 1, 
+	"ri self"       => "RI2",
+	#"ri sib"        => 1,
+	"dh"            => "DH1",
+	);
 
-foreach my $mrk_id (sort keys %mref) {
+    print $ofh "name = hapmap2maker_pop\n";
+    print $ofh "popt = $jm4_poptype{$mtype}\n";
+    print $ofh "nloc = $marks_n\n\n";
+    print $ofh "nind = $indiv_n\n";
 
-    print STDERR "TEST1: $mrk_id\t$mref{$mrk_id}\n";
+    ## Jointmap can not have marker names with more than 20 characters
+    ## It will change that producing a equivalent list at the end of the 
+    ## file as a comment. 
+    ## ; M00001 BlaBla555501:4009
 
+    my %new_marks = ();
+    my $length_tag = length($marks_n);
+    my $c = 1;
 
+    foreach my $chr (@chrs) {
+
+	foreach my $mrk (@{$chr_markers{$chr}}) {
+    
+	    if (exists $selected_marks{$mrk}) {
+
+		my $new_name = "M" . sprintf("%0".$length_tag."s", $c);
+		$new_marks{$new_name} = $mrk;
+
+		my %genotps = %{$marks{$mrk}};
+		my @genotypes = ();
+		foreach my $ind (@indiv) {
+	
+		    push @genotypes, $genotps{$ind};
+		}
+		my $geno_line = lc(join("", @genotypes));
+
+		if ($segregation{$mrk} eq 'None') {
+		
+		    print $ofh "$new_name\n$geno_line\n";
+		}
+		else {
+		
+		    my $seg =  $segregation{$mrk};
+		    if ($seg eq '(a,b,h)') {
+		    
+			$seg = '(a,h,b)';
+		    }
+
+		    print $ofh "$new_name $seg\n$geno_line\n";
+		}
+
+		$c++;
+	    }
+	}
+    }
+
+    ## this format also keeps individual names
+    print $ofh "\nindividual names:\n\n";
+    my $name_list = join("\n", @indiv);
+    print $ofh "$name_list\n\n\n";
+
+    ## It will print also the list of equivalent loci to the new names
+    foreach my $new_mrk (sort keys %new_marks) {
+    
+	print $ofh "; $new_mrk\t$new_marks{$new_mrk}\n"
+    }
+    
 }
 
-
+print STDERR "\tProduced outfile $opt_o in $oformat format\n";
+print STDERR "\twith $marks_n makers and $indiv_n individuals";
 
 $date = `date`;
 chomp($date);
@@ -462,13 +793,14 @@ sub help {
 
        Hapmap2Mapmaker [-h]  -i <hapmap_inputfile> -o <outputfile>
                        -a <donor_a> -b <donor_b> -t <data_type>
-                       [-k <keys>]
-                       [-e <samples_to_exclude>] [-d <distance_snps>] [-B]
+                       [-k <keys>] [-f <output_format>]
+                       [-e <samples_to_exclude>] [-d <distance_snps>] [-B][-H]
  
     Flags:
 
       -i <hapmap_inputfile>     hapmap input file (mandatory)
       -o <outputfile>           output filename (mandatory)
+      -f <output_format>        outout format: mapmaker (default) or jointmap4
       -a <donor_a>              donor a name(s)(separated by commas) (mandatory)
       -b <donor_b>              donor b name(s)(separated by commas) (mandatory)
       -t <data_type>            data type for mapmaker (ex. f2) (f2 by default)
@@ -536,18 +868,32 @@ sub print_header {
 sub parse_hapmap {
     my $in = shift ||
 	die("ERROR: No inputfile was supplied to parse_hapmap function.\n");
+    my $a_donor_href = shift ||
+	die("ERROR: No A donor was supplied to parse_hapmap function.\n");
+    my $b_donor_href = shift ||
+	die("ERROR: No B donor was supplied to parse_hapmap function.\n");
+    my $excl_href = shift;
+
+    my %excl = ();
+    if ($excl_href && ref($excl_href) eq 'HASH') {
+    
+	%excl = %{$excl_href};
+    }
+    
 
     ## Define the variables
 
-    my %loc = ();
-    my %gen = ();
-    my %ref = ();
+    my %a_donor = %{$a_donor_href};
+    my %b_donor = %{$b_donor_href};
+
+    my %abh_marks = ();
+    my %pos_marks = ();
 
     ## First open the file
 
     open my $ifh, '<', $in;
 
-    my ($H, $h, $bi) = (0,0,0);
+    my ($H, $h) = (0,0);
     if ($opt_V) {
     
 	$H = `cut -f1 $in | wc -l`;
@@ -570,8 +916,8 @@ sub parse_hapmap {
     my $mancnt = scalar(keys %manfields);
    
     my @headers = ();
-    my %smpf = ();
-    my %smpr = ();
+    
+    my @indiv = ();
 
     while(<$ifh>) {
 	
@@ -596,75 +942,163 @@ sub parse_hapmap {
 		    }
 		}
 		else {
-		
-		    $smpf{$head} = $f;
-		    $smpr{$f} = $head;
+
+		    push @indiv, $head;
 		}
 	    }
 
-
-	    if ($opt_V) {
-	    
-		my $samplecnt = scalar(keys %smpf);
-		print STDERR "\n\t$samplecnt genoypes have been found in the ";
-		print STDERR " hapmap file:\n\n";
-		foreach my $smp (sort {$smpf{$a} <=> $smpf{$b}} keys %smpf) {
-		    
-		    print STDERR "\t\t$smp\n";
-		}
-		print STDERR "\n\n";
-	    }
 	}
 	else {
 	
 	    my ($mkid, $alle, $chro, $posi, $stra, $asse, $cent, $prot, 
-		$assy, $pane, $qcco, @geno) = split(/\t/, $_);
-	
-	    ## First check the biallelic filter
+		$assy, $pane, $qcco, @geno) = split(/\t/, $_);		    
 
-	    my @alleles = split(/\//, $alle);
+	    ## Definition of the hash to store the formatted genotypes
 
-	    ## By default it will take as reference the first allele
+	    my %abh_geno = ();
 
-	    $ref{$mkid} = $alleles[0];
-
-	    unless ($opt_B && scalar(@alleles) > 2) { 
-
-		## Add the location information
-
-		if (exists $loc{$chro}) {
+	    ## Now it will get the genotypes per individual
 	    
-		    $loc{$chro}->{$mkid} = $posi;
+	    my %genotypes = ();
+
+	    my $a = 0;
+	    foreach my $ind (@indiv) {
+	    
+      		$genotypes{$ind} = $geno[$a];		
+		$a++;
+	    }
+
+	    ## Identify the donor genotypes and count them
+
+	    my %a_donor_gn = ();
+	    foreach my $a_donor_ind (keys %a_donor) {
+	    
+		if (exists $a_donor_gn{$genotypes{$a_donor_ind}}) {
+		
+		    $a_donor_gn{$genotypes{$a_donor_ind}}++;
 		}
 		else {
-	    
-		    $loc{$chro} = { $mkid => $posi };
-		}
-	    
-		## Add the genotype information
-
-		my $g = 0;
-		foreach my $gn (sort {$a <=> $b} keys %smpr) {
 		
-		    my @genotype = split(//, uc($geno[$g]));
+		    $a_donor_gn{$genotypes{$a_donor_ind}} = 1;
+		}
+	    }
 
-		    if (exists $gen{$smpr{$gn}}) {
-			    
-			$gen{$smpr{$gn}}->{$mkid} = \@genotype;
+	    my @a_donor_gntypes = keys(%a_donor_gn); 
+	    my $a_donor_gn_c = scalar(@a_donor_gntypes);
+
+	    my %b_donor_gn = ();
+	    foreach my $b_donor_ind (keys %b_donor) {
+	    
+		if (exists $b_donor_gn{$genotypes{$b_donor_ind}}) {
+		
+		    $b_donor_gn{$genotypes{$b_donor_ind}}++;
+		}
+		else {
+		
+		    $b_donor_gn{$genotypes{$b_donor_ind}} = 1;
+		}
+	    }
+
+	    my @b_donor_gntypes = keys(%b_donor_gn); 
+	    my $b_donor_gn_c = scalar(@b_donor_gntypes);
+
+	    ## Check if the progenitors meet all the conditions
+	    ## 1) All the A donors are the same (and same for B donors)
+	    ## 2) A donor is different from B donor
+	    ## 3) A and B donors are homozygous
+
+	    my $optimal_donors = 0;
+
+	    ## Check if they are the same
+	    
+	    if ($a_donor_gn_c == 1 && $b_donor_gn_c == 1) {
+		
+		## Check if the A_DONOR != B_DONOR
+
+		if ($a_donor_gntypes[0] ne $b_donor_gntypes[0]) {
+		
+		    ## Check if they are homozygous 
+		    
+		    if ($opt_H) {
+
+			if (is_homozygous($a_donor_gntypes[0])) {
+		    
+			    if (is_homozygous($b_donor_gntypes[0])) {
+		    
+				$optimal_donors = 1;
+			    }		    
+			}
 		    }
 		    else {
-			
-			$gen{$smpr{$gn}} = { $mkid => \@genotype };
-		    }
 		    
-		    $g++;
+			$optimal_donors = 1;
+		    }
 		}
 	    }
-	    else {
+
+	    if ($optimal_donors == 1) {
 	    
-		$bi++;
-	    }
-	}    
+		## Now it will check if each of the individuals is
+		## A, B or H
+
+		foreach my $ind (keys %genotypes) {
+
+		    ## Check that the individual is not excluded
+
+		    unless (exists $excl{$ind}) {
+		
+			unless (exists $a_donor{$ind}) {
+		    
+			    unless (exists $b_donor{$ind}) {
+			
+				my $gtype = '-';
+
+				my @a_donor_n = split(//, $a_donor_gntypes[0]);
+				my @b_donor_n = split(//, $b_donor_gntypes[0]);
+
+				my @het = sort($a_donor_n[0], $b_donor_n[0]);
+				my $het = join("", @het);
+
+				if ($genotypes{$ind} eq $a_donor_gntypes[0]) {
+			    
+				    $gtype = 'A';
+				}
+				elsif ($genotypes{$ind} eq $b_donor_gntypes[0]){
+			    
+				    $gtype = 'B';
+				}
+				elsif ($genotypes{$ind} eq $het) {
+				    
+				    $gtype = 'H';
+				}
+				else {
+				    
+				    $gtype = 'X';
+				}
+			    
+				$abh_geno{$ind} = $gtype;
+			    }
+			}
+		    }
+		}
+
+		## If it meet the optical donor conditions, it will add the
+		## marker to the selection.
+
+		$abh_marks{$mkid} = \%abh_geno;
+
+		## Add the position mark
+
+		if (exists $pos_marks{$chro}) {
+	    
+		    $pos_marks{$chro}->{$mkid} = $posi;
+		}
+		else {
+		    
+		    $pos_marks{$chro} = {$mkid => $posi};
+		}
+	    }	    	    
+	}
 	
 	if ($opt_V) {
 	
@@ -677,14 +1111,91 @@ sub parse_hapmap {
 	print STDERR "\n\n";
     }
     
-    if ($opt_B) {
-    
-	print STDERR "\t$bi markers discarded by biallelic filter\n\n";
-    }
 
-    return (\%loc, \%gen, \%ref);
+    return (\%abh_marks, \%pos_marks);
 }
 
+=head2 is_homozygous
+
+  Usage: if (is_homozygous($snps)) {}
+
+  Desc: Check if a snp is homozygous (if a string has more than one character)
+
+  Ret: 0 or 1
+
+  Args: $snps, a string
+
+  Side_Effects: None
+
+  Example: if (is_homozygous($snps)) {}
+
+=cut
+
+sub is_homozygous {
+    my $snps = shift ||
+	die("ERROR: No snps variable was supplied to is_homozygous().\n");
+
+    ## It will check how many different nt has. If nt=1 is homozygous
+
+    my @snps = split(//, $snps);
+    my %nts = ();
+    foreach my $nt (@snps) {
+	
+	$nts{$nt} = 1;
+    }
+
+    if (scalar(keys %nts) == 1) {
+    
+	return 1;
+    }
+    else {
+    
+	return 0;
+    }
+}
+
+=head2 count_genotypes
+
+  Usage: my %geno_count = count_genotypes($hashref)
+
+  Desc: Count genotypes (values) and return a hash (key=genotypes; values=count)
+
+  Ret: a hash
+
+  Args: $hashref, a hash with key=anything (individuals), value=genotype
+
+  Side_Effects: None
+
+  Example: my %geno_count = count_genotypes($hashref)
+
+=cut
+
+sub count_genotypes {
+    my $geno_href = shift ||
+	die("ERROR: No genotypes hashref. was supplied to count_genotypes()\n");
+
+    if (ref($geno_href) ne 'HASH') {
+    
+	die("ERROR: Variable supplied to count_genotypes is not hashref.\n");
+    }
+
+    my %geno = %{$geno_href};
+
+    my %gcount = ();
+    foreach my $ind (sort keys %geno) {
+    
+	my $gnt = $geno{$ind};
+	if (exists $gcount{$gnt}) {
+	
+	    $gcount{$gnt}++;
+	}
+	else {
+	
+	    $gcount{$gnt} = 1;
+	}
+    }
+    return %gcount;
+}
 
 =head2 sort_markers
 
