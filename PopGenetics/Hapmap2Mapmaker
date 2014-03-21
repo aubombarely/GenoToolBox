@@ -30,7 +30,7 @@ B<outputfile>             output filename (mandatory)
 
 =item -f
 
-B<output_format>          outout format: mapmaker (default) or jointmap4
+B<output_format>          outout format: mapmaker (default), csv or jointmap4
 
 =item -a
 
@@ -254,7 +254,8 @@ my $a_donor_line = $opt_a ||
 
 my %oformats = (
     'jointmap4' => 1,
-    'mapmaker'  => 1
+    'mapmaker'  => 1,
+    'csv'       => 1
     );
 
 my $oformat = 'mapmaker';
@@ -489,63 +490,66 @@ my %segregation_stats = ();
 
 my %selected_marks = ();
 
-foreach my $mid (sort keys %marks) {
+foreach my $chr (@chrs) {
 
-    my %gnt_count = count_genotypes($marks{$mid});
-    my @genotypes = keys(%gnt_count);
-    my $genotypes_line = "(" . lc(join(",", sort(@genotypes))) . ")";
+    foreach my $mid (@{$chr_markers{$chr}}) {
+
+	my %gnt_count = count_genotypes($marks{$mid});
+	my @genotypes = keys(%gnt_count);
+	my $genotypes_line = "(" . lc(join(",", sort(@genotypes))) . ")";
     
-    if (exists $segreg{$genotypes_line}) {
+	if (exists $segreg{$genotypes_line}) {
 	    
-	my $segregation = $segreg{$genotypes_line};
-	my @segr_value = split(/:/, $segregation);
-	my $total = 0;
-	foreach my $sg (@segr_value) {
+	    my $segregation = $segreg{$genotypes_line};
+	    my @segr_value = split(/:/, $segregation);
+	    my $total = 0;
+	    foreach my $sg (@segr_value) {
 	    
-	    $total += $sg;
-	}
-	my $df = scalar(@segr_value) - 1;
-	
-	## build a segregation hash
-	my $i = 0;
-	my $x2 = 0;
-	
-	my @test = ();
-	
-	foreach my $sg (sort @genotypes) {
-	    
-	    my $obs = $gnt_count{$sg};
-	    my $exp = ($segr_value[$i]/$total) * $indiv_n;
-	    
-	    my $single_x2 = (($obs - $exp)*($obs - $exp))/$exp;
-	    $x2 += $single_x2;
-	    push @test, ($sg, $gnt_count{$sg});
-	    $i++;
-	}    	    
-
-	my $p_value = Statistics::Distributions::chisqrprob($df,$x2);
-	my $testline = join(",", @test);
-
-	if ($p_value > $chisq_pvalue) {
-	    
-	    $segregation{$mid} = $genotypes_line;
-	    $segregation_stats{$genotypes_line}++;
-
-	    if ($opt_s eq $genotypes_line) {
-	    
-		$selected_marks{$mid} = $marks{$mid};
+		$total += $sg;
 	    }
-		
-	    # print STDERR "Hypothesis ACCEPTED ($p_value > $chisq_pvalue)";
-	    # print STDERR "($testline) (It is a mendelian pattern)\n";
-	}
-	else {
+	    my $df = scalar(@segr_value) - 1;
+	
+	    ## build a segregation hash
+	    my $i = 0;
+	    my $x2 = 0;
+	
+	    my @test = ();
+	
+	    foreach my $sg (sort @genotypes) {
 	    
-	    $segregation{$mid} = 'None';
-	    $segregation_stats{"None"}++;	
+		my $obs = $gnt_count{$sg};
+		my $exp = ($segr_value[$i]/$total) * $indiv_n;
+		
+		my $single_x2 = (($obs - $exp)*($obs - $exp))/$exp;
+		$x2 += $single_x2;
+		push @test, ($sg, $gnt_count{$sg});
+		$i++;
+	    }    	    
 
-	    # print STDERR "Hypothesis REJECTED ($p_value < $chisq_pvalue)"; 
-	    # print STDERR "($testline) (It is a random distribution)\n"; 
+	    my $p_value = Statistics::Distributions::chisqrprob($df,$x2);
+	    my $testline = join(",", @test);
+
+	    if ($p_value > $chisq_pvalue) {
+	    
+		$segregation{$mid} = $genotypes_line;
+		$segregation_stats{$genotypes_line}++;
+
+		if ($opt_s eq $genotypes_line) {
+		    
+		    $selected_marks{$mid} = $marks{$mid};
+		}
+		
+		# print STDERR "Hypothesis ACCEPTED ($p_value > $chisq_pvalue)";
+		# print STDERR "($testline) (It is a mendelian pattern)\n";
+	    }
+	    else {
+	    
+		$segregation{$mid} = 'None';
+		$segregation_stats{"None"}++;	
+
+		# print STDERR "Hypothesis REJECTED ($p_value < $chisq_pvalue)";
+		# print STDERR "($testline) (It is a random distribution)\n"; 
+	    }
 	}
     }
 }
@@ -628,13 +632,15 @@ elsif ($oformat eq 'jointmap4') {
 
     my %new_marks = ();
     my $length_tag = length($marks_n);
-    my $c = 1;
+    my $c = 0;
 
     foreach my $chr (@chrs) {
 
 	foreach my $mrk (@{$chr_markers{$chr}}) {
     
 	    if (exists $selected_marks{$mrk}) {
+
+		$c++;
 
 		my $new_name = "M" . sprintf("%0".$length_tag."s", $c);
 		$new_marks{$new_name} = $mrk;
@@ -660,12 +666,12 @@ elsif ($oformat eq 'jointmap4') {
 		    }
 
 		    print $ofh "$new_name $seg\n$geno_line\n";
-		}
-
-		$c++;
+		}		
 	    }
 	}
     }
+
+    $marks_n = $c;
 
     ## this format also keeps individual names
     print $ofh "\nindividual names:\n\n";
@@ -676,8 +682,74 @@ elsif ($oformat eq 'jointmap4') {
     foreach my $new_mrk (sort keys %new_marks) {
     
 	print $ofh "; $new_mrk\t$new_marks{$new_mrk}\n"
-    }
+    }   
+}
+elsif ($oformat eq 'csv') {
+
+    ## CSV format (used by R/qtl) contains:
+    ## column 1..X: Phenotypes, at least one.
+    ## column X+1..Y: Markers
+    ## row 1: Phenotypes and marker names
+    ## row 2: Chromosomes numbers (empty at phenotypes columns). Use X for x 
+    ##        chromosome. It will use chromosome 1 for everything
+    ## row 3: distances in cM. It will omit this column
+    ## row 4: individuals coded as A, B, H
+    ## it will add an initial description with comments
+   
+    #print $ofh "## population type = $mtype\n";
+    #print $ofh "## loci number = $marks_n\n";
+    #print $ofh "## individual number = $indiv_n\n";
+
+    ## Now the structure will be by row where each row is an individual
+
+    ## create the ind hash
+
+    my %csv_indrow = ();
+    my $idx = 0;
+    foreach my $ind (@indiv) {
     
+	$csv_indrow{$ind} = [$idx]; ## It will add one of the fake phenotype
+	$idx++;
+    }
+
+    my @header_list = ('phenotype');
+    my @fake_chrom = ('');
+    my @fake_dist = ('');
+    my $n = 0;
+    
+    foreach my $chr (@chrs) {
+
+	foreach my $mrk (@{$chr_markers{$chr}}) {	    	    
+
+	    if (exists $selected_marks{$mrk}) {
+
+		push @header_list, $mrk;
+		push @fake_chrom, 1;
+		push @fake_dist, $n;
+
+		my %genotps = %{$marks{$mrk}};
+
+		foreach my $ind (@indiv) {
+	
+		    push @{$csv_indrow{$ind}}, $genotps{$ind};
+		}
+		$n++;
+	    }	    
+	}
+    }
+
+    $marks_n = $n;
+
+    my $header_line = join(",", @header_list);
+    my $chromo_line = join(",", @fake_chrom);
+    my $distan_line = join(",", @fake_dist);
+    print $ofh "\n$header_line\n$chromo_line\n$distan_line\n";
+
+    foreach my $ind (@indiv) {
+    
+	my $genot_line = join(",", @{$csv_indrow{$ind}});
+	print $ofh "$genot_line\n";
+    }
 }
 
 print STDERR "\tProduced outfile $opt_o in $oformat format\n";
