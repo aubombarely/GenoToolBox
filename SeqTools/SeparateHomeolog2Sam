@@ -169,6 +169,9 @@ print STDERR "\n\n##################################################\n";
 print STDERR "## SeparateHomeolog2Sam script begins.          ##\n";
 print STDERR "##################################################\n\n";
 
+my $print_prefix = join("\n\t", @prefix);
+print STDERR "Used prefixes:\n\t$print_prefix\n\n";
+
 open my $samio, '<', $sam;
 my $S = `wc -l $sam`;
 chomp($S);
@@ -216,7 +219,7 @@ while (<$samio>) {
 	my @f = split(/\t/, $_);
 	
 	foreach my $pr (@prefix) {
-	
+
 	    if ($f[2] =~ m/^$pr/) {
 
 		my $selection = 0;
