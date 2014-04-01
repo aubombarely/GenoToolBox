@@ -13,7 +13,7 @@
                        [-i <extract_by_id>] [-l <extract_by_length>] 
                        [-r <extract_by_regexp>]
                        [-c <extract_by_composition>]
-                       [-v] [-C] [-O] [-R] [-I] [-S]
+                       [-v] [-C] [-O] [-R] [-I] [-S] [-U]
 
 =head2 I<Flags:>
 
@@ -66,6 +66,10 @@ B<revcom>                 return reverse complemetary of the sequence
 =item -S
 
 B<one_file_per_read>      split the output to one file per read
+
+=item -U
+
+B<select_unique>          select unique (remove redundancy if there is any)
 
 =item -v
 
@@ -140,10 +144,11 @@ use Bio::SeqUtils;
 use Bio::Tools::IUPAC;
 
 our ($opt_f, $opt_o, $opt_i, $opt_l, $opt_c, $opt_r, $opt_v, $opt_C, $opt_O,
-     $opt_I, $opt_R, $opt_S, $opt_h);
-getopts("f:o:i:l:c:r:vCOIRSh");
+     $opt_I, $opt_R, $opt_S, $opt_U, $opt_h);
+getopts("f:o:i:l:c:r:vCOIRSUh");
 if (!$opt_f && !$opt_o && !$opt_i && !$opt_l && !$opt_c && !$opt_r && !$opt_v 
-    && !$opt_C && !$opt_O && !$opt_I && !$opt_R && !$opt_S && !$opt_h) {
+    && !$opt_C && !$opt_O && !$opt_I && !$opt_R && !$opt_S && !$opt_U && 
+    !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -328,6 +333,8 @@ unless (defined $opt_S) {
 }
 
 my $s = 0;
+my %selected = ();
+
 while (my $seqobj = $inio->next_seq()) {
     
     $s++;
@@ -415,6 +422,11 @@ while (my $seqobj = $inio->next_seq()) {
 	$sel =~ s/2/1/;
     }
 
+    if ($opt_U && exists $selected{$id}) {
+    
+	$sel = 0;
+    }
+
     ## If the sequence was selected, it will printed
 
     if ($sel == 1) {
@@ -493,6 +505,8 @@ while (my $seqobj = $inio->next_seq()) {
 	    }
 	    $c++;
 	}
+
+	$selected{$id} = 1;
     }
 }
 
