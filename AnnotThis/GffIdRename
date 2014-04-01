@@ -1099,7 +1099,7 @@ sub rename_exoncds {
     ## Fifth get a temporal counter for the feature
 
     my $counter = $count;
-    my $type = lc($submrna[2]);
+    my $type = lc($submrna[1]);
 
     if (scalar(@submrna) == 3) {
     
