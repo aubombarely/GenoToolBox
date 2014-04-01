@@ -440,9 +440,9 @@ foreach my $chr (sort keys %chr_markers) {
 
 	if ($opt_C) {
 	
-	    print $ofh, "0\n";
+	    print $ofh "0\n";
 	}
-	print $ofh, "$indv_count\n$mark_count\n";
+	print $ofh "$indv_count\n$mark_count\n";
 
 	## It needs the P position
 
@@ -455,8 +455,8 @@ foreach my $chr (sort keys %chr_markers) {
 	    push @sline, 'S';
 	}
 
-	print $ofh, join(" ", @pos) . "\n";
-	print $ofh, join(" ", @sline) . "\n";
+	print $ofh join(" ", @pos) . "\n";
+	print $ofh join(" ", @sline) . "\n";
     }
 
     foreach my $ind (sort keys %mgen) {
@@ -565,21 +565,21 @@ foreach my $chr (sort keys %chr_markers) {
 	    $m++;
 	}
 
-	## At this point there si an array with the genotypes
+	## At this point there is an array with the genotypes
 
 	if ($opt_P) {
 	
-	    print $ofh, "#$ind\n";
+	    print $ofh "#$ind\n";
 	    foreach my $genoline (@genotypes) {
 	    
-		print $ofh, join("", @{$genoline}) . "\n";
+		print $ofh join("", @{$genoline}) . "\n";
 	    }
 	}
 	elsif ($opt_C) {
 	    
 	    foreach my $genoline (@genotypes) {
 	    
-		print $ofh, join("", @{$genoline}) . "\n";
+		print $ofh join("", @{$genoline}) . "\n";
 	    }
 	}
 	else {
@@ -799,7 +799,7 @@ sub help {
     Flags:
 
       -i <hapmap_inputfile>       hapmap input file (mandatory)
-      -o <structure_outputfile>   structure output filename (mandatory)
+      -o <fastalike_outputfile>   fasta like output filename (mandatory)
       -r <reference_name>         reference name for biallelic markers
       -B <biallelic_filter>       filter out the non biallelic genotypes.
       -L <logic_output>           use logic (0, 1) genotypes for output
