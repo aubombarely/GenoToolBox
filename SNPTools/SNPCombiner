@@ -1,0 +1,773 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use autodie;
+
+use Config;
+use threads;
+
+use Getopt::Long;
+use Pod::Usage;
+use List::Util 'shuffle';
+use Statistics::Basic qw(:all);
+use Math::BigFloat;
+
+
+
+Getopt::Long::Configure ("bundling");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+## Get the arguments and check them
+
+## Running options
+my $threads = 1;
+
+## Input options:
+my @vcfs = ();
+my @beds = ();
+my @grps = ();
+my $sample_size = '';
+
+## SNP Filter options:
+my $mincov = '';
+my $maxcov = '';
+my $minquality = '';
+my $mindistance = '';
+my $maxdistance = '';
+my $percmissing = 0;
+my $biallelic = '';
+my $dinamic_cov = '';
+my %vcftag_filter = ();
+    
+## Output options
+my $outbase = 'snp_combiner_out';
+my $outtype = "regular";
+
+## Message options
+my $usage = 0;
+my $help = 0;
+my $manual = 0;
+my $verbose = 0;
+
+
+GetOptions(
+
+    ## Running options
+    'p|process|threads:i'       => \$threads,
+
+    ## Input options:
+    'v|vcf=s'                   => \@vcfs, 
+    'b|bed=s'                   => \@beds,
+    'g|groups:s'                => \@grps,
+    's|sample_size:i'           => \$sample_size,
+
+    ## SNP Filter options:
+    'c|min_depth|min_coverage:i' => \$mincov,
+    'C|max_depth|max_coverage:i' => \$maxcov,
+    'q|min_quality:i'            => \$minquality,
+    'd|min_distance:i'           => \$mindistance,
+    'D|max_distance:i'           => \$maxdistance,
+    'm|percent_missing:i'        => \$percmissing, 
+    'B|biallelic!'               => \$biallelic,
+    'n|dinamic_coverage:i'       => \$dinamic_cov,
+    'f|vcftag_filter:s%'         => \%vcftag_filter,
+    
+    ## Output options
+    'o|out|output:s'             => \$outbase,
+    't|type_output:s'            => \$outtype,
+
+    ## Message options
+    'usage!'                     => \$usage,
+    'H|h|help!'                  => \$help,
+    'manual|man!'                => \$manual,
+    'V|verbose!'                 => \$verbose,  
+    );
+
+## To set up multiple values as comma separated
+@vcfs = split(/,/,join(',',@vcfs));
+@beds = split(/,/,join(',',@beds));
+@grps = split(/\),\(/,join("),(",@grps));
+
+if ($usage) {
+    pod2usage(-verbose => 0, -exitval => 0);
+}
+elsif ($help) {
+    pod2usage(-verbose => 1, -exitval => 0);
+}
+elsif ($manual) {
+    pod2usage(-verbose => 2, -exitval => 0);
+}
+elsif (scalar(@vcfs) == 0 or scalar(@beds) == 0) {
+    pod2usage(
+	-verbose => 0, 
+	-exitval => 0, 
+	-message => 
+	"\n\nERROR: -v <tag=vcf> and -b <tag=bed> are mandatory arguments.\n",
+	);
+}
+
+
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## MultiVcfTool Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+print_header("0) Checking arguments");
+
+## Define the hashes to store the files
+my %vcfs = ();
+my %beds = ();
+my %groups = ();
+
+print STDERR "\tINPUT VCF FILES:\n";
+foreach my $vcfline (@vcfs) {
+    
+    my @fields = split(/=/, $vcfline);
+    if (scalar(@fields) == 2) {
+	$vcfs{$fields[0]} = $fields[1];
+	print STDERR "\t\t$fields[0]:\t$fields[1]\n";
+    }
+    else {
+    
+	die("\nERROR: -vcf $vcfline doesn't have the format tag=file\n");
+    }
+}
+print STDERR "\n\tINPUT BED FILES:\n";
+foreach my $bedline (@beds) {
+    
+    my @fields2 = split(/=/, $bedline);
+    if (scalar(@fields2) == 2) {
+
+	if (exists $vcfs{$fields2[0]}) {
+	    $beds{$fields2[0]} = $fields2[1];
+	    print STDERR "\t\t$fields2[0]:\t$fields2[1]\n";
+	}
+	else {
+	    die("\nERROR: -b $fields2[0] doesn't exists in vcf file list.\n");
+	}
+    }
+    else {
+    
+	die("\nERROR: --bed $bedline doesn't have the format tag=file\n");
+    }
+}
+
+## Check that all the vcf and bed tags are the same
+
+my @vcftags = sort(keys %vcfs);
+my @bedtags = sort(keys %beds);
+
+my @missing_vcftags = ();
+foreach my $vcftag (keys %vcfs) {
+
+    unless (exists $beds{$vcftag}) {
+    
+	push @missing_vcftags, $vcftag;
+    }
+} 
+
+if (scalar(@missing_vcftags) > 0) {
+
+    my $missedtags = join(",", @missing_vcftags);
+    die("\nERROR: missing tags ($missedtags) for --bed option\n\n");
+}
+
+print STDERR "\n\tGROUPS:\n";
+if (scalar(@grps) > 0) {
+    
+    foreach my $grp (@grps) {
+    
+	my @fields3 = split(/=/, $grp);
+	if (scalar(@fields3) == 2) {
+
+	    ## Remove the parenthesis
+	    $fields3[1] =~ s/\(//;
+	    $fields3[1] =~ s/\)//;
+
+	    my @members = split(/,/, $fields3[1]);
+	    foreach my $mb (@members) {
+	    
+		if (exists $vcfs{$mb}) {
+		    $groups{$mb} = $fields3[3];
+		    print STDERR "\t\tMEMBER: $mb\tGROUP: $fields3[0]\n";
+		}	    
+		else {
+		    die("\nERROR: member $mb doesn't exists in vcf list.\n");
+		}
+	    }
+	}
+	else {
+	
+	    die("\nERROR: --groups $grp doesn't have the format tag=file\n");
+	}
+    }
+}
+else {
+    
+    foreach my $vcftag (@vcftags) {
+    
+	$groups{$vcftag} = $vcftag;
+	print STDERR "\t\tMEMBER: $vcftag\tDEFAULT GROUP: $vcftag\n";
+    }
+}
+
+print STDERR "\n\n\tOUTPUT BASENAME:     $outbase\n";
+
+my @out = split(':', $outtype);
+my %valid_out = (
+    'regular'     => 1,
+    'by_sequence' => 1,
+    'by_binsize'  => [],
+    'random'      => []
+    );
+
+unless (exists $valid_out{$out[0]}) {
+
+    die("\nERROR: -t $outtype is not a valid output type. Check manual.\n\n");
+}
+else {
+
+    if ($out[0] eq 'by_binsize') {
+    
+	$valid_out{'by_binsize'} = [$out[1]];
+    }
+    elsif ($out[0] eq 'random') {
+
+	$valid_out{'by_binsize'} = [split(/,/, $out[1])];
+    }
+    print STDERR "\tOUTPUT TYPE:         $outtype\n\n";
+}
+
+print STDERR "\tTHREADS: $threads\n\n";
+
+###############################################################################
+## CHECK FILTERS
+###############################################################################
+
+my %filters = (
+    'MIN. READ COVERAGE' => $mincov,
+    'MAX. READ COVERAGE' => $maxcov,
+    'MIN. SNP QUALITY'   => $minquality,
+    'MIN. SNP DISTANCE'  => $mindistance,
+    'MAX. SNP DISTANCE'  => $maxdistance,
+    'MAX. %MISSING DATA' => $percmissing, 
+    'ONLY BIALLELIC'     => $biallelic,
+    'DINAMIC COVERAGE'   => $dinamic_cov,
+    );
+
+foreach my $key (sort {$b cmp $a} keys %filters) {
+
+    my @pline = sprintf("%-20s", $key . ":");
+    if ($filters{$key}) {
+    
+	push @pline, sprintf("%-20s", $filters{$key});
+	push @pline, sprintf("%10s", "[Enabled]");
+	
+    }
+    else {
+	
+	push @pline, sprintf("%-20s", "NA");
+	push @pline, sprintf("%10s", "[Disabled]");
+    }
+    my $pline = join(" ", @pline);
+    print STDERR "\t$pline\n";
+}
+
+if (scalar(keys %vcftag_filter) > 0) {
+
+    my @pline = sprintf("%-20s", "EXTRA VCF FILTER:");
+    my @vcff = ();
+    foreach my $vcfk (sort(keys %vcftag_filter)) {
+    
+	push @vcff, $vcfk . "=" . $vcftag_filter{$vcfk};
+    }
+    my $val = join(";", @vcff);
+    push @pline, sprintf("%-20s", $val);
+    push @pline, sprintf("%10s", "[Enabled]");
+    my $pline = join(" ", @pline);
+    print STDERR "\t$pline\n";
+
+}
+else {
+
+    my @pline = sprintf("%-20s", "EXTRA VCF FILTER:");
+    push @pline, sprintf("%-20s", "NA");
+    push @pline, sprintf("%10s", "[Disabled]");
+    my $pline = join(" ", @pline);
+    print STDERR "\t$pline\n";
+}
+
+###############################################################################
+## 1) ANALYZE THE COVERAGE PARSE COVERAGE FILES
+###############################################################################
+##
+## The analysis of the coverage is made to check the coverage distribution
+## and to set up the filter for --dinamic_coverage if this is used
+## 
+## To speed up the process --sample_size can be used
+
+print_header("1) Analyzing Coverage");
+
+my %covstats = multithread_coverage_stats(\%beds, $threads, $sample_size);
+print_table(\%covstats);
+
+my %cov_range = ();
+
+if ($dinamic_cov) {
+
+    print STDERR "\n\tSetting up coverage range based coverage distribution.\n";
+    %cov_range = coverage_range(\%covstats, $dinamic_cov, $mincov, $maxcov);
+    print_table(\%cov_range, 1);
+    print STDERR "\n";
+}
+
+
+###############################################################################
+## 2) PARSE THE VCF FILES
+###############################################################################
+##
+## Now the program will parse the VCF files. This can be done
+## in parallel.
+##
+## Each of the files will return a hash with the SNP data
+## There are several filters that can be applied during the parsing:
+##   + SNP QUALITY (6th column of a VCF file)
+##   + SNP READ COVERAGE (tag DP, 8th column)
+##   + EXTRA VCF FILTERS
+##
+## SNP distance could be also filtered if the VCF file is in order but the
+## script doesn't assume the order of the VCF file
+##
+## Structure of the data
+##   %Genotypes = ( $markerID => { $sample     => $genotype } )
+##   %Markers   = ( $markerID => { 'position'  => $pos, 'seqID' => $seqID })
+##
+##   It also will load the markers to be able to sorted them
+##   %Map = ( $seqID => { $pos => $markerID })
+
+
+
+print_header("2) Parsing VCF files");
+
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+sub print_table {
+    my $hashref = shift;
+    my $rev = shift;
+    my %hash = %{$hashref};
+
+    my $sep = " " x 8 . "-" x 52;
+    my @line = ($sep);
+
+    ## Get the header
+
+    my $header_line = sprintf("%20s", "TAG");
+    my @tags = sort(keys(%hash));
+    my @fields = sort(keys(%{$hash{$tags[0]}}));
+    if ($rev ) {
+	@fields = reverse(@fields);
+    }
+
+    foreach my $key (@fields) {
+    
+	$header_line .= sprintf("%20s", uc($key));
+    }
+    push @line, $header_line;
+    push @line, $sep;
+
+    ## Add the data
+
+    foreach my $key (sort(keys %hash)) {
+
+	my $data =  sprintf("%20s", $key);
+	foreach my $f (@fields) {
+	    $data .= sprintf("%20s", $hash{$key}->{$f}); 
+	}
+	push @line, $data
+    }
+    push @line, $sep;
+
+    my $ptable = join("\n", @line);
+    print STDERR "\n$ptable\n";
+}
+
+sub multithread_coverage_stats {
+    my $bed_href = shift ||
+	die("\nERROR: No bed hashref was supplied to multithread_covstats.\n");
+    my $threads = shift;
+    
+    my $sample_size = shift;
+
+    unless (ref($bed_href) eq 'HASH') {
+    
+	die("\nERROR: hashref supplied to multithread_covtstats isnt HREF\n");
+    }
+
+    ## Define the variables
+
+    my %beds = %{$bed_href};    
+    my %cov = ();
+
+    ## It will cluster the jobs per package depending of the number of
+    ## threads, for example, if there are 20 files and 10 threads, it will
+    ## create two packages of 10 files.
+
+    my %packages = ();
+    my ($p, $f) = (0, 0);
+    
+    foreach my $tag (sort keys %beds) {
+    
+	$f++;
+	if ($f <= $threads) {
+	
+	    $packages{$p}->{$tag} = $beds{$tag}; 
+	}
+	else {
+	    
+	    $p++;
+	    $f = 1;
+	    $packages{$p} = {$tag => $beds{$tag}};	
+	}
+    }
+	
+    if ($verbose) {
+    
+	my $npacks = scalar(keys %packages);
+	print STDERR "\tParsing work divided in $npacks packages\n\n";
+    }
+
+    ## Now that it has X packages it will run them
+
+    my $pck  = 0;
+    foreach my $pack (sort {$a <=> $b} keys %packages) {
+	
+	$pck++;
+	my $j = 0;
+	my %th_procs = ();
+
+	my %jobs = %{$packages{$pack}};
+
+	foreach my $tag (sort keys %jobs) {
+
+	    $j++;
+	    my $bedfile = $jobs{$tag};
+	    my $th_proc = threads->create(
+		\&get_covstats_from_file, $bedfile, $sample_size
+		);
+	    $th_procs{$tag} = $th_proc;
+	}
+
+	foreach my $tag (sort keys %th_procs) {
+	
+	    my $th_proc = $th_procs{$tag};
+	    my $th_id = $th_proc->tid();
+	    my $th_res = $th_proc->join();
+
+	    unless (defined($th_res)) {
+		warning("\tExecution error for thread $th_id\n");
+		my $error = $th_proc->error();
+		print "\n===== ERROR $th_id =====\n$error\n================\n";
+	    }
+
+	    ## Calculate the mean and the median and add to the %cov
+
+	    $cov{$tag}->{mean} = mean($th_res);
+	    $cov{$tag}->{stddev} = stddev($th_res);
+	}
+    }
+    
+    return %cov;
+}
+
+
+sub get_covstats_from_file {
+    my $bedfile = shift;
+    my $sample_size = shift;
+
+    my $l = 0;
+    my $L = 0;
+	
+    if (!$sample_size) {
+	
+	$sample_size = `grep -vc '#' $bedfile`;
+	chomp($sample_size);
+    }
+    $L = $sample_size;
+	
+    if ($verbose) {
+		    
+	print STDERR "\n\tParsing file: $bedfile ($L lines)\n\n";
+    } 
+
+    ## Define the list of read depth values
+    my @readdepths = ();
+
+    open my $bed_fh, '<', $bedfile;
+	
+    while((my $line = <$bed_fh>) && $l < $sample_size) {
+	
+	chomp($line);
+	my @fields = split(/\t/, $line);
+	
+	## To make compatible with simple coverage files (not bed)
+	## it will take 3 columns (SeqID, Position, Depth) or 5 columns
+	## (SeqID, FeatureSeq_Start (0-based), FeatureSeq_End (1-based), 
+	## Position, Depth).
+	
+	unless ($line =~ m/#/) {            ## Ignore the lines with pounds
+	    
+	    $l++;
+	    if ($verbose && $threads == 1) {
+		
+		print STDERR "\tParsing line: $l of $L         \r";
+	    }
+
+	    my ($seqid, $pos, $depth);
+	    
+	    if (scalar(@fields) == 5) {
+		
+		$seqid = $fields[0];
+		$pos = $fields[3];
+		$depth = $fields[4];
+	    }
+	    elsif (scalar(@fields) == 3) {
+		
+		$seqid = $fields[0];
+		$pos = $fields[1];
+		$depth = $fields[2];
+	    }
+	    else {
+		
+		warn("Line $l from $bedfile file doesnt have 5 cols\n");
+	    }
+
+	    push @readdepths, $depth;	    
+	}
+    }
+    close($bed_fh);
+
+    if ($verbose) {
+
+	print STDERR "\n\tFile $bedfile has been parsed\n\n";
+    }    
+
+    ## It will return the array ref. to avoid problem wih the threads
+
+    return(\@readdepths);
+}
+
+
+
+sub coverage_range {
+    my $covstats_href = shift ||
+	die("ERROR: No coverage stats hashref was supplied to coverage_range");
+    my $dinamicov = shift;
+    my $mincov = shift;
+    my $maxcov = shift;
+
+    ## Define the variables
+    my %rangecov = ();
+    my %covstats = %{$covstats_href};
+
+    foreach my $tag (sort keys %covstats) {
+	
+	my $mean = $covstats{$tag}->{mean};
+	my $stddev = $covstats{$tag}->{stddev};
+
+	## get the min. coverage
+
+	my $d_mincov = $mean - ($stddev * $dinamic_cov); 
+	my $bigf_mincov = Math::BigFloat->new($d_mincov);
+	my $dinamic_mincov = $bigf_mincov->bfround(0);
+	
+	## dinamic values always will be overwritten by the parameters
+
+	if ($mincov) {
+
+	    $dinamic_mincov = $mincov;
+	}
+	elsif ($dinamic_mincov < 0) {
+	
+	    $dinamic_mincov = 0;
+	}
+
+	## get the max. coverage
+
+	my $d_maxcov = $mean + ($stddev * $dinamic_cov); 
+	my $bigf_maxcov = Math::BigFloat->new($d_maxcov);
+	my $dinamic_maxcov = $bigf_maxcov->bfround(0);
+
+	if ($maxcov) {
+
+	    $dinamic_maxcov = $maxcov;
+	}
+
+	$rangecov{$tag} = { 
+	    'min. coverage' => $dinamic_mincov,
+	    'max. coverage' => $dinamic_maxcov
+	}
+    }
+
+    return %rangecov;
+}
+
+
+__END__
+
+=head1 NAME
+
+ SNPCombiner
+ Tool to combine and manipulate SNPs in VCF format
+
+=head1 SYNOPSIS
+
+ SNPCombiner [options] -v <tag1=vcf> -b <tag1=bed> 
+
+ Options:
+  -g group1=tag1  group tags                        [optional]
+  -s int          sample size                       [optional]
+  -c int          min. coverage                     [optional]      
+  -C int          max. coverage                     [optional]
+  -n int          mean +/-stdev * n coverage range  [optional]
+  -q int          min. call quality                 [optional]
+  -d int          min. distance                     [optional]
+  -D int          max. distance                     [optional]
+  -m int          % missing ind.                    [default:0]
+  -B              only biallelic                    [optional]
+  -f tag=value    vcftag filter                     [optional]
+  -o string       out base name                     [default:snp_combine_out]
+  -t string       output type                       [default:regular]
+  -H              print help
+  --manual        access to the manual                
+
+=head1 EXAMPLE
+
+ SNPCombiner --vcf S1=s1.vcf,S2=s2.vcf,S3=s3.vcf,S4=s4.vcf 
+             --bed S1=s1.cov,S2=s2.cov,S3=s3.cov,S4=s4.cov 
+             --groups G1=(S1,S2),G2=(S3,S4)
+             --out multivcf_out
+             --min_coverage 5
+
+=head1 OPTIONS
+
+=over
+
+=item -v|--vcf
+
+B<tag=vcf_file>      Input VCF files as TAG1=file with SNP data (mandatory)
+
+=item -b|--bed
+
+B<tag=bed_file>      Input BED files as TAG1=file with coverage data (mandatory)
+
+=item -g|--groups 
+
+B<group=tag1,tag2>   Groups for each of the samples (optional; none by default)
+
+=item -s|--sample_size
+
+B<sample_size>       Size of the sample to analyze coverage (default: wholefile)
+
+=item -c|--min_depth|--min_coverage
+
+B<min_coverage>      Minimum read coverage used to select a SNP (optional)
+
+=item -C|--max_depth|--max_coverage
+
+B<max_coverage>      Maximum read coverage used to select a SNP (optional)
+
+=item -q|--min_quality
+
+B<min_coverage>      Minimum SNP quality used to select a SNP (optional)
+
+=item -n|--dinamic_coverage
+
+B<dinamic_coverage>  Create a coverage range for each sample (optional)
+                     (mean +/- std * dinamic coverage integer)
+
+=item  -d|--min_distance
+
+B<min_distance>      Min. distance (bp) between SNPs to be selected (optional)
+     
+=item -D|--max_distance
+
+B<max_distance>      Max. distance (bp) between SNPs to be selected (optional)
+
+=item -m|--percent_missing
+
+B<perc_missing>      Percentage of missing data allowed (0 by default)
+
+=item  -B|--biallelic
+
+B<biallelic_switch>  Select only biallelic markers (None by default)
+
+=item -f|--vcftag_filter
+    
+B<vcftag=value>      Min. value for a VCF tag (e.g. AB=0) (None by default)
+
+=item -o|--out|--output
+
+B<output>            Output base name (snp_combine_out by default)
+
+=item -t|--type_output
+
+B<type>              Output type ("by_sequence","by_binsize:x","random:x,y")
+
+=item -H|--help|--usage|--manual|--man
+
+B<switch_help>       Print this help
+
+=item -V|--verbose 
+
+B<switch_verbose>    Print more information during the program execution
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script parse multiple vcf files and creates a common HapMap file. 
+ 
+ Available filters: -d (min. read depth for the SNP position)
+                    -D (max. read depth for the SNP position)
+                    -q (min. SNP score)
+                    -H (filter out positions where N.alleles > Polyploidy x 2
+                    -l (select only markers from id list)
+                    -e (exclude markers from the specified SeqID or chromosomes)
+
+ Available output types: 
+  + "regular" (default): One HapMap file with all the sequences and markers.
+  + "by_sequence": One HapMap file per sequence (e.g. chromosomes)
+  + "by_binsize:x": One HapMap file per bin with x bp size.
+  + "random:x,y": y HapMap files with x markers per file selected randomly  
+
+ 
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
