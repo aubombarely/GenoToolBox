@@ -153,7 +153,6 @@ foreach my $bedline (@beds) {
 	}
     }
     else {
-    
 	die("\nERROR: --bed $bedline doesn't have the format tag=file\n");
     }
 }
@@ -202,8 +201,7 @@ if (scalar(@grps) > 0) {
 		}
 	    }
 	}
-	else {
-	
+	else {	
 	    die("\nERROR: --groups $grp doesn't have the format tag=file\n");
 	}
     }
@@ -314,7 +312,7 @@ else {
 
 print_header("1) Analyzing Coverage");
 
-my %covstats = multithread_coverage_stats(\%beds, $threads, $sample_size);
+my %covstats = multithread_covstats(\%beds, $threads, $sample_size);
 print_table(\%covstats);
 
 my %cov_range = ();
@@ -325,6 +323,17 @@ if ($dinamic_cov) {
     %cov_range = coverage_range(\%covstats, $dinamic_cov, $mincov, $maxcov);
     print_table(\%cov_range, 1);
     print STDERR "\n";
+}
+else {
+
+    ## Everything will have the same
+    foreach my $tag (sort keys %covstats) {
+    
+	$cov_range{$tag} = { 
+	    'min. coverage' => $mincov,
+	    'max. coverage' => $maxcov
+	};
+    }
 }
 
 
@@ -350,12 +359,33 @@ if ($dinamic_cov) {
 ##
 ##   It also will load the markers to be able to sorted them
 ##   %Map = ( $seqID => { $pos => $markerID })
-
+##
+## The VCF parsing can be done in parallel, but the data will need to be 
+## merge after
+##
+## Additionally there are some filters that can be applied during the VCF 
+## parsing:
+##
+##  + 'MIN. READ COVERAGE' and 'MAX. READ COVERAGE' or 'DINAMIC COVERAGE'
+##  + 'MIN. SNP QUALITY'
 
 
 print_header("2) Parsing VCF files");
+my ($geno_href, $marks_href, $map_href) = multithread_vcf_parser(
+	\%vcfs, $threads, 
+	\%cov_range, 
+	$minquality
+    );
 
 
+##############################################################################
+## print_header 
+##############################################################################
+#  Usage: print_header($string)
+#  Desc: format a line and print as a header
+#  Ret: none
+#  Args: $string, with the message to print
+#  Side_Effects: none
 
 sub print_header {
     my $message = shift;
@@ -370,6 +400,16 @@ sub print_header {
     print STDERR "\n\n";
 }
 
+
+##############################################################################
+## print_table 
+##############################################################################
+#  Usage: print_table($hashref, $rev)
+#  Desc: format a hash to print as a table
+#  Ret: none
+#  Args: $hashref to print, $rev to set up a reverse order of rows
+#  Side_Effects: none
+
 sub print_table {
     my $hashref = shift;
     my $rev = shift;
@@ -383,7 +423,7 @@ sub print_table {
     my $header_line = sprintf("%20s", "TAG");
     my @tags = sort(keys(%hash));
     my @fields = sort(keys(%{$hash{$tags[0]}}));
-    if ($rev ) {
+    if ($rev) {
 	@fields = reverse(@fields);
     }
 
@@ -410,11 +450,27 @@ sub print_table {
     print STDERR "\n$ptable\n";
 }
 
-sub multithread_coverage_stats {
+
+##############################################################################
+## multithread_covstats
+##############################################################################
+#  Usage: %covstats = multithread_covstats(\%beds, $threads, $sample_size);
+#  Desc: 1) Package the files in jobs-packages depending of the number of
+#           threads.
+#        2) Parse each of bed the files and get the mean and the stddev for
+#           the coverage.
+#  Ret: %covstats, a hash with tag => { type => value }
+#       type = ('mean', 'stddev');
+#  Args: \%beds, hashref tag => bedfile
+#        $threads, an integer with the number of threads
+#        $sample_size, an integer with the number of samples to take for the
+#          the stats. By default it'll take the whole file. 
+#  Side_Effects: die if something is wrong.
+
+sub multithread_covstats {
     my $bed_href = shift ||
 	die("\nERROR: No bed hashref was supplied to multithread_covstats.\n");
     my $threads = shift;
-    
     my $sample_size = shift;
 
     unless (ref($bed_href) eq 'HASH') {
@@ -431,29 +487,7 @@ sub multithread_coverage_stats {
     ## threads, for example, if there are 20 files and 10 threads, it will
     ## create two packages of 10 files.
 
-    my %packages = ();
-    my ($p, $f) = (0, 0);
-    
-    foreach my $tag (sort keys %beds) {
-    
-	$f++;
-	if ($f <= $threads) {
-	
-	    $packages{$p}->{$tag} = $beds{$tag}; 
-	}
-	else {
-	    
-	    $p++;
-	    $f = 1;
-	    $packages{$p} = {$tag => $beds{$tag}};	
-	}
-    }
-	
-    if ($verbose) {
-    
-	my $npacks = scalar(keys %packages);
-	print STDERR "\tParsing work divided in $npacks packages\n\n";
-    }
+    my %packages = job_packaging($bed_href, $threads);
 
     ## Now that it has X packages it will run them
 
@@ -471,7 +505,7 @@ sub multithread_coverage_stats {
 	    $j++;
 	    my $bedfile = $jobs{$tag};
 	    my $th_proc = threads->create(
-		\&get_covstats_from_file, $bedfile, $sample_size
+		\&covstats_from_bed, $bedfile, $sample_size
 		);
 	    $th_procs{$tag} = $th_proc;
 	}
@@ -499,7 +533,18 @@ sub multithread_coverage_stats {
 }
 
 
-sub get_covstats_from_file {
+##############################################################################
+## covstats_from_bed
+##############################################################################
+#  Usage: my $coverages_aref = covstats_from_bed($bedfile, $sample_size);
+#  Desc: Parse $sample_size lines of a bed file and return a list (arrayref)
+#        of the coverages
+#  Ret: $coverage_aref, a list of coverages
+#  Args: $bedfile, a string with the filename
+#        $sample_size, a integer with the number of lines to parse 
+#  Side_Effects: die if something is wrong.
+
+sub covstats_from_bed {
     my $bedfile = shift;
     my $sample_size = shift;
 
@@ -522,8 +567,8 @@ sub get_covstats_from_file {
     my @readdepths = ();
 
     open my $bed_fh, '<', $bedfile;
-	
-    while((my $line = <$bed_fh>) && $l < $sample_size) {
+    
+    while(defined(my $line = <$bed_fh>) && $l < $sample_size) {
 	
 	chomp($line);
 	my @fields = split(/\t/, $line);
@@ -576,11 +621,24 @@ sub get_covstats_from_file {
 }
 
 
+##############################################################################
+## coverage_range
+##############################################################################
+#  Usage: %covrange = coverage_range($covtstats_href, $dinamic, $min, $max);
+#  Desc: Calculate the dinamic coverage for each of the samples
+#  Ret: %covrange, a hash with tag => { type => value}
+#       type = ('min. coverage', 'max. coverage')
+#  Args: $covstats_href, a hash ref with hash with tag => { type => value}
+#          where type = ('mean', 'stddev')
+#        $dinamic, integer (how much times stddev will be the range)
+#        $min, integer (forced minimum)
+#        $max, integer (forced maximum)
+#  Side_Effects: die if something is wrong.
 
 sub coverage_range {
     my $covstats_href = shift ||
 	die("ERROR: No coverage stats hashref was supplied to coverage_range");
-    my $dinamicov = shift;
+    my $dinamic_cov = shift;
     my $mincov = shift;
     my $maxcov = shift;
 
@@ -628,6 +686,288 @@ sub coverage_range {
     }
 
     return %rangecov;
+}
+
+
+##############################################################################
+## multithread_vcf_parser
+##############################################################################
+#  Usage: ($ghref, $mhref, $phref) = multithread_vcf_parser($vcf_href, 
+#            $threads, $covrange_href, $minquality);
+#  Desc: 1) Package the files in jobs-packages depending of the number of
+#           threads.
+#        2) Parse each of vcf the files and return different variables 
+#           (see below)
+#        3) Merge the different variables
+#  Ret: $ghref, a hash ref as: $markerID => { $sample => $genotype } )
+#       $mhref, a hash ref as: $markerID => { 'position' => $pos, 
+#                                             'seqID'    => $seqID }
+#       $phref, a hash ref as: $seqID => { $pos => $markerID }
+#  Args: $vcf_href, a hash ref as: tag => vcf_file
+#        $threads, a integer
+#        $covrange_ref, a hashref (see coverage_range() )
+#        $minquality, a integer 
+#  Side_Effects: die if something is wrong.
+
+sub multithread_vcf_parser {
+    my $vcf_href = shift ||
+	die("\nERROR: No bed hashref was supplied to multithread_covstats.\n");
+    my $threads = shift;
+    my $cv_href = shift;
+    my $minqual = shift;
+ 
+    ## Check the ref. for each variable
+
+    unless (ref($vcf_href) eq 'HASH') {
+    
+	die("\nERROR: vcf href supplied to multithread_vcf_parser isnt HREF\n");
+    }
+    unless (ref($cv_href) eq 'HASH') {
+    
+	die("\nERROR: cv href supplied to multithread_vcf_parser isnt HREF\n");
+    }
+
+    ## Define the variables
+
+    my %covs = %{$cv_href};
+
+    ## Structure of the data
+    ##   %Genotypes = ( $markerID => { $sample     => $genotype } )
+    ##   %Markers   = ( $markerID => { 'position'  => $pos, 'seqID' => $seqID })
+    ##   %Map = ( $seqID => { $pos => $markerID })
+
+    my %genot = ();
+    my %marks = ();
+    my %mkmap = ();
+
+    ## Job packaging for the parsing
+
+    my %packages = job_packaging($vcf_href, $threads);
+    
+    my $pck  = 0;
+    foreach my $pack (sort {$a <=> $b} keys %packages) {
+	
+	$pck++;
+	my $j = 0;
+	my %th_procs = ();
+
+	my %jobs = %{$packages{$pack}};
+
+	foreach my $tag (sort keys %jobs) {
+
+	    $j++;
+	    my $vcffile = $jobs{$tag};
+	    my $icov_href = $covs{$tag};
+	    print STDERR "TEST $tag\t$vcffile\t$icov_href\n";
+
+	    my $th_proc = threads->create(
+		\&parse_vcf, $vcffile, $tag, $icov_href, $minqual
+		);
+	    $th_procs{$tag} = $th_proc;
+	}
+
+	my %parsed_vcf = ();
+	foreach my $tag (sort keys %th_procs) {
+	
+	    my $th_proc = $th_procs{$tag};
+	    my $th_id = $th_proc->tid();
+	    my $th_res = $th_proc->join();
+
+	    unless (defined($th_res)) {
+		warning("\tExecution error for thread $th_id\n");
+		my $error = $th_proc->error();
+		print "\n===== ERROR $th_id =====\n$error\n================\n";
+	    }
+	    
+	    $parsed_vcf{$tag} = $th_res;
+	}
+	
+    }
+
+}
+
+
+##############################################################################
+## job_packaging
+##############################################################################
+#  Usage: %packages = job_packaging($fileset, $threads);
+#  Desc: Organize the files in packages depending of the number of threads
+#  Ret: %packages, a hash as: $package_number => { $tag => $file }
+#  Args: $fileset, a hash ref as: $tag => $filename
+#        $threads, a integer
+#  Side_Effects: die if something is wrong.
+
+sub job_packaging {
+    my $fileset_href = shift;
+    my $threads = shift;
+
+    unless (ref($fileset_href) eq 'HASH') {
+	
+	die("\nERROR: fileset href supplied to job_packaging isnt HREF\n");
+    }
+
+    my %fileset = %{$fileset_href};
+
+    my %packages = ();
+    my ($p, $f) = (0, 0);
+    
+    foreach my $tag (sort keys %fileset) {
+    
+	$f++;
+	if ($f <= $threads) {
+	
+	    $packages{$p}->{$tag} = $fileset{$tag}; 
+	}
+	else {
+	    
+	    $p++;
+	    $f = 1;
+	    $packages{$p} = {$tag => $fileset{$tag}};	
+	}
+    }
+	
+    if ($verbose) {
+    
+	my $npacks = scalar(keys %packages);
+	print STDERR "\tParsing work divided in $npacks packages\n\n";
+    }
+
+    return %packages;
+}
+
+##############################################################################
+## parse_vcf
+##############################################################################
+#  Usage: (genot_href, $mks_href, $pos_href) = parse_vcf($vcf, $covhref, $minq)
+#  Desc: Parse the VCF file selecting SNPs based in the filter variables
+#  Ret: $ghref, a hash ref as: $markerID => { $sample => $genotype } )
+#       $mhref, a hash ref as: $markerID => { 'position' => $pos, 
+#                                             'seqID'    => $seqID }
+#       $phref, a hash ref as: $seqID => { $pos => $markerID }
+#  Args: $vcf, a string (filename)
+#        $sample, a string with the sample name
+#        $covhref, a hashref as: $type => $value (type 'min' and''max')
+#        $minq, a integer with min SNP quality
+#  Side_Effects: die if something is wrong.
+
+sub parse_vcf {
+    my $vcf_file = shift
+	|| die("ERROR: No vcf file was supplied to parse_vcf()\n");
+    my $sample = shift;
+    my $cov_href = shift;
+    my $min_qual = shift;
+
+    unless (ref($cov_href) eq 'HASH') {
+	
+	die("\nERROR: cov_href supplied to parse_vcf() isnt HASHREF\n");
+    }
+    my $min_cov = $cov_href->{'min. coverage'};
+    my $max_cov = $cov_href->{'max. coverage'};
+    
+    ## Define the variables to store the data
+    
+    my %genot = ();
+    my %marks = ();
+    my %mkmap = ();
+
+    open my $vcf_fh, '<', $vcf_file;
+    
+    while(<$vcf_fh>) {
+    
+	chomp($_);
+	
+	## Ignore comments 
+	if ($_ !~ m/#/) {
+
+	    ## Structure of a VCF file
+
+	    my %vcfline = ();
+	    my @vcf_headers = ("CHROM", "POS", "ID", "REF", "ALT", "QUAL", 
+			       "FILTER", "INFO", "FORMAT");
+	    my @extra_fields = ();
+	    
+	    my @data = split(/\t/, $_);
+	    my $n = 0;
+	    foreach my $data (@data) {
+	
+		if ($n < 8) {
+		
+		    $vcfline{$vcf_headers[$n]} = $data;
+		}
+		else {
+		
+		    push @extra_fields, $data;
+		}
+		$n++;
+	    }
+	    
+	    $vcfline{'EXTRA'} = \@extra_fields;
+	    
+	    ## There are some fields that can be break in its tags such the
+	    ## INFO. They are separated by ';'
+
+	    my %info = ();
+	    my @infofield = split(/;/, $vcfline{"INFO"});
+	    foreach my $subfield (@infofield) {
+	    
+		if ($subfield =~ m/^(.+)=(.+)$/) {
+		
+		    my $tag = $1;
+		    my $val = $2;
+		    $info{$tag} = $val;
+		}
+	    }
+	    
+	    ## Replace the info by the hashref
+
+	    $vcfline{"INFO"} = \%info;
+	    
+	    ## Now it is ready for the filtering
+	    
+	    my $selected = 1;
+	    if ($min_qual) {
+	    
+		if ($vcfline{"QUAL"} < $min_qual) {
+		    
+		    $selected = 0;
+		}
+	    }
+	    if ($min_cov) {
+	    
+		if ($vcfline{"INFO"}->{"DP"} < $min_cov) {
+		
+		    $selected = 0;
+		}
+	    }
+	    if ($max_cov) {
+	    
+		if ($vcfline{"INFO"}->{"DP"} > $max_cov) {
+		
+		    $selected = 0;
+		}
+	    }
+
+	    ## Now that it has been selected it will add the SNP to the
+	    ## structures
+
+	    if ($selected == 1) {
+	    
+		my $marker_id = $vcfline{"CHROM"} . ":" . $vcfline{"POS"};
+		$genot{$marker_id} = { $sample => $vcfline{"ALT"}};
+		$marks{$marker_id} = { 'position' => $vcfline{"POS"}, 
+				       'seqID'    => $vcfline{"CHROM"} };
+		$mkmap{$vcfline{"CHROM"}} = { $vcfline{"POS"} => $marker_id };
+	    }	    
+	}
+    }
+    
+    my %results = (
+	'genotypes' => \%genot, 
+	'markers'   => \%marks, 
+	'positions' => \%mkmap
+    );
+
+    return \%results;
 }
 
 
