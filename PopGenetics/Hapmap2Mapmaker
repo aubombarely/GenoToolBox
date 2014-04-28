@@ -9,11 +9,23 @@
 
 =head1 SYPNOSIS
 
- Hapmap2Mapmaker [-h]  -i <hapmap_inputfile> -o <outputfile>
+ Hapmap2mapmaker [-h]  -i <hapmap_inputfile> -o <outputfile>
                        -a <donor_a> -b <donor_b> -t <data_type>
-                       [-k <keys>] [-f <outformat>] [-p <chisqr_pvalue>]
+                       [-k <keys>] [-f <outformat>] 
+                       [-p <chisqr_pvalue>] [-s <segregation>]
                        [-e <samples_to_exclude>] [-d <distance_snps>] [-B][-H]
                        
+=head1 EXAMPLE
+
+       Hapmap2Mapmaker -i Laupala_HC1_Filter1_SNP.set_1.hmp.txt 
+                       -o Laupala_HC1_Filter1_SNP.AHB121_markers_p001.csv 
+                       -f csv 
+                       -a HC1_D_Laeuk 
+                       -b HC1_S_Lacer 
+                       -e Reference 
+                       -s '(a,h,b)' 
+                       -p 0.001
+
 
 =head2 I<Flags:>
 
@@ -866,7 +878,19 @@ sub help {
        Hapmap2Mapmaker [-h]  -i <hapmap_inputfile> -o <outputfile>
                        -a <donor_a> -b <donor_b> -t <data_type>
                        [-k <keys>] [-f <output_format>]
+                       [-p <chisqr_pvalue>] [-s <segregation>]
                        [-e <samples_to_exclude>] [-d <distance_snps>] [-B][-H]
+
+    Example:
+   
+       Hapmap2Mapmaker -i Laupala_HC1_Filter1_SNP.set_1.hmp.txt 
+                       -o Laupala_HC1_Filter1_SNP.AHB121_markers_p001.csv 
+                       -f csv 
+                       -a HC1_D_Laeuk 
+                       -b HC1_S_Lacer 
+                       -e Reference 
+                       -s '(a,h,b)' 
+                       -p 0.001
  
     Flags:
 
@@ -878,6 +902,8 @@ sub help {
       -t <data_type>            data type for mapmaker (ex. f2) (f2 by default)
       -k <keys>                 keys to code SNPs (aa=1;bb=2;ab=3...) 
       -e <samples_to_exclude>   list of samples to exclude (sep. by comma)
+      -s <filter_segregation>   filter by expected segregation (optional)
+      -p <chisqr_pvalue>        chi square p-value for segregation test (0.01)
       -B <biallelic_filter>     filter out the non biallelic genotypes.
       -d <distance_snps>        filter snps closer than this distance
       -V <be_verbose>           be verbose and print the parsing status.
