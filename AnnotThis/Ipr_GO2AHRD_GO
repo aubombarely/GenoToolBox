@@ -101,11 +101,37 @@ my %annot_counts = ();
 
 # $data is a hash ref.
 my %data = %{$data};
+
+## Count the protein fields
+my $p = 0;
+
 foreach my $key (%data) {
 
     foreach my $hashref (@{$data{'protein'}}) {
 
+	$p++;
 	my $id = $hashref->{xref}->{id};
+	my @multiple_ids = ();
+
+	unless (defined $id) {
+	    
+	    ## Happens when two or more proteins have the same 
+	    ## matches (it is the same protein, so it has the same md5)
+
+	    my %hash = %{$hashref};
+	    my %xreffields = %{$hash{'xref'}};
+	    foreach my $key (keys(%xreffields)) {
+
+		my %extra_ids = %{$xreffields{$key}};
+		
+		## it has just one key (id)
+		push @multiple_ids, $extra_ids{'id'};
+	    }
+	}
+	else {
+	
+	    push @multiple_ids, $id;
+	}
 
 	## File structure:
 	## >Protein
@@ -134,7 +160,7 @@ foreach my $key (%data) {
 			my %entry = %{$sig{entry}};
 			my $ac = $entry{ac};
 			if (defined($entry{'go-xref'})) {
-			
+				
 			    my %go = %{$entry{'go-xref'}};
 			    %goterms = parse_goxref(\%go, \%goterms); 
 			}
@@ -146,11 +172,11 @@ foreach my $key (%data) {
 		    
 			my %sig = %{$subhit_ref->{'signature'}};
 			if (exists $sig{entry}) {
-		    
+			    
 			    my %entry = %{$sig{entry}};
 			    my $ac = $entry{ac};
 			    if (defined($entry{'go-xref'})) {
-			
+				
 				my %go = %{$entry{'go-xref'}};
 				%goterms = parse_goxref(\%go, \%goterms); 
 			    }
@@ -160,16 +186,18 @@ foreach my $key (%data) {
 	    }
 	}
 	
-	## At this point it has catched all the GO terms for an specific protein
+	## At this point it has catched all the GO terms for an 
+	## specific protein
 	
-	$go_count{$id} = {};
+	foreach my $mid (@multiple_ids) {
+
+	    $go_count{$mid} = {};
+	}
 	my $total_annot = 0;
 	foreach my $goname (sort keys %goterms) {
 	
 	    my %godata = %{$goterms{$goname}};
-	    my $test1 = join("; ", keys(%godata));
-	    my $test2 = join("; ", values(%godata));
-
+		
 	    $total_annot += $godata{'count'};
 	    my $goterm_id = $godata{'id'};
 
@@ -179,12 +207,19 @@ foreach my $key (%data) {
 		'category' => $godata{'category'}
 	    };
 	    
-	    
-	    $go_count{$id}->{$goterm_id} = $godata{'count'};
+	    foreach my $mid (@multiple_ids) {
+
+		$go_count{$mid}->{$goterm_id} = $godata{'count'};
+	    }
 	}
-	$annot_counts{$id} = $total_annot;
+	
+	foreach my $mid (@multiple_ids) {
+
+	    $annot_counts{$mid} = $total_annot;
+	}
     }
 }
+
 
 ## Now it should have the hashes with the data, so it can produce the output 
 ## with 4 columns: ID, Weight, GO_ID and GO_description
