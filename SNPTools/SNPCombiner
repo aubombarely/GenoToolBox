@@ -12,6 +12,7 @@ use Pod::Usage;
 use List::Util 'shuffle';
 use Statistics::Basic qw(:all);
 use Math::BigFloat;
+use Scalar::Util 'looks_like_number';
 
 
 
@@ -41,7 +42,9 @@ my $maxdistance = '';
 my $percmissing = 0;
 my $biallelic = '';
 my $dinamic_cov = '';
+my $minsnpsample = 0;
 my %vcftag_filter = ();
+my $polycollapse = 0;
     
 ## Output options
 my $outbase = 'snp_combiner_out';
@@ -57,13 +60,16 @@ my $verbose = 0;
 GetOptions(
 
     ## Running options
-    'p|process|threads:i'       => \$threads,
+    'p|process|threads:i'        => \$threads,
 
     ## Input options:
-    'v|vcf=s'                   => \@vcfs, 
-    'b|bed=s'                   => \@beds,
-    'g|groups:s'                => \@grps,
-    's|sample_size:i'           => \$sample_size,
+    'v|vcf=s'                    => \@vcfs, 
+    'b|bed=s'                    => \@beds,
+    'g|groups:s'                 => \@grps,
+    's|sample_size:i'            => \$sample_size,
+
+    ## Sample filter options:
+    'x|min_snp_sample:i'         => \$minsnpsample,
 
     ## SNP Filter options:
     'c|min_depth|min_coverage:i' => \$mincov,
@@ -76,6 +82,9 @@ GetOptions(
     'n|dinamic_coverage:i'       => \$dinamic_cov,
     'f|vcftag_filter:s%'         => \%vcftag_filter,
     
+    ## SNP modification:
+    'P|polyploid_collapse:i'     => \$polycollapse,
+
     ## Output options
     'o|out|output:s'             => \$outbase,
     't|type_output:s'            => \$outtype,
@@ -244,19 +253,31 @@ else {
 
 print STDERR "\tTHREADS: $threads\n\n";
 
+if ($polycollapse > 0) {
+
+    print STDERR "\tPOLYPLOID COLLAPSE:  type: $polycollapse\t\t   [Enabled]\n";
+}
+else {
+
+     print STDERR "\tPOLYPLOID COLLAPSE:\t\t\t  [Disabled]\n";
+     $biallelic = 1;
+}
+
+
 ###############################################################################
 ## CHECK FILTERS
 ###############################################################################
 
 my %filters = (
-    'MIN. READ COVERAGE' => $mincov,
-    'MAX. READ COVERAGE' => $maxcov,
-    'MIN. SNP QUALITY'   => $minquality,
-    'MIN. SNP DISTANCE'  => $mindistance,
-    'MAX. SNP DISTANCE'  => $maxdistance,
-    'MAX. %MISSING DATA' => $percmissing, 
-    'ONLY BIALLELIC'     => $biallelic,
-    'DINAMIC COVERAGE'   => $dinamic_cov,
+    'MIN. READ COVERAGE'  => $mincov,
+    'MAX. READ COVERAGE'  => $maxcov,
+    'MIN. SNP QUALITY'    => $minquality,
+    'MIN. SNP DISTANCE'   => $mindistance,
+    'MAX. SNP DISTANCE'   => $maxdistance,
+    'MAX. %MISSING DATA'  => $percmissing, 
+    'ONLY BIALLELIC'      => $biallelic,
+    'DINAMIC COVERAGE'    => $dinamic_cov,
+    'MIN. SNP PER SAMPLE' => $minsnpsample,
     );
 
 foreach my $key (sort {$b cmp $a} keys %filters) {
@@ -354,7 +375,8 @@ else {
 ## script doesn't assume the order of the VCF file
 ##
 ## Structure of the data
-##   %Genotypes = ( $markerID => { $sample     => $genotype } )
+##   %Genotypes = ( $markerID => { $sample     => 
+##          {'genotype' => $genotype, 'allelefreq' => $allelefreq} } )
 ##   %Markers   = ( $markerID => { 'position'  => $pos, 'seqID' => $seqID })
 ##
 ##   It also will load the markers to be able to sorted them
@@ -368,14 +390,343 @@ else {
 ##
 ##  + 'MIN. READ COVERAGE' and 'MAX. READ COVERAGE' or 'DINAMIC COVERAGE'
 ##  + 'MIN. SNP QUALITY'
+##
+##  %results = ( 'genotypes' => \%Genotypes, 'markers' => \%Markers,
+##               'maps' => \%Maps, 'tags' => \%selected_tags);
 
 
 print_header("2) Parsing VCF files");
-my ($geno_href, $marks_href, $map_href) = multithread_vcf_parser(
-	\%vcfs, $threads, 
-	\%cov_range, 
-	$minquality
-    );
+my %results = multithread_vcf_parser(\%vcfs, $threads, \%cov_range, \%filters);
+
+
+###############################################################################
+## 3) PARSE THE COVERAGE FILES
+###############################################################################
+##
+## Now it will parse the coverage files to complete the SNPs, no based in the
+## but in the marker, for example:
+## Ref=A; Sample1=A; Sample2=C, Sample1 will not report a SNP but there is a
+## SNP if we compare with Sample2.
+## 
+## Other way to complete the SNPs is to see the allele freq. For example
+## Ref=A; Sample1=C AF=0.5 means that Sample1=A,C for a diploid or
+## Sample1=A,A,C,C for a tetraploid. But it will not be done during the
+## bed parsing.
+## 
+## The coverage file analysis will not add new markers to %markers or
+## %map variables, only new samples to %genotypes.
+
+print_header("3) Parsing Coverage files");
+
+## First it will create a new bed hash with the selected tags (see previous
+## step)
+
+my %sel_beds = ();
+
+foreach my $tag (keys %beds) {
+ 
+    if (exists $results{'tags'}->{$tag}) {
+
+	$sel_beds{$tag} = $beds{$tag};
+    }
+}
+
+%results = multithread_bed_parser(\%sel_beds, \%results, $threads, \%cov_range);
+
+
+###############################################################################
+## 4) FILTER MARKERS
+###############################################################################
+##
+## Now it will filter the markers based in:
+## a) Distance
+## b) % Missing data
+## c) biallelic
+
+print_header("4) Filtering markers");
+
+my %selected_markers = apply_filters(\%results, \%filters);
+
+my $marks_filtered = scalar(keys %selected_markers);
+print STDERR "\n\tTOTAL NUMBER OF MARKERS:\t\t$marks_filtered\n";
+
+###############################################################################
+## 5) WRITING THE OUTPUT
+###############################################################################
+##
+## The program will produce the output in hapmap format
+## Col1: refSNP rs# identifier at the time of release (NB: it might merge 
+##      with another rs# in the future)
+## Col2: SNP alleles according to dbSNP
+## Col3: chromosome that SNP maps to 
+## Col4: chromosome position of SNP, in basepairs on reference sequence
+## Col5: strand of reference sequence that SNP maps to
+## Col6: version of reference sequence assembly (currently NCBI build36)
+## Col7: HapMap genotyping center that produced the genotypes
+## Col8: LSID for HapMap protocol used for genotyping
+## Col9: LSID for HapMap assay used for genotyping
+## Col10: LSID for panel of individuals genotyped
+## Col11: QC-code, currently 'QC+' for all entries (for future use)
+## Col12 and on: observed genotypes of samples, one per column, sample
+##      identifiers in column headers (Coriell catalog numbers, example:
+##      NA10847).
+## 
+## Missing data = N
+## Polyploids   = AAAA
+## The polyploidy will be contained in the VCF file but still the program
+## can try to collapse the alleles (-P) for comparative analysis purposes
+## for example if we compare diploids AA and TT and the polyploid AATT it could
+## be colapse to AT
+##
+## There are 3 modes for the output:
+## + "regular" (default): One HapMap file with all the sequences and markers.
+## + "by_sequence": One HapMap file per sequence (e.g. chromosomes)
+## + "by_binsize:x": One HapMap file per bin with x bp size.
+## + "random:x,y": y HapMap files with x markers per file selected randomly  
+##
+## The output will be order by sequence and position so the easiest way 
+## to create the output is to pack the sequences into arrays:
+##  %outpacks = ( $name1 => [$mark1, $mark2...], $name2 => [$mark11...])
+
+print_header("5) Writting the output");
+
+my %outpacks = ();
+my $defname = $outbase . "hmp.txt";
+my @defpack = ();
+
+foreach my $seqid (sort %{$results{'maps'}}) {
+
+    if ($out[0] =~ m/by_sequence/) {
+    
+	my $name = $outbase . "_" . $seqid . "hmp.txt"; 
+	my @pack = ();
+
+	my %seqmarks = %{$results{'maps'}->{$seqid}};
+	foreach my $pos (sort {$a <=> $b} keys %seqmarks) {
+	
+	    push @pack, $seqmarks{$pos};
+	}
+	$outpacks{$name} = \@pack;
+    }
+    elsif ($out[0] =~ m/by_binsize/) {
+    
+	my @size = @{$valid_out{'by_binsize'}};
+	my $binsize = $size[0];
+	
+	my $bin = 0;
+	my $binpos = 0;
+	my @pack = ();
+	
+	my %seqmarks = %{$results{'maps'}->{$seqid}};
+	my $c = 0;
+	my $C = scalar(keys %seqmarks);
+
+	foreach my $pos (sort {$a <=> $b} keys %seqmarks) {
+	
+	    $c++;
+	    my $binpos = $pos - ($binsize * $bin);
+	    
+	    ## The last entry
+	    if ($c == $C) {
+
+		my $name = $outbase . "_b" . $bin . "hmp.txt"; 
+		$outpacks{$name} = \@pack;
+	    }
+	    else {
+		if ($binpos <= $binsize) {
+
+		    push @pack, $seqmarks{$pos};
+		}
+		else {
+		
+		    my $name = $outbase . "_b" . $bin . "hmp.txt"; 
+		    $outpacks{$name} = \@pack;
+
+		    $bin++;
+		    @pack = ($seqmarks{$pos});
+		}
+	    }
+	}
+    }
+    else {
+    
+	my %seqmarks = %{$results{'maps'}->{$seqid}};
+	foreach my $pos (sort {$a <=> $b} keys %seqmarks) {
+	
+	    push @defpack, $seqmarks{$pos};
+	}
+    }
+}
+
+## Now for the random:x,y will reorganize the file
+
+if ($out[0] =~ m/random/) {
+
+    my @rand = shuffle(@defpack);
+    my @pack = ();
+
+    my @xy = @{$valid_out{'random'}};
+    my $file_n = $xy[1];
+    my $mrks_n = $xy[0];
+
+    my $p = 0;
+    my $c = 0;
+    my $m = 0;
+    my $C = scalar(@defpack);
+    foreach my $mid (@rand) {
+    
+	$c++;
+	if ($p < $file_n) {
+	
+	    if ($c == $C) {
+	    
+		my $name = $outbase . "_r" . $p . "hmp.txt";
+		my @spack = sort(@pack);
+		$outpacks{$name} = \@spack;
+	    }
+	    elsif ($m <= $mrks_n) {
+	    
+		push @pack, $mid;
+	    }
+	    elsif ($m > $mrks_n) {
+	    
+		my $name = $outbase . "_r" . $p . "hmp.txt";
+		my @spack = sort(@pack);
+		$outpacks{$name} = \@spack;
+
+		@pack = ($mid);
+		$p++;
+	    }
+	}	
+    }
+}
+elsif ($out[0] =~ m/regular/) {
+
+    my $name = $outbase . "hmp.txt"; 
+    $outpacks{$name} = \@defpack;
+}
+
+## Now it will create the files and write the output to them
+
+foreach my $filename (sort keys %outpacks) {
+
+    open my $ofh, '>', $filename;
+
+    ## Print the header
+    my @header = ('rs#',      'alleles',  'chrom',    'pos',      'strand', 
+		  'assembly', 'center',   'protLSID', 'assyLSID', 'panelLSID', 
+		  'QCcode',   'Reference');
+
+    my @samples = sort(keys %{$results{'tags'}});
+    push @header, @samples;
+    my $headerline = join("\t", @header);
+    print $ofh "$headerline\n";
+
+    my @p_marks = @{$outpacks{$filename}};
+
+    ## Take a sample of the ploidy
+    my $minploidy = 1000000;
+    my $maxploidy = 0;
+    my %first_geno = $results{'genotypes'}->{$p_marks[0]};
+    foreach my $ftag (keys %first_geno) {
+    
+	if ($first_geno{$ftag}->{'ploidy'} < $minploidy) {
+	
+	    $minploidy = $first_geno{$ftag}->{'ploidy'};
+	}
+	if ($first_geno{$ftag}->{'ploidy'} > $maxploidy) {
+	
+	    $maxploidy = $first_geno{$ftag}->{'ploidy'};
+	}
+    }
+
+    foreach my $mark_id (@p_marks) {
+    
+	## Get the genotypes and the different alleles
+	my $ref = $results{'markers'}->{$mark_id}->{'reference'};
+	my $refgeno = $ref x $minploidy;
+
+	my %alleles = ();
+	my @genotypes = ();
+	foreach my $tag (@samples) {
+	
+	    if (exists $results{'markers'}->{$mark_id}->{$tag}) {
+	    
+		my @geno = split(/,/, $results{'markers'}->{$mark_id}->{$tag});
+		
+		my %localalleles = ();
+		foreach my $nt (@geno) {
+		
+		    $alleles{$nt} = 1;
+		    $localalleles{$nt}++;
+		}
+
+		## Only biallelic markers are permited in the reduced
+		## representation
+
+		if ($polycollapse == 1) {
+
+		    my @reduced_geno = ();
+		    foreach my $nt (sort keys %localalleles) {
+		    
+			push @reduced_geno, $nt x ($minploidy / 2);
+		    }
+		    push @genotypes, join("", @reduced_geno);
+		}
+		elsif ($polycollapse == 2) {
+
+		    my @nts = sort(keys %localalleles);
+		    my @reduced_geno = ();
+		    if ($localalleles{$nts[0]} > $localalleles{$nts[1]}) {
+		    
+			push @reduced_geno, $nts[0] x $minploidy;
+		    }
+		    elsif ($localalleles{$nts[0]} < $localalleles{$nts[1]}) {
+		    
+			push @reduced_geno, $nts[1] x $minploidy;
+		    }
+		    else {
+		    
+			push @reduced_geno, $nts[0] x $minploidy/2;
+			push @reduced_geno, $nts[1] x $minploidy/2;
+		    }
+		    push @genotypes, join("", @reduced_geno);
+		}
+		else {
+		
+		    push @genotypes, join("", @geno);
+		}
+	    }
+	    else {
+
+		push @genotypes, "N" x $minploidy;
+	    }
+	}
+
+
+	my $seqid = $results{'markers'}->{$mark_id}->{'seqid'};
+	my $position = $results{'markers'}->{$mark_id}->{'position'};
+	my $alleles = join("/", sort(keys %alleles));
+
+	## It needs only the genotype
+	my @line = ($mark_id, $alleles, $seqid, $position, '+');
+
+	## Next six empty fields
+	push @line, ( 'NA', 'NA', 'NA', 'NA', 'NA', 'NA');
+
+	## And finally add the genotypes
+	push @line, @genotypes;
+
+	my $line = join("\t", @line);
+	print $ofh "$line\n";	
+    }
+    close($ofh);
+}
+
+
+
+
+
 
 
 ##############################################################################
@@ -692,29 +1043,34 @@ sub coverage_range {
 ##############################################################################
 ## multithread_vcf_parser
 ##############################################################################
-#  Usage: ($ghref, $mhref, $phref) = multithread_vcf_parser($vcf_href, 
-#            $threads, $covrange_href, $minquality);
+#  Usage: ($ghref, $mhref, $phref, $thref) = multithread_vcf_parser($vcf_href, 
+#            $threads, $covrange_href, $minquality, $minsnpsample);
 #  Desc: 1) Package the files in jobs-packages depending of the number of
 #           threads.
 #        2) Parse each of vcf the files and return different variables 
 #           (see below)
 #        3) Merge the different variables
-#  Ret: $ghref, a hash ref as: $markerID => { $sample => $genotype } )
-#       $mhref, a hash ref as: $markerID => { 'position' => $pos, 
-#                                             'seqID'    => $seqID }
+#  Ret: A hash with: keys => 'genotypes', 'markers', 'maps', 'tags' and
+#       values:
+#       $ghref, a hash ref as: $markerID => { $sample => 
+#          'genotype' => $genotype, 'allelefreq' => $allelefreq } )
+#       $mhref, a hash ref as: $markerID => { 'position'  => $pos, 
+#                                             'seqID'     => $seqID,
+#                                             'reference' => $reference }
 #       $phref, a hash ref as: $seqID => { $pos => $markerID }
+#       $thref, a hashref with the selected tags key=sample (tag) name
 #  Args: $vcf_href, a hash ref as: tag => vcf_file
 #        $threads, a integer
 #        $covrange_ref, a hashref (see coverage_range() )
-#        $minquality, a integer 
+#        \%filters, a hash ref with the filter data (see before)
 #  Side_Effects: die if something is wrong.
 
 sub multithread_vcf_parser {
     my $vcf_href = shift ||
-	die("\nERROR: No bed hashref was supplied to multithread_covstats.\n");
+	die("\nERROR: No bed href was supplied to multithread_vcf_parser.\n");
     my $threads = shift;
     my $cv_href = shift;
-    my $minqual = shift;
+    my $fil_href = shift;
  
     ## Check the ref. for each variable
 
@@ -726,19 +1082,39 @@ sub multithread_vcf_parser {
     
 	die("\nERROR: cv href supplied to multithread_vcf_parser isnt HREF\n");
     }
+    unless (ref($fil_href) eq 'HASH') {
+    
+	die("\nERROR: fil href supplied to multithread_vcf_parser isnt HREF\n");
+    }
 
     ## Define the variables
 
     my %covs = %{$cv_href};
+    my $minqual = $fil_href->{'MIN. SNP QUALITY'};
+    my $minsnp_c = $fil_href->{'MIN. SNP PER SAMPLE'};
 
     ## Structure of the data
-    ##   %Genotypes = ( $markerID => { $sample     => $genotype } )
+    ##   %Genotypes = ( $markerID => { 
+    ##                      $sample => { 
+    ##                         'genotype'   => $genotype,
+    ##                         'allelefreq' => $allelefreq } )
     ##   %Markers   = ( $markerID => { 'position'  => $pos, 'seqID' => $seqID })
     ##   %Map = ( $seqID => { $pos => $markerID })
 
-    my %genot = ();
-    my %marks = ();
-    my %mkmap = ();
+    my %genotypes = ();
+    my %markers = ();
+    my %maps = ();
+
+    ## It also will produce %counter with keys:
+    ## total SNPs; filter pass; under min. map quality; under min. coverage;
+    ## over max. coverage
+
+    my %counts = ();
+
+    ## It also will select VCF files with a min. number of SNPs
+    my %selected_tags = ();
+    my @discarded_tags = ();
+    my %parsed_vcf = ();
 
     ## Job packaging for the parsing
 
@@ -758,15 +1134,13 @@ sub multithread_vcf_parser {
 	    $j++;
 	    my $vcffile = $jobs{$tag};
 	    my $icov_href = $covs{$tag};
-	    print STDERR "TEST $tag\t$vcffile\t$icov_href\n";
 
 	    my $th_proc = threads->create(
 		\&parse_vcf, $vcffile, $tag, $icov_href, $minqual
 		);
 	    $th_procs{$tag} = $th_proc;
 	}
-
-	my %parsed_vcf = ();
+	
 	foreach my $tag (sort keys %th_procs) {
 	
 	    my $th_proc = $th_procs{$tag};
@@ -781,9 +1155,99 @@ sub multithread_vcf_parser {
 	    
 	    $parsed_vcf{$tag} = $th_res;
 	}
-	
     }
 
+    ## Get the parsing results and transform into a table:
+    ## Tables are designed just for two fields, counters has
+    ## 5, so it will print just 2 (TOTAL SNPs and FILTER PASS)
+    ## (The rest could be used a summary report table)
+    
+    my %count4table = ();
+    foreach my $tag (keys %parsed_vcf) {
+	
+	my %counters = %{$parsed_vcf{$tag}->{'counters'}};
+	$count4table{$tag} = { 
+	    'total SNPs'  => $counters{'total SNPs'},
+	    'filter pass' => $counters{'filter pass'},
+	};
+	if ($counters{'filter pass'} >= $minsnp_c) {
+	    
+	    $selected_tags{$tag} = 1;
+	}
+	else {
+	    
+	    push @discarded_tags, $tag;
+	}
+    }
+    print STDERR "\tSummary of VCF parsing.\n";
+    print_table(\%count4table, 1);
+    my $dline = join("\n\t\t* ", @discarded_tags);
+    print STDERR "\n\tSamples discarded (under the min. SNP number):";
+    print STDERR "\n\t\t* $dline\n";
+
+    ## Now it will merge the SNPs
+    print STDERR "\n\tMerging SNP from different samples.";
+    
+    foreach my $tag (keys %selected_tags) {
+    
+	my %genot = %{$parsed_vcf{$tag}->{genotypes}};
+	my %marks = %{$parsed_vcf{$tag}->{markers}};
+
+	foreach my $marker_id (keys %genot) {
+	
+	    if (exists $genotypes{$marker_id}) {
+	    
+		$genotypes{$marker_id}->{$tag} = $genot{$marker_id}->{$tag};
+	    }
+	    else {
+	    
+		$genotypes{$marker_id} = {$tag => $genot{$marker_id}->{$tag}};
+	    }
+	    $markers{$marker_id} = $marks{$marker_id};
+	}
+
+	my %posit = %{$parsed_vcf{$tag}->{positions}};
+	foreach my $seqid (sort keys %posit) {
+	
+	    my %map = %{$posit{$seqid}};
+	    foreach my $pos (sort {$a <=> $b} keys %map) {
+	    
+		if (exists $maps{$seqid}) {
+		
+		    $maps{$seqid}->{$pos} = $map{$pos};
+		}
+		else {
+		
+		    $maps{$seqid} = {$pos => $map{$pos}};
+		}
+	    }
+	}
+    }
+    my $total_marks = scalar(keys %markers);
+    print STDERR "\n\n\tTOTAL NUMBER OF MARKERS:\t\t$total_marks\n";
+
+    ## It will check also how many samples per marker
+    my $common_marks = 0;
+    foreach my $mk (keys %genotypes) {
+    
+	my %gnt = %{$genotypes{$mk}};
+	my @gnt_list = sort {$a cmp $b} keys %gnt;
+	my @tag_list = sort {$a cmp $b} keys %selected_tags;
+	if (scalar(@gnt_list) == scalar(@tag_list)) {
+	
+	    $common_marks++;
+	}
+    }
+    print STDERR "\tMARKERS PRESENT IN ALL THE SAMPLES:\t$common_marks\n";
+
+    my %results = (
+	'genotypes' => \%genotypes, 
+	'markers'   => \%markers, 
+	'maps'      => \%maps, 
+	'tags'      => \%selected_tags
+    );
+
+    return(%results);
 }
 
 
@@ -838,12 +1302,18 @@ sub job_packaging {
 ##############################################################################
 ## parse_vcf
 ##############################################################################
-#  Usage: (genot_href, $mks_href, $pos_href) = parse_vcf($vcf, $covhref, $minq)
+#  Usage: ($genot_href, $mks_href, $pos_href, $count_href) = 
+#                                        parse_vcf($vcf, $covhref, $minq)
 #  Desc: Parse the VCF file selecting SNPs based in the filter variables
-#  Ret: $ghref, a hash ref as: $markerID => { $sample => $genotype } )
-#       $mhref, a hash ref as: $markerID => { 'position' => $pos, 
-#                                             'seqID'    => $seqID }
+#  Ret: $ghref, a hash ref as: $markerID => { $sample => {
+#               'genotype'   => $genotype, 
+#               'allelefreq' => $allelefreq} )
+#               'ploidy'     => $ploidy })
+#       $mhref, a hash ref as: $markerID => { 'position'  => $pos, 
+#                                             'seqID'     => $seqID, 
+#                                             'reference' => $ref }
 #       $phref, a hash ref as: $seqID => { $pos => $markerID }
+#       $counthref, a hash with counter keys.
 #  Args: $vcf, a string (filename)
 #        $sample, a string with the sample name
 #        $covhref, a hashref as: $type => $value (type 'min' and''max')
@@ -870,41 +1340,55 @@ sub parse_vcf {
     my %marks = ();
     my %mkmap = ();
 
+    ## Counters for stats
+    my %counters = (
+	'total SNPs'             => 0,
+	'filter pass'            => 0,
+	'under min. coverage'    => 0,
+	'over max. covreage'     => 0,
+	'under min. map quality' => 0
+	);
+
     open my $vcf_fh, '<', $vcf_file;
+    my $l = 0;
+    my $L = `cat $vcf_file | wc -l`;
+    chomp($L);
     
+    my @vcf_headers = ();
+
     while(<$vcf_fh>) {
     
 	chomp($_);
-	
-	## Ignore comments 
-	if ($_ !~ m/#/) {
+	if ($verbose && $threads == 1) {
+	    
+	    print STDERR "\tParsing line: $l of $L         \r";
+	}
 
+	## It will get the headers from the #CHROM line
+
+	if ($_ =~ m/#CHROM/) {
+	
+	    $_ =~ s/#//;
+	    @vcf_headers = split(/\t/, $_);
+	}
+	elsif ($_ !~ m/#/) {
+
+	    $counters{'total SNPs'}++;
 	    ## Structure of a VCF file
 
 	    my %vcfline = ();
-	    my @vcf_headers = ("CHROM", "POS", "ID", "REF", "ALT", "QUAL", 
-			       "FILTER", "INFO", "FORMAT");
-	    my @extra_fields = ();
-	    
 	    my @data = split(/\t/, $_);
 	    my $n = 0;
 	    foreach my $data (@data) {
-	
-		if ($n < 8) {
-		
-		    $vcfline{$vcf_headers[$n]} = $data;
-		}
-		else {
-		
-		    push @extra_fields, $data;
-		}
+
+		$vcfline{$vcf_headers[$n]} = $data;
 		$n++;
 	    }
 	    
-	    $vcfline{'EXTRA'} = \@extra_fields;
 	    
 	    ## There are some fields that can be break in its tags such the
-	    ## INFO. They are separated by ';'
+	    ## INFO, FORMAT and unknown or sample name
+	    ## They are separated by ';'
 
 	    my %info = ();
 	    my @infofield = split(/;/, $vcfline{"INFO"});
@@ -918,6 +1402,29 @@ sub parse_vcf {
 		}
 	    }
 	    
+	    ## Get the FORMAT and the data
+	    my %sampledata = ();
+	    my @formatfield = split(/:/, $vcfline{"FORMAT"});
+	    my @samplefield = ();
+	    if (exists $vcfline{$sample}) {
+	    
+		@samplefield = split(/:/, $vcfline{$sample});
+	    }
+	    else {
+
+		@samplefield = split(/:/, $vcfline{'unknown'});
+	    }
+
+	    ## it will the data to 'DATA'
+	    my $f = 0;
+	    foreach my $form (@formatfield) {
+	    
+		$sampledata{$form} = $samplefield[$f];
+		$f++;
+	    }
+	    
+	    $vcfline{'DATA'} = \%sampledata;
+
 	    ## Replace the info by the hashref
 
 	    $vcfline{"INFO"} = \%info;
@@ -930,6 +1437,7 @@ sub parse_vcf {
 		if ($vcfline{"QUAL"} < $min_qual) {
 		    
 		    $selected = 0;
+		    $counters{'under min. map quality'}++;
 		}
 	    }
 	    if ($min_cov) {
@@ -937,6 +1445,7 @@ sub parse_vcf {
 		if ($vcfline{"INFO"}->{"DP"} < $min_cov) {
 		
 		    $selected = 0;
+		    $counters{'under min. coverage'}++;
 		}
 	    }
 	    if ($max_cov) {
@@ -944,6 +1453,7 @@ sub parse_vcf {
 		if ($vcfline{"INFO"}->{"DP"} > $max_cov) {
 		
 		    $selected = 0;
+		    $counters{'over max. coverage'}++;
 		}
 	    }
 
@@ -952,11 +1462,61 @@ sub parse_vcf {
 
 	    if ($selected == 1) {
 	    
+		## There is a problem for the allele freq. Sometimes it is
+		## represented as AF and other times as AF1
+		## To fix it.
+
+		my %info = %{$vcfline{"INFO"}};
+		my $allelefreq = '';
+		if (exists $info{"AF"}) {
+		
+		    $allelefreq = $info{"AF"};
+		}
+		elsif (exists $info{"AF1"}) {
+		
+		    $allelefreq = $info{"AF1"};
+		}
+		else {
+		
+		    print STDERR "Warning: No AF was found in the VCF file";
+		}
+
+		## It will get the genotype info using GT from DATA
+		my $gt = $vcfline{"DATA"}->{"GT"};
+		
+		## If the SNPs are phased it will use "|" otherwise "/"
+		## genotypes are codify with 0 for reference and 1 for
+		## alt. If there are more alt, it will use more numbers
+		## for example: REF=A   ALT=C,T
+		## for a tetraploid A,A,C,T will be code as 0/0/1/2
+
+		my @genotypes = ();
+		my @variations = ($vcfline{"REF"}, split(/,/, $vcfline{"ALT"}));
+
+		my @gtvals = split(/\/|\|/, $gt);
+		my $ploidy = scalar(@gtvals);
+
+		foreach my $gtval (@gtvals) {
+		
+		    push @genotypes, $variations[$gtval];
+		}
+		my $genotype = join(",", @genotypes);
+
+		my %genotypeinfo = (
+		    'genotype'   => $genotype,
+		    'allelefreq' => $vcfline{"INFO"}->{"AF"},
+		    'ploidy'     => $ploidy,
+		    );
+
 		my $marker_id = $vcfline{"CHROM"} . ":" . $vcfline{"POS"};
-		$genot{$marker_id} = { $sample => $vcfline{"ALT"}};
-		$marks{$marker_id} = { 'position' => $vcfline{"POS"}, 
-				       'seqID'    => $vcfline{"CHROM"} };
+		$genot{$marker_id} = { $sample => \%genotypeinfo};
+		$marks{$marker_id} = { 
+		    'position'  => $vcfline{"POS"}, 
+		    'seqID'     => $vcfline{"CHROM"},
+		    'reference' => $vcfline{"REF"},
+		};
 		$mkmap{$vcfline{"CHROM"}} = { $vcfline{"POS"} => $marker_id };
+		$counters{'filter pass'}++
 	    }	    
 	}
     }
@@ -964,12 +1524,467 @@ sub parse_vcf {
     my %results = (
 	'genotypes' => \%genot, 
 	'markers'   => \%marks, 
-	'positions' => \%mkmap
+	'positions' => \%mkmap,
+	'counters'  => \%counters,
     );
 
     return \%results;
 }
 
+
+##############################################################################
+## multithread_bed_parser
+##############################################################################
+#  Usage: $geno_href = multithread_cov_parser(
+#    \%beds, $geno_href, $marks_href, $threads, \%cov_range);
+#  Desc: 1) Package the files in jobs-packages depending of the number of
+#           threads.
+#        2) Parse each of bed the files and return different variables 
+#           (see below)
+#        3) Merge the different variables
+#  Ret: $ghref, a hash ref as: $markerID => { $sample => { 
+#        'genotype' => $genotype, 'allelefreq' => $allelefreq } )
+#  Args: $bed_href, a hash ref as: tag => bed_file
+#        $geno_href, a hash ref (see return section)
+#        $marks_href, a hash ref with key=$markerID and value=hashref
+#        $threads, a integer
+#        $covrange_ref, a hashref (see coverage_range() )
+#  Side_Effects: die if something is wrong.
+
+sub multithread_bed_parser {
+    my $bed_href = shift ||
+	die("\nERROR: No bed hashref was supplied to multithread_bed_parser\n");
+    my $results_href = shift ||
+	die("\nERROR: No result href was supplied to multithread_bed_parser\n");
+    my $threads = shift;
+    my $cv_href = shift;
+ 
+    ## Check the ref. for each variable
+
+    unless (ref($bed_href) eq 'HASH') {
+    
+	die("\nERROR: bed href supplied to multithread_bed_parser isnt HREF\n");
+    }
+    unless (ref($results_href) eq 'HASH') {
+    
+	die("\nERROR: gen href supplied to multithread_bed_parser isnt HREF\n");
+    } 
+    unless (ref($cv_href) eq 'HASH') {
+    
+	die("\nERROR: cv href supplied to multithread_vcf_parser isnt HREF\n");
+    }
+
+    ## Define the variables
+
+    my %counts = ();
+    my %parsed_bed = ();
+
+    ## Get the genotypes and markers
+    my $geno_href = $results_href->{'genotypes'};
+    my $marks_href = $results_href->{'markers'};
+
+    ## Job packaging for the parsing
+
+    my %packages = job_packaging($bed_href, $threads);
+    
+    my $pck  = 0;
+    foreach my $pack (sort {$a <=> $b} keys %packages) {
+	
+	$pck++;
+	my $j = 0;
+	my %th_procs = ();
+
+	my %jobs = %{$packages{$pack}};
+
+	foreach my $tag (sort keys %jobs) {
+
+	    ## It will skip the no selected tags
+	    
+	    $j++;
+	    my $bedf = $jobs{$tag};
+	    my $icov_href = $cv_href->{$tag};
+	    my $th_proc = threads->create(
+		\&parse_bed, $bedf, $tag, $geno_href, $marks_href, $icov_href);
+	    $th_procs{$tag} = $th_proc;
+	}
+	
+	foreach my $tag (sort keys %th_procs) {
+	
+	    my $th_proc = $th_procs{$tag};
+	    my $th_id = $th_proc->tid();
+	    my $th_res = $th_proc->join();
+
+	    unless (defined($th_res)) {
+		warning("\tExecution error for thread $th_id\n");
+		my $error = $th_proc->error();
+		print "\n===== ERROR $th_id =====\n$error\n================\n";
+	    }
+	    
+	    $parsed_bed{$tag} = $th_res;
+	}
+    }
+
+    my %count4table = ();
+    foreach my $tag (keys %parsed_bed) {
+	
+	my %counters = %{$parsed_bed{$tag}->{'counters'}};
+	$count4table{$tag} = { 
+	    'sample positions'  => $counters{'sample positions'},
+	    'added markers' => $counters{'added markers'},
+	};
+    }
+    print STDERR "\tSummary of BED parsing.\n";
+    print_table(\%count4table, 1);
+  
+    ## Now it will merge the SNPs
+    print STDERR "\n\tMerging markers from different samples.";
+    
+    ## Also it will calculate the percentage of missing data
+    my %mark_count = ();
+
+    foreach my $tag (keys %parsed_bed) {
+    
+	my %genot = %{$parsed_bed{$tag}->{genotypes}};
+	$mark_count{$tag} = { 'markers' => 0, 'missing data' => 0 };
+
+	foreach my $marker_id (keys %genot) {
+
+	    if (exists $genot{$marker_id}->{$tag}) {
+
+		$mark_count{$tag}->{'markers'}++;
+
+		if (exists $geno_href->{$marker_id}) {
+	    
+		    $geno_href->{$marker_id}->{$tag} = 
+			$genot{$marker_id}->{$tag};
+		}
+		else { 
+		    $geno_href->{$marker_id} = { 
+			$tag => $genot{$marker_id}->{$tag}
+		    };
+		}
+	    }
+	}
+    }
+    my $total_marks = scalar(keys %{$geno_href});
+    print STDERR "\n\n\tTOTAL NUMBER OF MARKERS:\t\t$total_marks\n";
+
+    ## It will check also how many samples per marker
+    my $common_marks = 0;
+
+    my $sample_size = scalar(keys %parsed_bed);
+
+    foreach my $mk (keys %{$geno_href}) {
+    
+	my %gnt = %{$geno_href->{$mk}};
+	my $marker_rep = scalar(keys %gnt);
+
+	## It will calculate the percentage of the representation of each
+	## marker
+	
+	my $perc = $marker_rep * 100 / $sample_size;
+	my $perc_obj = Math::BigFloat->new($perc);
+	$marks_href->{$mk}->{'sample representation'} = $perc_obj->bfround(-2);
+	
+	if ($marker_rep == $sample_size) {
+	
+	    $common_marks++;
+	}
+    }
+    print STDERR "\tMARKERS PRESENT IN ALL THE SAMPLES:\t$common_marks\n";
+
+    ## Now it will calculate the percentage of missing data
+    foreach my $tag (keys %mark_count) {
+    
+	my $marks_c = $mark_count{$tag}->{'markers'};
+	my $perc = ($total_marks - $marks_c) * 100 / $total_marks;
+	my $perc_obj = Math::BigFloat->new($perc);
+	$mark_count{$tag}->{'missing data'} = $perc_obj->bfround(-2);
+    }
+
+    print_table(\%mark_count, 0);
+
+    $results_href->{'genotypes'} = $geno_href;
+    $results_href->{'markers'} = $marks_href; 
+
+    return(%{$results_href});
+}
+
+
+##############################################################################
+## parse_bed
+##############################################################################
+#  Usage: $results_href  = 
+#     parse_bed($bed, $tag, $genohref, $markshref, $covhref)
+#  Desc: Parse the BED file completing the SNPs from VCF file
+#  Ret: $results_href, with tow keys genotypes ($ghref) and counter ($counthref)
+#       $ghref, a hash ref as: $markerID => { $sample => {
+#               'genotype' => $genotype, 'allelefreq' => $allelefreq } )
+#       $counthref, a hash with counter keys
+#  Args: $bed, a string (filename)
+#        $tag, a string with the sample name
+#        $genohref, a hashref (see Ret. section)
+#        $markshref, a hashref with the markers (see function parse_vcf)
+#        $covhref, a hashref as: $type => $value (type 'min' and''max')
+#  Side_Effects: die if something is wrong.
+
+sub parse_bed {
+    my $bed_file = shift
+	|| die("ERROR: No bed file was supplied to parse_bed()\n");
+    my $sample = shift
+	|| die("ERROR: no sample (tag) was supplied to parse_bed().\n");
+    my $geno_href = shift
+	|| die("ERROR: No geno href was supplied to parse_bed().\n");
+    my $mrks_href = shift
+	|| die("ERROR: No marks href was supplied to parse_bed().\n");
+    my $cov_href = shift;
+
+    unless (ref($geno_href) eq 'HASH') {
+	
+	die("\nERROR: geno_href supplied to parse_vcf() isnt HASHREF\n");
+    } 
+    unless (ref($mrks_href) eq 'HASH') {
+	
+	die("\nERROR: marks_href supplied to parse_vcf() isnt HASHREF\n");
+    }
+    unless (ref($cov_href) eq 'HASH') {
+	
+	die("\nERROR: cov_href supplied to parse_vcf() isnt HASHREF\n");
+    }
+
+    ## It will create a new hash for geno (and merge later with other)
+    ## geno hashes (it is a parallel process so can be messy if they modify
+    ## the same variable at the same time)
+
+    my %genotypes = %{$geno_href};
+
+    my $min_cov = $cov_href->{'min. coverage'};
+    my $max_cov = $cov_href->{'max. coverage'};
+
+    ## Counters for stats
+    my %counters = (
+	'sample positions' => 0,    
+	'added markers'  => 0,
+	);
+
+    open my $bed_fh, '<', $bed_file;
+    my $l = 0;
+    my $L = `cat $bed_file | wc -l`;
+    chomp($L);
+
+    while(<$bed_fh>) {
+
+	chomp($_);
+	my @fields = split(/\t/, $_);
+	
+	## To make compatible with simple coverage files (not bed)
+	## it will take 3 columns (SeqID, Position, Depth) or 5 columns
+	## (SeqID, FeatureSeq_Start (0-based), FeatureSeq_End (1-based), 
+	## Position, Depth).
+	
+	unless ($_ =~ m/#/) {            ## Ignore the lines with pounds
+	    
+	    $l++;
+	    $counters{'sample positions'}++;
+
+	    if ($verbose && $threads == 1) {
+		
+		print STDERR "\tParsing line: $l of $L         \r";
+	    }
+
+	    my ($seqid, $pos, $depth);
+	    
+	    if (scalar(@fields) == 5) {
+		
+		$seqid = $fields[0];
+		$pos = $fields[3];
+		$depth = $fields[4];
+	    }
+	    elsif (scalar(@fields) == 3) {
+		
+		$seqid = $fields[0];
+		$pos = $fields[1];
+		$depth = $fields[2];
+	    }
+	    else {
+		
+		warn("Line $l from $bed_file file doesnt have 5 cols\n");
+	    }    
+	
+	    ## Now it will compare if there is a SNP for an specific position
+	    ## (mrks_href) if it does it will check for the specific sample
+	    ## and it will add the SNP (geno_href)
+
+	    my $marker_id = $seqid . ":" . $pos;
+	    if (exists $mrks_href->{$marker_id}) {
+	    
+		my $ref = $mrks_href->{$marker_id}->{'reference'};
+
+		## Next check if the coverage meet the filters
+
+		if ($depth >= $min_cov && $depth <= $max_cov) {
+ 
+		    unless (exists $geno_href->{$marker_id}->{$sample}) {
+		
+			my $genotype = $ref;
+		    
+			## The default allele freq will be 1.
+			my $allelefreq = 1; 
+			my %genoinfo = ( 
+			    genotype   => $genotype, 
+			    allelefreq => $allelefreq
+			    );
+			$genotypes{$marker_id}->{$sample} = \%genoinfo;
+			$counters{'added markers'}++;
+		    }
+		}
+	    }
+	}
+    }
+
+    my %results = (
+	'genotypes' => \%genotypes, 
+	'counters'  => \%counters,
+    );
+
+    return \%results;
+}
+
+
+##############################################################################
+## apply_filters
+##############################################################################
+#  Usage: my %selected_markers = apply_filters(\%results, \%filters);
+#  Desc: Filter the markers contained in results based in 
+#        distances, % missing and biallelic.
+#  Ret: %selected_markers, a hash with key=marker_id
+#  Args: \%results, a hash ref. with results of previous steps (see before)
+#        \%filters, a hash ref with the filters (see before)
+#  Side_Effects: die if something is wrong.
+
+
+sub apply_filters {
+    my $res_href = shift
+	|| die("ERROR: No results href was supplied to apply_filters()\n");
+    my $fil_href = shift
+	|| die("ERROR: No filters href was supplied to apply_filters().\n");
+
+    unless (ref($res_href) eq 'HASH') {
+	
+	die("\nERROR: results_href supplied to apply_filters() isnt HASHREF\n");
+    } 
+    unless (ref($fil_href) eq 'HASH') {
+	
+	die("\nERROR: filters_href supplied to apply_filters() isnt HASHREF\n");
+    } 
+
+    my %selected_markers = ();
+
+    ## Get the data and the filters from the hrefs
+
+    my $geno_href = $res_href->{'genotypes'};
+    my $marks_href = $res_href->{'markers'};
+    my $map_href = $res_href->{'maps'};
+
+    my $mindist = $fil_href->{'MIN. SNP DISTANCE'};
+    my $maxdist = $fil_href->{'MAX. SNP DISTANCE'};
+    my $percmiss = $fil_href->{'MAX. %MISSING DATA'};
+    my $biallelic = $fil_href->{'ONLY BIALLELIC'};
+
+    ## Set up the counter
+
+    my %filtcnt = (
+	'by min. distance'  => 0,
+	'by max. distance'  => 0,
+	'by % missing data' => 0,
+	'not biallelic'     => 0,
+    );
+    
+    foreach my $seq_id (sort keys %{$map_href}) {
+
+	## get the marks id list sorted by position
+	
+	my %marks_s = %{$map_href->{$seq_id}};
+	my @marksbypos = sort { $a <=> $b } keys %marks_s;
+    
+	my $p = 0;
+	foreach my $position (@marksbypos) {
+    
+	    my $mark_id = $marks_s{$position};
+
+	    ## By default the marker will be selected
+	    my $selected = 1;
+
+	    ## a) distance ##
+	    ## Don't test the first for each read
+	    if ($p > 0) {
+	
+		my $pv = $p - 1;
+		my $prev_mark_id = $marks_s{$marksbypos[$pv]};
+		my $curr_mark_p = $marks_href->{$mark_id}->{'position'};
+		my $prev_mark_p = $marks_href->{$prev_mark_id}->{'position'};
+	
+		my $diff = $curr_mark_p - $prev_mark_p;
+		if (looks_like_number($mindist) && $diff < $mindist) {
+	    
+		    $selected = 0;
+		    $filtcnt{'by min. distance'}++;
+		}
+		elsif (looks_like_number($maxdist) && $diff > $maxdist) {
+	    
+		    $selected = 0;
+		    $filtcnt{'by max. distance'}++;
+		}
+	    }
+	    
+	    ## b) % missing data ##
+	    my $miss = 100 - $marks_href->{$mark_id}->{'sample representation'};
+	    if ($miss > $percmiss) {
+		
+		$selected = 0;
+		$filtcnt{'by % missing data'}++;
+	    }
+
+	    ## c) Is biallelic ? ##
+	    ## First get the data for each sample and use the reference
+	    my %variants = ( $marks_href->{$mark_id}->{'reference'} => 1 ); 
+	    my %genodata = %{$geno_href->{$mark_id}};
+	    foreach my $tag (keys %genodata) {
+		
+		my @geno = split(",", $genodata{$tag}->{'genotype'});
+		foreach my $snp (@geno) {
+	    
+		    $variants{$snp} = 1;
+		}
+	    }
+	
+	    ## Add variants to the marks href
+	    my @variants = sort {$a cmp $b} keys %variants; 
+	    my $alleles = join("/", @variants);
+	
+	    if ($biallelic && scalar(@variants) > 2) {
+		
+		$selected = 0;
+		$filtcnt{'not biallelic'}++;
+	    }
+
+	    if ($selected == 1) {
+    
+		$selected_markers{$mark_id} =  1;
+	    }
+	    $p++;
+	}
+    }
+
+    ## Print the results
+    print STDERR "\n";
+    print STDERR "\tFILTER BY MIN. DISTANCE:\t\t$filtcnt{'by min. distance'}\n";
+    print STDERR "\tFILTER BY MAX. DISTANCE:\t\t$filtcnt{'by max. distance'}\n";
+    print STDERR "\tFILTER BY % MISSING:\t\t\t$filtcnt{'by % missing data'}\n";
+    print STDERR "\tFILTER BY NOT BIALLELIC:\t\t$filtcnt{'not biallelic'}\n";
+
+    return(%selected_markers);
+}
 
 __END__
 
@@ -993,6 +2008,8 @@ __END__
   -D int          max. distance                     [optional]
   -m int          % missing ind.                    [default:0]
   -B              only biallelic                    [optional]
+  -P              collapse polyploid                [optional]
+  -x              min. SNP per sample               [default:0]
   -f tag=value    vcftag filter                     [optional]
   -o string       out base name                     [default:snp_combine_out]
   -t string       output type                       [default:regular]
@@ -1056,9 +2073,17 @@ B<max_distance>      Max. distance (bp) between SNPs to be selected (optional)
 
 B<perc_missing>      Percentage of missing data allowed (0 by default)
 
-=item  -B|--biallelic
+=item -x|--min_snp_sample
 
-B<biallelic_switch>  Select only biallelic markers (None by default)
+B<min_snp_sample>    Min. number of SNPs to use a sample (0 by default)
+
+=item -B|--biallelic
+
+B<biallelic_switch>  Select only biallelic markers (No by default)
+
+=item -P|--polyploid_collapse
+
+B<polyploid_collapse> Collapse the polyploid to diploid form (No by default)
 
 =item -f|--vcftag_filter
     
@@ -1087,13 +2112,28 @@ B<switch_verbose>    Print more information during the program execution
 =head1 DESCRIPTION
 
  This script parse multiple vcf files and creates a common HapMap file. 
+ The VCF should have one sample per file. If the VCF file has multiple
+ samples only the first one should be parsed. The sample name for the VCF
+ file should be the same than the sample tag or 'unknown' (default name
+ for most of the programs).
+ 
  
  Available filters: -d (min. read depth for the SNP position)
                     -D (max. read depth for the SNP position)
                     -q (min. SNP score)
-                    -H (filter out positions where N.alleles > Polyploidy x 2
-                    -l (select only markers from id list)
-                    -e (exclude markers from the specified SeqID or chromosomes)
+                    #-l (select only markers from id list)
+                    #-e (exclude markers from the specified SeqID or chromosomes)
+
+ Polyploid collapsing:
+  This script was used to compare diploid and tetraploid at the same time. For
+  this purpose the hapmap file should have the same "polyploidy" for all the
+  samples. There are two levels of collapse:
+
+   -P 0  No collapse (default)
+   -P 1  AAAA => AA, AAAB => AB, AABB => AB, ABBB => AB, BBBB => BB
+   -P 2  AAAA => AA, AAAB => AA, AABB => AB, ABBB => BB, BBBB => BB
+  
+   No biallelic markers will be ignored (-p means that it will enable -B)
 
  Available output types: 
   + "regular" (default): One HapMap file with all the sequences and markers.
