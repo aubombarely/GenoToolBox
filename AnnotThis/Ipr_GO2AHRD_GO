@@ -1,0 +1,389 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ Ipr_GO2AHRB_GO
+ Script to extract the GO terms from IPR file and produce a AHRD input
+
+=cut
+
+=head1 SYPNOSIS
+
+ Ipr_GO2AHRB_GO [-h] -i <ipr_result> [-o <output>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<ipr_result>                   InterPro XML result file (mandatory)
+
+=item -o
+
+B<output>                       Output filename (by default STDOUT)
+
+=item -C
+
+B<add_category>                 Add category column to the output
+
+=item -h
+
+B<help>                         print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script extraxt GO terms from a InterPro results raw file, producing
+ an output with 4 columns: ID, Weight, GO_ID and GO_description
+
+ A single ID can have multiple hits to the same GO (e.g. two domains with
+ the same GO annotation). The weight normalize this contributions as:
+  
+  GO_ID * N / sum(GO_ID)
+
+ It also can add the category of each GO Term (-C)
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use XML::Simple;
+use Data::Dumper;
+use Math::BigFloat;
+
+our ($opt_i, $opt_o, $opt_C, $opt_h);
+getopts("i:o:Ch");
+
+if (!$opt_i && !$opt_o && !$opt_C && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+my $input = $opt_i ||
+    die("\nERROR: -i <ipr_result> was not supplied to the script.\n\n");
+
+#create object
+my $xml = XML::Simple->new();
+
+# read XML file
+my $data = $xml->XMLin($input);
+
+#print Dumper($data);
+
+# It wills store the data with the following structure
+# %go_count = ( $gene_id => { $goterm_id => $count } )
+# %go_db = ( $goterm_id => { 'name' => $name, 'category' => $category} )
+# 
+# Also to be able to normalice the counts it will score the weight of a 
+# term based in how many times appears
+# %annot_counts = ( $gene_id => $annot_count );
+
+
+my %go_count = ();
+my %go_db = ();
+my %annot_counts = ();
+
+# $data is a hash ref.
+my %data = %{$data};
+
+## Count the protein fields
+my $p = 0;
+
+foreach my $key (%data) {
+
+    foreach my $hashref (@{$data{'protein'}}) {
+
+	$p++;
+	my $id = $hashref->{xref}->{id};
+	my @multiple_ids = ();
+
+	unless (defined $id) {
+	    
+	    ## Happens when two or more proteins have the same 
+	    ## matches (it is the same protein, so it has the same md5)
+
+	    my %hash = %{$hashref};
+	    my %xreffields = %{$hash{'xref'}};
+	    foreach my $key (keys(%xreffields)) {
+
+		my %extra_ids = %{$xreffields{$key}};
+		
+		## it has just one key (id)
+		push @multiple_ids, $extra_ids{'id'};
+	    }
+	}
+	else {
+	
+	    push @multiple_ids, $id;
+	}
+
+	## File structure:
+	## >Protein
+	##   >Matches
+	##     >GO-xref:
+	##      Go terms can be in two formats
+	##      Name => Hashref with more data
+	##      DB, NAME, CATEGORY and ID and data
+	##      so it will homogenize them    
+
+
+	my %goterms = ();
+
+	if (exists $hashref->{matches}) {
+	
+	    my %matches = %{$hashref->{matches}};
+	    foreach my $match_db (sort keys(%matches)) {
+
+		my $hit_ref = $matches{$match_db};
+
+		if (ref($hit_ref) eq 'HASH') {
+	    		 
+		    my %sig = %{$hit_ref->{'signature'}};
+		    if (exists $sig{entry}) {
+		    
+			my %entry = %{$sig{entry}};
+			my $ac = $entry{ac};
+			if (defined($entry{'go-xref'})) {
+				
+			    my %go = %{$entry{'go-xref'}};
+			    %goterms = parse_goxref(\%go, \%goterms); 
+			}
+		    }
+		}
+		elsif (ref($hit_ref) eq 'ARRAY') {
+		
+		    foreach my $subhit_ref (@{$hit_ref}) {
+		    
+			my %sig = %{$subhit_ref->{'signature'}};
+			if (exists $sig{entry}) {
+			    
+			    my %entry = %{$sig{entry}};
+			    my $ac = $entry{ac};
+			    if (defined($entry{'go-xref'})) {
+				
+				my %go = %{$entry{'go-xref'}};
+				%goterms = parse_goxref(\%go, \%goterms); 
+			    }
+			}
+		    } 		
+		}
+	    }
+	}
+	
+	## At this point it has catched all the GO terms for an 
+	## specific protein
+	
+	foreach my $mid (@multiple_ids) {
+
+	    $go_count{$mid} = {};
+	}
+	my $total_annot = 0;
+	foreach my $goname (sort keys %goterms) {
+	
+	    my %godata = %{$goterms{$goname}};
+		
+	    $total_annot += $godata{'count'};
+	    my $goterm_id = $godata{'id'};
+
+	    ## Add the data to different hashes 
+	    $go_db{$goterm_id} = { 
+		'name'     => $goname, 
+		'category' => $godata{'category'}
+	    };
+	    
+	    foreach my $mid (@multiple_ids) {
+
+		$go_count{$mid}->{$goterm_id} = $godata{'count'};
+	    }
+	}
+	
+	foreach my $mid (@multiple_ids) {
+
+	    $annot_counts{$mid} = $total_annot;
+	}
+    }
+}
+
+
+## Now it should have the hashes with the data, so it can produce the output 
+## with 4 columns: ID, Weight, GO_ID and GO_description
+
+my $ofh;
+if ($opt_o) {
+
+    open $ofh, '>', $opt_o;
+}
+
+
+
+foreach my $geneid (sort keys %go_count) {
+
+    my %go_data = %{$go_count{$geneid}};
+    my $total = $annot_counts{$geneid};
+
+    foreach my $goid (sort keys %go_data) {
+
+	my $count = $go_data{$goid};   
+	my $norm_count = $count / $total;
+	my $norm_count_o = Math::BigFloat->new($norm_count);
+	my $weight =  $norm_count_o->bfround(-2)->bstr();
+
+	my $godescrip = $go_db{$goid}->{'name'};
+	my @line = ($geneid, $weight, $goid, $godescrip);
+	if ($opt_C) {
+	
+	    push @line, $go_db{$goid}->{'category'}
+	}
+	my $pline = join("\t", @line);
+	
+	if ($opt_o) {
+
+	    print $ofh "$pline\n";
+	}
+	else {
+
+	    print STDOUT "$pline\n";
+	}
+    }
+}
+
+
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+        This script extraxt GO terms from a InterPro results raw file, 
+     producing an output with 4 columns: ID, Weight, GO_ID and GO_description
+
+        A single ID can have multiple hits to the same GO (e.g. two domains with
+     the same GO annotation). The weight normalize this contributions as:
+  
+        GO_ID * N / sum(GO_ID)
+
+        It also can add the category of each GO Term (-C)
+
+    Usage:
+      
+         Ipr_GO2AHRB_GO [-h] -i <ipr_result> [-o <output>]
+      
+    Flags:
+
+      -i <ipr_result>                   InterPro XML result file (mandatory)
+      -o <output>                       Output filename (by default STDOUT)
+      -C <add_category>                 Add category column to the output
+      -h <help>                         print the help
+
+EOF
+exit (1);
+}
+
+
+
+=head2 parse_goxref
+
+  Usage: my %goterms = parse_goxref($go_xref_href, $gene_go_href)
+  Desc: parse the go terms from the xref section
+  Ret: Same hash that contains all the go terms for a specific gene
+  Args: $go_xref_href, the hash ref. produced by the XML parsing
+        $gene_go_href, the hash ref. that it is storing the go info 
+        for each gene
+  Side_Effects: exit of the script
+
+=cut
+
+
+sub parse_goxref {
+    my $go_xref_href = shift ||
+	die("ERROR: No go_xref_href was supplied to parse_goxref()\n");
+    my $gene_go_href = shift ||
+	die("ERROR: No gene_go_href was supplied to parse_goxref()\n");
+
+    my %go = %{$go_xref_href};
+    my %goterms = %{$gene_go_href};
+
+    	
+    ## Define the categ. for catch Name/Hash format
+    my %tags = (
+	id       => 1,
+	db       => 1,
+	category => 1
+	);
+    
+    ## Set up name
+    my $name = '';			    
+
+    foreach my $got (sort {$b cmp $a }keys %go) {
+
+	## It means that it is a multiple lines
+	## go term. Name alsways come first
+	
+	if ($got eq 'name') {
+	    
+	    $name = $go{$got};
+	    $goterms{$name} = { 'count' => 1 };
+	}
+	
+	if (exists $tags{$got}) {
+	    
+	    $goterms{$name}->{$got} = $go{$got};
+	}
+	elsif (ref($go{$got}) eq 'HASH') {
+	    
+	    $name = $got;
+	    if (exists $goterms{$name}) {
+		
+		$goterms{$name}->{'count'}++;
+	    }
+	    else {
+		
+		$goterms{$name} = { 'count' => 1 };
+	    }
+	    foreach my $t (keys %{$go{$got}}) {
+		
+		$goterms{$name}->{$t} = $go{$got}->{$t};
+	    }   
+	}				
+    }
+
+    return %goterms;
+}
+
+
+
+####
+1; #
+####
