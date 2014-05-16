@@ -1,0 +1,391 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ AddAHRD2Gff
+ Script to add AHRD annotations to a GFF3 file
+
+=cut
+
+=head1 SYPNOSIS
+
+ AddAHRD2Gff [-h] -g <gff3> -a <ahrd_annotations> [-o <output>]
+             [-f <feature>][-E]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -g
+
+B<gff3>                         GFF3 file (mandatory)
+
+=item -a
+
+B<ahrd_annotations>             CSV file with the AHRD annotations (mandatory)
+
+=item -o
+
+B<output>                       Output filename
+
+=item -f
+
+B<feature_type>                 Feature type to annotate (default 'mRNA')
+
+=item -E
+
+<extended_annotation>           Extend the annotation to other fields
+
+=item -h
+
+B<help>                         print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script parse the AHRD csv file with 6 columns:
+   + Protein-Accession
+   + Blast-Hit-Accession
+   + AHRD-Quality-Code
+   + Human-Readable-Description
+   + Interpro-ID (Description)
+   + Gene-Ontology-ID (Name)
+
+  And add to the GFF3 file as the following attributes:
+  Note="Human-Readable-Description"
+  Ontology_term="Gene-Ontology-ID"
+
+  If it is used (-E) (Extended annotation):
+  Functional_annotation="Human-Readable-Description"
+  Functional_ahrd_qcode="AHRD-Quality-Code"
+  Functional_blast_hit="Blast-Hit-Accession"
+  Functional_ipr_hit="Interpro-ID"
+  Ontology_term="Gene-Ontology-ID"
+  
+  The feature to add the annotation can be specified using -f.
+
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+
+our ($opt_g, $opt_a, $opt_o, $opt_f, $opt_E, $opt_h);
+getopts("g:a:o:f:Eh");
+
+if (!$opt_g && !$opt_a && !$opt_o && !$opt_f && !$opt_E && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+my $gff3_file = $opt_g ||
+    die("\nERROR: -g <gff3> was not supplied to the script.\n\n");
+
+my $ahrd_file = $opt_a ||
+    die("\nERROR: -a <ahrd> was not supplied to the script.\n\n");
+
+
+my $selfeat = $opt_f || 'mRNA';
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## AddAHRD2Gff Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+
+print_header("1) Parsing AHRD file.");
+
+open my $afh, '<', $ahrd_file;
+my %ahrd = ();
+
+while(<$afh>) {
+
+    chomp($_);
+    
+    ## Ignore the header and the comments
+
+    if ($_ !~ /^(#|Protein-Accession)/) {
+	
+	my @data = split(/\t/, $_);
+	
+	## Parse IPR
+
+	my %ipr = ();
+	if ($data[4]) {
+	
+	    ## Domains are separated by commas but they can be used also in 
+	    ## the description: IPRXXXXXX (description), ....
+
+	    $data[4] =~ s/\),/\),\;/g;
+	    my @iprs = split(/;/, $data[4]);
+	    foreach my $iprline (@iprs) {
+	    
+		if ($iprline =~ m/(IPR\d+)\s+\((.+)\)/) {
+		
+		    $ipr{$1} = $2;
+		}		
+	    }	    
+	}
+ 
+	my %go = ();
+	if ($data[5]) {
+	
+	    ## Domains are separated by commas but they can be used also in 
+	    ## the description: GOXXXXXX (description), ....
+
+	    $data[5] =~ s/\),/\),\;/g;
+	    my @gos = split(/;/, $data[5]);
+	    foreach my $goline (@gos) {
+	    
+		if ($goline =~ m/(GO:\d+)\s+\((.+)\)/) {
+		
+		    $go{$1} = $2;
+		}		
+	    }	    
+	}
+
+	if ($data[0]) {
+
+	    $ahrd{$data[0]} = {
+		blast_hit   => $data[1],
+		ahrd_code   => $data[2],
+		description => $data[3],
+		interpro    => \%ipr,
+		go_terms    => \%go
+	    };
+	}
+    }    
+}
+
+my $gene_parsed = scalar(keys(%ahrd));
+
+print STDERR "\t$gene_parsed descriptions have been parsed.\n";
+
+print_header("2) Parsing GFF3 file.");
+
+open my $gfh, '<', $gff3_file;
+my $count = 0;
+
+my $ofh = "STDOUT";
+if ($opt_o) {
+
+    open my $otfh, '>', $opt_o;
+    $ofh = $otfh;
+}
+
+
+while(<$gfh>) {
+
+    chomp($_);
+    
+    ## Ignore the header and the comments
+
+    if ($_ !~ /^#/ && $_ =~ /.+/) {
+
+	my @gffline = split(/\t/, $_);
+	
+	if ($gffline[2] eq $selfeat) {
+	
+	    ## Get the ID
+	    my %feats = ();
+	    my @feats = split(/;/, $gffline[8]);
+	    foreach my $f (@feats) {
+	    
+		if ($f =~ m/(.+)=(.+)/) {
+		
+		    $feats{$1} = $2;
+		}
+	    }
+
+	    if (exists $ahrd{$feats{ID}}) {
+	    	
+		$count++;
+	
+		if ($opt_E) {
+		
+		    push @feats, 'Functional_annotation="'
+			.$ahrd{$feats{ID}}->{description}.'"';
+
+		    push @feats, 'Functional_ahrd_qcode="'
+			.$ahrd{$feats{ID}}->{ahrd_code}.'"';
+
+		    push @feats, 'Functional_blast_hit="'
+			.$ahrd{$feats{ID}}->{blast_hit}.'"';
+
+		    my @ipr = keys(%{$ahrd{$feats{ID}}->{interpro}});
+		
+		    if (scalar(@ipr) > 0) {
+			
+			push @feats, 'Functional_ipr_hit='.join(",", @ipr);
+		    }
+		}
+		else {
+		
+		    push @feats, 'Note="'.$ahrd{$feats{ID}}->{description}.'"';
+		}
+
+		my @onto = keys(%{$ahrd{$feats{ID}}->{go_terms}});
+		
+		if (scalar(@onto) > 0) {
+
+		    push @feats, 'Ontology_term='.join(",", @onto);
+		}
+		
+		$gffline[8] = join(";", @feats);
+		my $pline = join("\t", @gffline);
+ 
+		if ($opt_o) {
+		    
+		    print $ofh "$pline\n";
+		}
+		else {
+		    
+		    print STDOUT "$pline\n";
+		}	    
+	    }
+	    else {
+	    
+		 if ($opt_o) {
+		    
+		     print $ofh "$_\n";
+		 }
+		 else {
+		     
+		     print STDOUT "$_\n";
+		 }	   
+	    }
+
+	}
+	else {
+	
+	    if ($opt_o) {
+		
+		print $ofh "$_\n";
+	    }
+	    else {
+		
+		print STDOUT "$_\n";
+	    }	   
+	}
+    }
+    else {
+
+	if ($opt_o) {
+	     
+	    print $ofh "$_\n";
+	}
+	else {
+	    
+	    print STDOUT "$_\n";
+	}	   	
+    }
+}
+
+print STDERR "\t$count descriptions have been added to $selfeat elements.\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+      This script parse the AHRD csv file with 6 columns:
+        + Protein-Accession
+        + Blast-Hit-Accession
+        + AHRD-Quality-Code
+        + Human-Readable-Description
+        + Interpro-ID (Description)
+        + Gene-Ontology-ID (Name)
+
+      And add to the GFF3 file as the following attributes:
+       Note="Human-Readable-Description"
+       Ontology_term="Gene-Ontology-ID"
+
+     If it is used (-E) (Extended annotation):
+       Functional_annotation="Human-Readable-Description"
+       Functional_ahrd_qcode="AHRD-Quality-Code"
+       Functional_blast_hit="Blast-Hit-Accession"
+       Functional_ipr_hit="Interpro-ID"
+       Ontology_term="Gene-Ontology-ID"
+  
+     The feature to add the annotation can be specified using -f.
+
+
+    Usage:
+      
+       AddAHRD2Gff [-h] -g <gff3> -a <ahrd_annotations> [-o <output>]
+             [-f <feature>][-E]
+      
+    Flags:
+
+      -g <gff3>                  GFF3 file (mandatory)
+      -a <ahrd_annotations>      CSV file with the AHRD annotations (mandatory)
+      -o <output>                Output filename
+      -f <feature_type>          Feature type to annotate (default 'mRNA')
+      -E <extended_annotation>   Extend the annotation to other fields
+      -h <help>                  print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+####
+1; #
+####
