@@ -77,12 +77,14 @@ B<help>                   print the help
      CDS             => pred-SeqID-status-gene-\d+.\d+-mRNA-\d+:(cds|CDS)\d*
      five_prime_UTR  => pred-SeqID-status-gene-\d+.\d+-mRNA-\d+:five_prime_utr
      three_prime_UTR => pred-SeqID-status-gene-\d+.\d+-mRNA-\d+:three_prime_utr
+     tRNA            => prog-pred-SeqID-noncoding-type-gene-\d+.\d+-tRNA-\d+ 
 
      For example:
      * Genes: 
       augustus_masked-Niben044Ctg23129049-abinit-gene-0.0
       augustus_masked-Niben044Scf00002787-processed-gene-1.1
       maker-Niben044Scf00038998-augustus-gene-0.5
+      trnascan-Peaxi162Scf00035-noncoding-Lys_CTT-gene-5.0
      * mRNA
       augustus_masked-Niben044Ctg23129049-abinit-gene-0.0-mRNA-1
      * exon
@@ -100,12 +102,17 @@ B<help>                   print the help
       ID=NbC23129049g0001;PredictionNote=augustus_masked-abinitio
       ID=NbS00002787g0101;PredictionNote=augustus_masked-processed
       ID=NbS00038998g0005;PredictionNote=maker-augustus
+      ID=Peaxi162S00035t0050;PredictionNote=trnascan-noncoding-Lys_CTT
      * mRNA
       ID=NbC23129049g0001.1;Parent=NbC23129049g0001
+     * tRNA
+      ID=Peaxi162S00035t0050.1;Parent=Peaxi162S00035t0050
      * exon
       ID=NbC23129049g0001.1:exon:0001;Parent=NbC23129049g0001.1
+       ID=Peaxi162S00035t0050.1:exon:0001;Parent=Peaxi162S00035t0050.1
      * CDS
       ID=NbC23129049g0001.1:CDS:0001;Parent=NbC23129049g0001.1
+    
 
      Numeric formats will be calculated previously in the following way:
      1) Genes: Composed for two numbers, the formating will be set to:
@@ -360,6 +367,11 @@ while(<$gfffh>) {
 
     unless ($_ =~ m/#/ && $fasta == 0) {
 
+	## Just to correct the problem with tRNA it will replace
+        ## noncoding- for noncoding_
+
+	$_ =~ s/noncoding-/noncoding_/g;
+
 	my @data = split(/\t/, $_);
 	
 	## First store %dat and %ord
@@ -470,6 +482,50 @@ while(<$gfffh>) {
 
 		}
 	    }
+	    elsif ($data[2] eq 'tRNA') {
+
+		## tRNA should have at least three tags: ID, Name and Parent
+		## The script will create two more: AltID and PredictionNote
+
+		my $id = $feats{'ID'};
+		my $pid = $feats{'Parent'};
+		
+		unless (defined $id) {
+		
+		    warn("\nWARNING: tRNA for line:$l doesn't have any ID\n");
+		}
+		else {
+		    
+		   my $newid = rename_tRNA($id, \@drules, \@fcounts);
+		   my ($newpid, $pred) = rename_gene($pid, \@drules, \@fcounts);
+
+		   ## Now it will add the new feats
+
+		   foreach my $tag (@ordtags) {
+		   
+		       if ($tag eq 'ID' or $tag eq 'Name') {
+		       
+			   push @newfeats, $tag . '=' . $newid;
+		       }
+		       elsif ($tag eq 'Parent') {
+		       
+			   push @newfeats, 'Parent=' . $newpid;
+		       }
+		       else {
+		       
+			   push @newfeats, $tag . '=' . $feats{$tag};
+		       }
+		   }
+
+		   push @newfeats, 'AltID=' . $id;
+		   $equivid{$id} = $newid;
+
+		   ## Finally it will add the register to the mrnacomp
+
+		   $mrnacomp{$newid} = { strand => $data[6] };
+
+		}
+	    }
 	    elsif (exists $mrnachildren{$data[2]}) {
 
 		## They should have at least three tags: ID, Name and Parent
@@ -488,6 +544,10 @@ while(<$gfffh>) {
 		    $cnt++;
 		    my $newid = rename_exoncds($id, \@drules, \@fcounts, $cnt);
 		    my $newpid = rename_mRNA($pid, \@drules, \@fcounts);
+		    if ($id =~ m/trna/) {
+		    
+			$newpid = rename_tRNA($pid, \@drules, \@fcounts);
+		    }
 
 		    ## Now it will add the new feats
 
@@ -920,6 +980,16 @@ sub rename_gene {
     }
 
     ## Second, break the id in different parts
+    ## Depending of the type this could be different
+    ## Examples:
+    ##  augustus_masked-Niben044Ctg23129049-abinit-gene-0.0       5 Fields
+    ##  augustus_masked-Niben044Scf00002787-processed-gene-1.1    5 Fields
+    ##  maker-Niben044Scf00038998-augustus-gene-0.5               5 Fields
+    ##  trnascan-Peaxi162Scf00035-noncoding-Lys_CTT-gene-5.0      6 Fields
+    ##  The easiest way to fix that can be replace noncoding- for
+    ##  noncoding_
+    
+    ##    $id =~ s/noncoding-/noncoding_/; It is done at the begining
 
     my @idcomp = split(/-/, $id);
 		 
@@ -945,7 +1015,11 @@ sub rename_gene {
 	$gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
     }
 
-    my $newid = $idcomp[1] . 'g' . $gnt; 
+    my $newid = $idcomp[1] . 'g' . $gnt;
+    if ($id =~ m/trna/) {
+    
+	$newid = $idcomp[1] . 't' . $gnt;
+    }
 
     return($newid, $predic);
 }
@@ -971,11 +1045,11 @@ sub rename_gene {
 
 sub rename_mRNA {
     my $id = shift ||
-	die("ERROR: No id was supplied to the function rename_gene()\n");
+	die("ERROR: No id was supplied to the function rename_mRNA()\n");
     my $rules_aref = shift ||
-	die("ERROR: No rules arraayref. was supplied to rename_gene().\n");
+	die("ERROR: No rules arraayref. was supplied to rename_mRNA().\n");
     my $fcount_aref = shift ||
-	die("ERROR: No counter arrayref was supplied to rename_gene().\n");
+	die("ERROR: No counter arrayref was supplied to rename_mRNA().\n");
 
     my @rules = @{$rules_aref};
     my @fcount = @{$fcount_aref};
@@ -1023,6 +1097,85 @@ sub rename_mRNA {
 
     return $newid;
 }
+
+=head2 rename_tRNA
+
+  Usage: my $new_id = rename_tRNA($old_id, \@rules, \@formatcounts);
+
+  Desc: rename a tRNA ID based in the rules and the format_count
+
+  Ret: $new_id, a scalar (string)
+
+  Args: $old_id, a calar
+        \@rules, an arrayref. with the rules regexp
+        \@formatcounts, an arrayref with to format the gene counters
+
+  Side_Effects: None
+
+  Example:  my $new_id = rename_tRNA($old_id, \@rules, \@formatcounts);
+
+=cut
+
+sub rename_tRNA {
+    my $id = shift ||
+	die("ERROR: No id was supplied to the function rename_tRNA()\n");
+    my $rules_aref = shift ||
+	die("ERROR: No rules arraayref. was supplied to rename_tRNA().\n");
+    my $fcount_aref = shift ||
+	die("ERROR: No counter arrayref was supplied to rename_tRNA().\n");
+
+    my @rules = @{$rules_aref};
+    my @fcount = @{$fcount_aref};
+
+    ## First, apply the rules to the id
+
+    foreach my $rule (@rules) {
+		    
+	if ($rule =~ m/^s\/(.+)\/(.+)\/\w*$/) {
+	    
+	    my $match = $1;
+	    my $subst = $2;
+
+	    $id =~ s/$match/$subst/;			
+	}		    
+    }
+
+    ## Second, break the id in different parts
+
+    my @idcomp = split(/-/, $id);
+
+    ## Third, get the format for the gene counter
+
+    my ($gn1, $gn2) = split(/\./, $idcomp[4]);
+
+    ## Usually $gn2 starts in 0, so it will add 1
+
+    $gn2++;
+
+    my $gnt = ();
+    if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
+		    
+	$gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
+    }
+    else {
+		    
+	$gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
+    }
+
+    ## Forth, get the mRNA count
+
+    my $trnat = sprintf("%0$fcounts[1]s", $idcomp[6]);
+
+    my $newid = $idcomp[1] . 'g' . $gnt . '.' . $trnat;
+    if ($id =~ m/trna/) {
+    
+	$newid = $idcomp[1] . 't' . $gnt . '.' . $trnat;
+    }
+ 
+
+    return $newid;
+}
+
 
 =head2 rename_exoncds
 
@@ -1127,6 +1280,12 @@ sub rename_exoncds {
 
 
     my $newid = $idcomp[1] . 'g' . $gnt . '.' . $mrnat . ':'.$type . ':' . $ch; 
+    if ($id =~ m/trna/) {
+    
+	$newid = $idcomp[1] . 't' . $gnt . '.' .$mrnat . ':'.$type . ':' . $ch;
+    }
+ 
+
 
     return $newid;
 }
