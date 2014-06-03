@@ -1797,12 +1797,16 @@ sub parse_bed {
 	    if (scalar(@fields) == 5) {
 		
 		$seqid = $fields[0];
-		$pos = $fields[3];
+
+		## Change the position to 1-based
+		$pos = $fields[3] + 1; 
 		$depth = $fields[4];
 	    }
 	    elsif (scalar(@fields) == 3) {
 		
 		$seqid = $fields[0];
+
+		## Change the position to 1-based
 		$pos = $fields[1];
 		$depth = $fields[2];
 	    }
