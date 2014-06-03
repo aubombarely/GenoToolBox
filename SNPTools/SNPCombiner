@@ -4,6 +4,8 @@ use strict;
 use warnings;
 use autodie;
 
+use POSIX qw(strftime);
+
 use Config;
 use threads;
 
@@ -45,6 +47,10 @@ my $dinamic_cov = '';
 my $minsnpsample = 0;
 my %vcftag_filter = ();
 my $polycollapse = 0;
+
+## Exclude options
+my $excl_markers_file = '';
+my $excl_samples_file = '';
     
 ## Output options
 my $outbase = 'snp_combiner_out';
@@ -82,6 +88,10 @@ GetOptions(
     'n|dinamic_coverage:i'       => \$dinamic_cov,
     'f|vcftag_filter:s%'         => \%vcftag_filter,
     
+    ## Exclude options:
+    'S|samples_skip_file:s'       => \$excl_samples_file,
+    'M|markers_skip_file:s'       => \$excl_markers_file,
+
     ## SNP modification:
     'P|polyploid_collapse:i'     => \$polycollapse,
 
@@ -226,6 +236,47 @@ else {
 
 print STDERR "\n\n\tOUTPUT BASENAME:     $outbase\n";
 
+
+my %exc_samples = ();
+if ($excl_samples_file =~ m/.+/) {
+
+    print STDERR "\n\n\tEXCLUDE SAMPLES:     $excl_samples_file\n";
+    open my $es_fh, '<', $excl_samples_file;
+    while(<$es_fh>) {
+    
+	chomp($_);
+	my @data = split(/\t/, $_);
+	$exc_samples{$data[0]} = 1;
+    }
+    my $exc_samples_n = scalar(keys %exc_samples);
+    print STDERR "\t$exc_samples_n samples (tags) will be excluded.\n";
+}
+else {
+
+    print STDERR "\n\n\tEXCLUDE SAMPLES:     [None]\n";
+}
+
+my %exc_markers = ();
+if ($excl_markers_file =~ m/.+/) {
+
+    print STDERR "\n\n\tEXCLUDE MARKERS:     $excl_samples_file\n";
+    open my $em_fh, '<', $excl_markers_file;
+    while(<$em_fh>) {
+    
+	chomp($_);
+	my @data = split(/\t/, $_);
+	$exc_markers{$data[0]} = 1;
+    }
+    my $exc_markers_n = scalar(keys %exc_markers);
+    print STDERR "\t$exc_markers_n markers will be excluded\n";
+}
+else {
+
+    print STDERR "\n\n\tEXCLUDE MARKERS:     [None]\n";
+}
+
+
+
 my @out = split(':', $outtype);
 my %valid_out = (
     'regular'     => 1,
@@ -246,7 +297,7 @@ else {
     }
     elsif ($out[0] eq 'random') {
 
-	$valid_out{'by_binsize'} = [split(/,/, $out[1])];
+	$valid_out{'random'} = [split(/,/, $out[1])];
     }
     print STDERR "\tOUTPUT TYPE:         $outtype\n\n";
 }
@@ -398,6 +449,20 @@ else {
 print_header("2) Parsing VCF files");
 my %results = multithread_vcf_parser(\%vcfs, $threads, \%cov_range, \%filters);
 
+## It will apply here the selected samples
+
+if (scalar(keys %exc_samples) > 0) {
+
+    print STDERR "\n\tRemoving excluded samples from the dataset.\n";
+    my %selected_samples = %{$results{'tags'}};
+    foreach my $tag (sort keys %selected_samples) {
+	
+	if (exists $exc_samples{$tag}) {
+	    
+	    delete($results{'tags'}->{$tag});
+	}
+    }
+}
 
 ###############################################################################
 ## 3) PARSE THE COVERAGE FILES
@@ -445,10 +510,11 @@ foreach my $tag (keys %beds) {
 
 print_header("4) Filtering markers");
 
-my %selected_markers = apply_filters(\%results, \%filters);
+my %selected_markers = apply_filters(\%results, \%filters, \%exc_markers);
 
 my $marks_filtered = scalar(keys %selected_markers);
 print STDERR "\n\tTOTAL NUMBER OF MARKERS:\t\t$marks_filtered\n";
+
 
 ###############################################################################
 ## 5) WRITING THE OUTPUT
@@ -494,7 +560,7 @@ my %outpacks = ();
 my $defname = $outbase . "hmp.txt";
 my @defpack = ();
 
-foreach my $seqid (sort %{$results{'maps'}}) {
+foreach my $seqid (sort keys %{$results{'maps'}}) {
 
     if ($out[0] =~ m/by_sequence/) {
     
@@ -576,20 +642,25 @@ if ($out[0] =~ m/random/) {
     foreach my $mid (@rand) {
     
 	$c++;
+	$m++;
 	if ($p < $file_n) {
 	
+	    ## Last marker for the package
 	    if ($c == $C) {
 	    
 		my $name = $outbase . "_r" . $p . "hmp.txt";
 		my @spack = sort(@pack);
 		$outpacks{$name} = \@spack;
 	    }
-	    elsif ($m <= $mrks_n) {
+	    elsif ($m < $mrks_n) {
 	    
 		push @pack, $mid;
 	    }
-	    elsif ($m > $mrks_n) {
-	    
+	    elsif ($m = $mrks_n) {
+
+		## Reset marker counter
+		$m = 0;
+
 		my $name = $outbase . "_r" . $p . "hmp.txt";
 		my @spack = sort(@pack);
 		$outpacks{$name} = \@spack;
@@ -602,7 +673,7 @@ if ($out[0] =~ m/random/) {
 }
 elsif ($out[0] =~ m/regular/) {
 
-    my $name = $outbase . "hmp.txt"; 
+    my $name = $outbase . "_hmp.txt"; 
     $outpacks{$name} = \@defpack;
 }
 
@@ -610,117 +681,152 @@ elsif ($out[0] =~ m/regular/) {
 
 foreach my $filename (sort keys %outpacks) {
 
-    open my $ofh, '>', $filename;
-
-    ## Print the header
-    my @header = ('rs#',      'alleles',  'chrom',    'pos',      'strand', 
-		  'assembly', 'center',   'protLSID', 'assyLSID', 'panelLSID', 
-		  'QCcode',   'Reference');
-
-    my @samples = sort(keys %{$results{'tags'}});
-    push @header, @samples;
-    my $headerline = join("\t", @header);
-    print $ofh "$headerline\n";
-
     my @p_marks = @{$outpacks{$filename}};
 
-    ## Take a sample of the ploidy
-    my $minploidy = 1000000;
-    my $maxploidy = 0;
-    my %first_geno = $results{'genotypes'}->{$p_marks[0]};
-    foreach my $ftag (keys %first_geno) {
-    
-	if ($first_geno{$ftag}->{'ploidy'} < $minploidy) {
-	
-	    $minploidy = $first_geno{$ftag}->{'ploidy'};
-	}
-	if ($first_geno{$ftag}->{'ploidy'} > $maxploidy) {
-	
-	    $maxploidy = $first_geno{$ftag}->{'ploidy'};
-	}
-    }
+    if (scalar(@p_marks) > 0) {
 
-    foreach my $mark_id (@p_marks) {
-    
-	## Get the genotypes and the different alleles
-	my $ref = $results{'markers'}->{$mark_id}->{'reference'};
-	my $refgeno = $ref x $minploidy;
+	open my $ofh, '>', $filename;
 
-	my %alleles = ();
-	my @genotypes = ();
-	foreach my $tag (@samples) {
-	
-	    if (exists $results{'markers'}->{$mark_id}->{$tag}) {
+	## Print the header
+	my @header = ('rs#',       'alleles',  'chrom',    'pos',     'strand', 
+		      'assembly',  'center',   'protLSID', 'assyLSID', 
+		      'panelLSID', 'QCcode',   'Reference');
+
+	my @samples = sort(keys %{$results{'tags'}});
+	push @header, @samples;
+	my $headerline = join("\t", @header);
+	print $ofh "$headerline\n";    
+
+	## Take a sample of the ploidy
+	my $minploidy = 1000000;
+	my $maxploidy = 0;
+	my $first_mark = $p_marks[0];
+	my %first_geno = %{$results{'genotypes'}->{$first_mark}};
+	foreach my $ftag (keys %first_geno) {
 	    
-		my @geno = split(/,/, $results{'markers'}->{$mark_id}->{$tag});
-		
-		my %localalleles = ();
-		foreach my $nt (@geno) {
-		
-		    $alleles{$nt} = 1;
-		    $localalleles{$nt}++;
+	    my $ploidy = $first_geno{$ftag}->{'ploidy'};
+	    if (defined $ploidy) {
+	    
+		## Ploidy may not be defined for an specific tag
+		if ($ploidy < $minploidy) {
+		    
+		    $minploidy = $ploidy;
 		}
-
-		## Only biallelic markers are permited in the reduced
-		## representation
-
-		if ($polycollapse == 1) {
-
-		    my @reduced_geno = ();
-		    foreach my $nt (sort keys %localalleles) {
+		if ($ploidy > $maxploidy) {
 		    
-			push @reduced_geno, $nt x ($minploidy / 2);
-		    }
-		    push @genotypes, join("", @reduced_geno);
+		    $maxploidy = $ploidy;
 		}
-		elsif ($polycollapse == 2) {
+	    }
+	}
+	
+	foreach my $mark_id (@p_marks) {
+    
+	    ## Get the genotypes and the different alleles
+	    
+	    my $ref = $results{'markers'}->{$mark_id}->{'reference'};
+	    my $refgeno = $ref x $minploidy;
 
-		    my @nts = sort(keys %localalleles);
-		    my @reduced_geno = ();
-		    if ($localalleles{$nts[0]} > $localalleles{$nts[1]}) {
-		    
-			push @reduced_geno, $nts[0] x $minploidy;
+	    my %alleles = ( $ref => 1 );
+	    my @genotypes = ();
+	    foreach my $tag (@samples) {
+	
+		if (exists $results{'genotypes'}->{$mark_id}->{$tag}) {
+	    
+		    my $g = $results{'genotypes'}->{$mark_id}->{$tag}
+		    ->{'genotype'};
+		    my @geno = split(/,/, $g);
+		
+		    my %localalleles = ();
+		    foreach my $nt (@geno) {
+		
+			$alleles{$nt} = 1;
+			unless (exists $localalleles{$nt}) {
+		 
+			    $localalleles{$nt} = 1;
+			}
+			else {
+			    
+			    $localalleles{$nt}++;
+			}
 		    }
-		    elsif ($localalleles{$nts[0]} < $localalleles{$nts[1]}) {
 		    
-			push @reduced_geno, $nts[1] x $minploidy;
+		    ## Only biallelic markers are permited in the reduced
+		    ## representation
+
+		    if (scalar(keys %localalleles) == 2) {
+			
+			if ($polycollapse == 1) {
+			    
+			    my @reduced_geno = ();
+			    foreach my $nt (sort keys %localalleles) {
+				
+				push @reduced_geno, $nt x ($minploidy / 2);
+			    }
+			    push @genotypes, join("", @reduced_geno);
+			}
+			elsif ($polycollapse == 2) {
+			    
+			    my @nts = sort(keys %localalleles);
+			    my @reduced_geno = ();
+			    if ($localalleles{$nts[0]} > 
+				$localalleles{$nts[1]}) {
+		    
+				push @reduced_geno, $nts[0] x $minploidy;
+			    }
+			    elsif ($localalleles{$nts[0]} < 
+				   $localalleles{$nts[1]}){
+		    
+				push @reduced_geno, $nts[1] x $minploidy;
+			    }
+			    else {
+			    
+				push @reduced_geno, $nts[0] x ($minploidy/2);
+				push @reduced_geno, $nts[1] x ($minploidy/2);
+			    }
+			    push @genotypes, join("", @reduced_geno);
+			}
+			else {
+			    
+			    push @genotypes, join("", @geno);
+			}
+		    }
+		    elsif (scalar(keys %localalleles) == 1) {
+			
+			## it may happens that localalleles is not 2
+			
+			push @genotypes, $geno[0] x $minploidy;
 		    }
 		    else {
-		    
-			push @reduced_geno, $nts[0] x $minploidy/2;
-			push @reduced_geno, $nts[1] x $minploidy/2;
+			
+			push @genotypes, join("", @geno);
 		    }
-		    push @genotypes, join("", @reduced_geno);
 		}
 		else {
-		
-		    push @genotypes, join("", @geno);
+
+		    push @genotypes, "N" x $minploidy;
 		}
 	    }
-	    else {
 
-		push @genotypes, "N" x $minploidy;
-	    }
+
+	    my $seqid = $results{'markers'}->{$mark_id}->{'seqID'};
+	    my $position = $results{'markers'}->{$mark_id}->{'position'};
+	    my $alleles = join("/", sort(keys %alleles));
+
+	    ## It needs only the genotype
+	    my @line = ($mark_id, $alleles, $seqid, $position, '+');
+
+	    ## Next six empty fields
+	    push @line, ( 'NA', 'NA', 'NA', 'NA', 'NA', 'NA');
+	    push @line,  $refgeno;
+
+	    ## And finally add the genotypes
+	    push @line, @genotypes;
+	    
+	    my $line = join("\t", @line);
+	    print $ofh "$line\n";	
 	}
-
-
-	my $seqid = $results{'markers'}->{$mark_id}->{'seqid'};
-	my $position = $results{'markers'}->{$mark_id}->{'position'};
-	my $alleles = join("/", sort(keys %alleles));
-
-	## It needs only the genotype
-	my @line = ($mark_id, $alleles, $seqid, $position, '+');
-
-	## Next six empty fields
-	push @line, ( 'NA', 'NA', 'NA', 'NA', 'NA', 'NA');
-
-	## And finally add the genotypes
-	push @line, @genotypes;
-
-	my $line = join("\t", @line);
-	print $ofh "$line\n";	
+	close($ofh);
     }
-    close($ofh);
 }
 
 
@@ -741,8 +847,7 @@ foreach my $filename (sort keys %outpacks) {
 sub print_header {
     my $message = shift;
 
-    my $date = `date`;
-    chomp($date);
+    my $date = strftime "%a %b %e %H:%M:%S %Y", localtime;
 
     print STDERR "\n";
     print STDERR "============================================================";
@@ -1770,6 +1875,11 @@ sub parse_bed {
     open my $bed_fh, '<', $bed_file;
     my $l = 0;
     my $L = `cat $bed_file | wc -l`;
+    if ($?) {
+
+	print STDERR "\n\tWARNING: wc failed: $?\n";
+	$L = 0;
+    }
     chomp($L);
 
     while(<$bed_fh>) {
@@ -1872,6 +1982,8 @@ sub apply_filters {
 	|| die("ERROR: No results href was supplied to apply_filters()\n");
     my $fil_href = shift
 	|| die("ERROR: No filters href was supplied to apply_filters().\n");
+    my $exc_href = shift
+	|| die("ERROR: No excluded href was supplied to apply_filters().\n");
 
     unless (ref($res_href) eq 'HASH') {
 	
@@ -1881,8 +1993,14 @@ sub apply_filters {
 	
 	die("\nERROR: filters_href supplied to apply_filters() isnt HASHREF\n");
     } 
+    unless (ref($exc_href) eq 'HASH') {
+	
+	die("\nERROR: exclud_href supplied to apply_filters() isnt HASHREF\n");
+    } 
+
 
     my %selected_markers = ();
+    my %excluded_markers = %{$exc_href};
 
     ## Get the data and the filters from the hrefs
 
@@ -1902,6 +2020,7 @@ sub apply_filters {
 	'by max. distance'  => 0,
 	'by % missing data' => 0,
 	'not biallelic'     => 0,
+	'excluded list'     => 0,
     );
     
     foreach my $seq_id (sort keys %{$map_href}) {
@@ -1972,6 +2091,12 @@ sub apply_filters {
 		$filtcnt{'not biallelic'}++;
 	    }
 
+	    if (exists $excluded_markers{$mark_id}) {
+	    
+		$selected = 0;
+		$filtcnt{'excluded list'}++;
+	    }
+
 	    if ($selected == 1) {
     
 		$selected_markers{$mark_id} =  1;
@@ -2003,6 +2128,8 @@ __END__
 
  Options:
   -g group1=tag1  group tags                        [optional]
+  -S file         exclude samples                   [optional]
+  -M file         exclude markers                   [optional]
   -s int          sample size                       [optional]
   -c int          min. coverage                     [optional]      
   -C int          max. coverage                     [optional]
@@ -2017,6 +2144,7 @@ __END__
   -f tag=value    vcftag filter                     [optional]
   -o string       out base name                     [default:snp_combine_out]
   -t string       output type                       [default:regular]
+  -p int          threads                           [default:1]
   -H              print help
   --manual        access to the manual                
 
@@ -2043,6 +2171,14 @@ B<tag=bed_file>      Input BED files as TAG1=file with coverage data (mandatory)
 =item -g|--groups 
 
 B<group=tag1,tag2>   Groups for each of the samples (optional; none by default)
+
+=item -S|--samples_skip_file
+
+B<file>              File with a list of samples (tags) to exclude
+
+=item -M|--markers_skip_file
+
+B<file>              File with a list of markers to exclude from the analysis
 
 =item -s|--sample_size
 
@@ -2099,7 +2235,11 @@ B<output>            Output base name (snp_combine_out by default)
 
 =item -t|--type_output
 
-B<type>              Output type ("by_sequence","by_binsize:x","random:x,y")
+B<type>              Output type ("by_sequence","by_binsize:x","random:m,f")
+
+=item -p|--threads
+
+B<threads>           Number of threads
 
 =item -H|--help|--usage|--manual|--man
 
@@ -2125,8 +2265,8 @@ B<switch_verbose>    Print more information during the program execution
  Available filters: -d (min. read depth for the SNP position)
                     -D (max. read depth for the SNP position)
                     -q (min. SNP score)
-                    #-l (select only markers from id list)
-                    #-e (exclude markers from the specified SeqID or chromosomes)
+                    -M (exclude markers from a list)
+                    -S (exclude samples from a list)
 
  Polyploid collapsing:
   This script was used to compare diploid and tetraploid at the same time. For
