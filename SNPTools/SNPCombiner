@@ -1863,8 +1863,9 @@ sub parse_bed {
 
     my %genotypes = %{$geno_href};
 
-    my $min_cov = $cov_href->{'min. coverage'};
-    my $max_cov = $cov_href->{'max. coverage'};
+    ## Use some default min. and max. coverage
+    my $min_cov = $cov_href->{'min. coverage'} || 0;
+    my $max_cov = $cov_href->{'max. coverage'} || 10000000000000;
 
     ## Counters for stats
     my %counters = (
