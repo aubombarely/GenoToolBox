@@ -1,0 +1,291 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ AddNewTags2Gff
+ Script to add new tags to a GFF3 file
+
+=cut
+
+=head1 SYPNOSIS
+
+ AddNewTags2Gff [-h] -g <gff3> -m <mapping_file> -t <tag_names> 
+                [-o <output>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -g
+
+B<gff3>                         GFF3 file (mandatory)
+
+=item -m
+
+B<mapping_file>                 map file with annotations (mandatory)
+
+=item -t
+
+B<tag_names>                    tag names separated with commas (mandatory)
+
+=item -o
+
+B<output>                       Output filename
+
+=item -h
+
+B<help>                         print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+  This script parse the map file, and following the tags names, add
+  the annotations of the map file to the GFF using the tag specified 
+  in the -t option. For more than one annotation column, multiple tags
+  can be used.
+
+  For example, if the mapping file is something like:
+  ID1  "Carotenoid"  "TED1"
+  ID2  "Anthocyanin" "DED1"
+
+  And -t Pathway,Mutant, it will add to the GFF
+  Pathway="Carotenoid";Mutant="TED1"
+  Pathway="Anthocyanin";Mutant="DED1"
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aurebg@vt.edu).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+
+our ($opt_g, $opt_m, $opt_o, $opt_t, $opt_h);
+getopts("g:m:o:t:h");
+
+if (!$opt_g && !$opt_m && !$opt_o && !$opt_t && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+my $gff3_file = $opt_g ||
+    die("\nERROR: -g <gff3> was not supplied to the script.\n\n");
+
+my $map_file = $opt_m ||
+    die("\nERROR: -m <map_file> was not supplied to the script.\n\n");
+
+my $tag_list = $opt_t ||
+    die("\nERROR: -t <tag_list> was not supplied to the script.\n\n");
+
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## AddNewTags2Gff Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+print_header("1) Parsing tag list.");
+
+my @tags = split(/,/, $tag_list);
+my $tag_n = scalar(@tags);
+print STDERR "\t$tag_n has been parsed.";
+
+print_header("2) Parsing Map File file.");
+
+open my $map, '<', $map_file;
+my %map = ();
+
+while(<$map>) {
+
+    chomp($_);
+    my @data = split(/\t/, $_);
+    my $id = shift(@data);
+    my %addtags = ();
+    my $t = 0;
+    foreach my $data (@data) {
+    
+	$addtags{$tags[$t]} = $data;
+	$t++;
+    }
+    $map{$id} = \%addtags;
+}
+
+my $id_parsed = scalar(keys(%map));
+
+print STDERR "\t$id_parsed ids have been parsed.\n";
+
+print_header("3) Parsing GFF3 file.");
+
+open my $gfh, '<', $gff3_file;
+my $count = 0;
+
+my $ofh = "STDOUT";
+if ($opt_o) {
+
+    open my $otfh, '>', $opt_o;
+    $ofh = $otfh;
+}
+
+
+while(<$gfh>) {
+
+    chomp($_);
+    
+    ## Ignore the header and the comments
+
+    if ($_ !~ /^#/ && $_ =~ /.+/) {
+
+	my @gffline = split(/\t/, $_);
+		
+	## Get the ID
+	my %feats = ();
+	my @feats = split(/;/, $gffline[8]);
+	foreach my $f (@feats) {
+	    
+	    if ($f =~ m/(.+)=(.+)/) {
+		
+		$feats{$1} = $2;
+	    }
+	}
+	
+	if (exists $map{$feats{ID}}) {
+	    	
+	    $count++;
+	
+	    my %addtags = %{$map{$feats{ID}}};
+	    foreach my $tag (sort keys %addtags) {
+		
+		push @feats, $tag . '=' . $addtags{$tag};
+	    }	       
+	    
+	    $gffline[8] = join(";", @feats);
+	    my $pline = join("\t", @gffline);
+	    
+	    if ($opt_o) {
+		    
+		print $ofh "$pline\n";
+	    }
+	    else {
+		
+		print STDOUT "$pline\n";
+	    }	    
+	}
+	else {
+	    
+	    if ($opt_o) {
+		    
+		print $ofh "$_\n";
+	    }
+	    else {
+		
+		print STDOUT "$_\n";
+	    }	   
+	}
+    }
+    else {
+	
+	if ($opt_o) {
+	     
+	    print $ofh "$_\n";
+	}
+	else {
+	    
+	    print STDOUT "$_\n";
+	}	   	
+    }
+}
+
+print STDERR "\t$count descriptions have been added to $id_parsed elements.\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+       This script parse the map file, and following the tags names, add
+       the annotations of the map file to the GFF using the tag specified 
+       in the -t option. For more than one annotation column, multiple tags
+       can be used.
+
+       For example, if the mapping file is something like:
+         ID1  "Carotenoid"  "TED1"
+         ID2  "Anthocyanin" "DED1"
+
+       And -t Pathway,Mutant, it will add to the GFF
+         Pathway="Carotenoid";Mutant="TED1"
+         Pathway="Anthocyanin";Mutant="DED1"
+
+    Usage:
+      
+       AddNewTags2Gff [-h] -g <gff3> -m <mapping_file> -t <tag_names> 
+                      [-o <output>]
+      
+    Flags:
+
+      -g <gff3>                  GFF3 file (mandatory)
+      -m <mapping_file>          map file with annotations (mandatory)
+      -t <tag_names>             tag names separated with commas (mandatory)
+      -o <output>                Output filename
+      -h <help>                  print the help  
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+####
+1; #
+####
