@@ -11,7 +11,7 @@
 
  GffIdRename [-h] -g <gff3_file> [-f <fasta_file_list>] -r <rules> 
                   -c [<countformat>] [-e <exclude_type_list> ]
-                  [-V] [-E]
+                  [-V] [-E] [-n <renaming_file>]
 
 
 =head2 I<Flags:>
@@ -38,6 +38,10 @@ B<count_format>           number of zeros to add to the count string to have
 =item -e
 
 B<exclude_type_list>      list of types to skip for the output (sep=',')
+
+=item -n
+
+B<renaming_file>          file with two columns to rename genes.
 
 =item -E
 
@@ -138,6 +142,8 @@ B<help>                   print the help
      FCDS,FUTRs, for example -c 5,5,2,2,2 (Any string with less than five 
      values will be filled with default values).
 
+     Genes also can be renamed using a tabular file with two columns.
+  
 
 =cut
 
@@ -694,7 +700,14 @@ foreach my $seqid (sort keys %seqiddata) {
 			my $cnt = $mrnacomp{$feats{'Parent'}}->{$tagcounter};
 			if ($st eq '-') {
 			
-			    $cnt = $cn -$currcnt + 1;
+			    if ($cn) {
+				
+				$cnt = $cn - $currcnt + 1;
+			    }
+			    else {
+			    
+				$cnt = $currcnt + 1;
+			    }
 			}
 			
 			my $pcnt;
@@ -861,17 +874,17 @@ sub help {
 
       Numeric formats will be calculated previously in the following way:
       1) Genes: Composed for two numbers, the formating will be set to:
-         ` awk "{ if ($3 ~ /gene/) print $0}" GffFile | cut -f9 | 
+         \' awk "{ if (\$3 ~ /gene/) print $0}" GffFile | cut -f9 |
                       cut -d ";" -f1 | sed -r "s/ID=//" | cut -d "-" -f 5 | 
-                      cut -d "." -f1 | sort -nr | head -n1`;
-         ` awk "{ if ($3 ~ /gene/) print $0}" GffFile | cut -f9 | 
+                      cut -d "." -f1 | sort -nr | head -n1\';
+         \' awk "{ if (\$3 ~ /gene/) print $0}" GffFile | cut -f9 |
                       cut -d ";" -f1 | sed -r "s/ID=//" | cut -d "-" -f 5 | 
-                      cut -d "." -f2 | sort -nr | head -n1`;
+                      cut -d "." -f2 | sort -nr | head -n1\';
      
       2) mRNA: Composed for one number.
-         ` awk "{ if ($3 ~ /mRNA/) print $0}" GffFile | cut -f9 | 
+         \' awk "{ if (\$3 ~ /mRNA/) print $0}" GffFile | cut -f9 | 
                       cut -d ";" -f1 | sed -r "s/ID=//" | cut -d "-" -f 7 | 
-                      sort -nr | head -n1`;
+                      sort -nr | head -n1\';
     
       3) exon, CDS and UTRs. The highest exon number per gene for human is 148,
          so the 'lexon_c' and 'lcds_c' will be set to 3.
@@ -991,36 +1004,48 @@ sub rename_gene {
     
     ##    $id =~ s/noncoding-/noncoding_/; It is done at the begining
 
-    my @idcomp = split(/-/, $id);
-		 
-    ## Get the prediction note
-   
-    my $predic = join("-", ($idcomp[0], $idcomp[2]));
+    ## it could happen that it doesn't have a prediction note and it is 
+    ## just a format without -
 
-    ## Third, get the format for the gene counter
-
-    my ($gn1, $gn2) = split(/\./, $idcomp[4]);
-
-    ## Usually $gn2 starts in 0, so it will add 1
-
-    $gn2++;
-
-    my $gnt = ();
-    if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
-		    
-	$gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
-    }
-    else {
-		    
-	$gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
-    }
-
-    my $newid = $idcomp[1] . 'g' . $gnt;
-    if ($id =~ m/trna/) {
     
-	$newid = $idcomp[1] . 't' . $gnt;
-    }
+    my $newid = $id;
+    my $predic = '';
 
+    if ($id =~ m/-/) {
+
+	my @idcomp = split(/-/, $id);
+		 
+	## Get the prediction note
+   
+	$predic = join("-", ($idcomp[0], $idcomp[2]));
+
+	## Third, get the format for the gene counter
+
+	my ($gn1, $gn2) = split(/\./, $idcomp[4]);
+
+	## Usually $gn2 starts in 0, so it will add 1
+	
+	$gn2++;
+
+	my $gnt = ();   
+
+	if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
+		    
+	    $gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
+	}
+	else {
+		    
+	    $gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
+	}
+
+	$newid = $idcomp[1] . 'g' . $gnt;
+	
+	if ($id =~ m/trna/) {
+    
+	    $newid = $idcomp[1] . 't' . $gnt;
+	}
+    }
+    
     return($newid, $predic);
 }
 
@@ -1069,31 +1094,36 @@ sub rename_mRNA {
 
     ## Second, break the id in different parts
 
-    my @idcomp = split(/-/, $id);
+    my $newid = $id;
+    
+    if ($id =~ m/-/) {
 
-    ## Third, get the format for the gene counter
+	my @idcomp = split(/-/, $id);
 
-    my ($gn1, $gn2) = split(/\./, $idcomp[4]);
+	## Third, get the format for the gene counter
 
-    ## Usually $gn2 starts in 0, so it will add 1
+	my ($gn1, $gn2) = split(/\./, $idcomp[4]);
 
-    $gn2++;
+	## Usually $gn2 starts in 0, so it will add 1
+	
+	$gn2++;
 
-    my $gnt = ();
-    if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
+	my $gnt = ();
+	if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
 		    
-	$gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
-    }
-    else {
+	    $gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
+	}
+	else {
 		    
-	$gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
+	    $gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
+	}
+
+	## Forth, get the mRNA count
+
+	my $mrnat = sprintf("%0$fcounts[1]s", $idcomp[6]);
+
+	$newid = $idcomp[1] . 'g' . $gnt . '.' . $mrnat; 
     }
-
-    ## Forth, get the mRNA count
-
-    my $mrnat = sprintf("%0$fcounts[1]s", $idcomp[6]);
-
-    my $newid = $idcomp[1] . 'g' . $gnt . '.' . $mrnat; 
 
     return $newid;
 }
@@ -1223,69 +1253,73 @@ sub rename_exoncds {
 
     ## Second, break the id in different parts
 
-    my @idcomp = split(/-/, $id);
+    my $newid = $id;
 
-    ## Third, get the format for the gene counter
+    if ($id =~ m/-/) {
 
-    my ($gn1, $gn2) = split(/\./, $idcomp[4]);
+	my @idcomp = split(/-/, $id);
 
-    ## Usually $gn2 starts in 0, so it will add 1
+	## Third, get the format for the gene counter
 
-    $gn2++;
+	my ($gn1, $gn2) = split(/\./, $idcomp[4]);
 
-    my $gnt = ();
-    if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
-		    
-	$gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
-    }
-    else {
-		    
-	$gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
-    }
-
-    ## Forth, get the mRNA count
-
-    my @submrna = split(/:/, $idcomp[6]);
-
-    my $mrnat = sprintf("%0$fcounts[1]s", $submrna[0]);
-
-    ## Fifth get a temporal counter for the feature
-
-    my $counter = $count;
-    my $type = lc($submrna[1]);
-
-    if (scalar(@submrna) == 3) {
-    
-	$counter = $submrna[2];
-    }
-    elsif ($submrna[1] =~ m/(\w+)(\d+)/) {
-    
-	$type = lc($1);
-	$counter = $2;
-    }
-
-    my $ch;
-    if ($submrna[1] =~ m/exon/i) {
+	## Usually $gn2 starts in 0, so it will add 1
 	
-	$ch = sprintf("%0$fcounts[2]s", $counter);
-    }
-    elsif ($submrna[1] =~ m/CDS/i) {
+	$gn2++;
+
+	my $gnt = ();
+	if ($fcount[0] =~ m/^(\d+)\+(\d+)$/) {
+		    
+	    $gnt = sprintf("%0$1"."s", $gn1) . sprintf("%0$2"."s", $gn2);
+	}
+	else {
+		    
+	    $gnt = sprintf("%0$fcounts[0]s", $gn1 . $gn2);
+	}
+
+	## Forth, get the mRNA count
+
+	my @submrna = split(/:/, $idcomp[6]);
+
+	my $mrnat = sprintf("%0$fcounts[1]s", $submrna[0]);
+
+	## Fifth get a temporal counter for the feature
+
+	my $counter = $count;
+	my $type = lc($submrna[1]);
+
+	if (scalar(@submrna) == 3) {
     
-	$ch = sprintf("%0$fcounts[3]s", $counter);
-    }
-    elsif ($submrna[1] =~ m/UTR/i) {
+	    $counter = $submrna[2];
+	}
+	elsif ($submrna[1] =~ m/(\w+)(\d+)/) {
     
-	$ch = sprintf("%0$fcounts[4]s", $counter);
-    }
+	    $type = lc($1);
+	    $counter = $2;
+	}
+
+	my $ch;
+	if ($submrna[1] =~ m/exon/i) {
+	
+	    $ch = sprintf("%0$fcounts[2]s", $counter);
+	}
+	elsif ($submrna[1] =~ m/CDS/i) {
+	    
+	    $ch = sprintf("%0$fcounts[3]s", $counter);
+	}
+	elsif ($submrna[1] =~ m/UTR/i) {
+    
+	    $ch = sprintf("%0$fcounts[4]s", $counter);
+	}
 
 
-    my $newid = $idcomp[1] . 'g' . $gnt . '.' . $mrnat . ':'.$type . ':' . $ch; 
-    if ($id =~ m/trna/) {
+	$newid = $idcomp[1] .'g'. $gnt . '.' . $mrnat . ':'.$type . ':' . $ch; 
+	if ($id =~ m/trna/) {
     
-	$newid = $idcomp[1] . 't' . $gnt . '.' .$mrnat . ':'.$type . ':' . $ch;
-    }
+	    $newid = $idcomp[1] .'t'. $gnt .'.'.$mrnat .':'.$type . ':' . $ch;
+	}
  
-
+    }
 
     return $newid;
 }
