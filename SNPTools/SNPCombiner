@@ -4,6 +4,8 @@ use strict;
 use warnings;
 use autodie;
 
+use POSIX qw(strftime);
+
 use Config;
 use threads;
 
@@ -45,6 +47,10 @@ my $dinamic_cov = '';
 my $minsnpsample = 0;
 my %vcftag_filter = ();
 my $polycollapse = 0;
+
+## Exclude options
+my $excl_markers_file = '';
+my $excl_samples_file = '';
     
 ## Output options
 my $outbase = 'snp_combiner_out';
@@ -82,6 +88,10 @@ GetOptions(
     'n|dinamic_coverage:i'       => \$dinamic_cov,
     'f|vcftag_filter:s%'         => \%vcftag_filter,
     
+    ## Exclude options:
+    'S|samples_skip_file:s'       => \$excl_samples_file,
+    'M|markers_skip_file:s'       => \$excl_markers_file,
+
     ## SNP modification:
     'P|polyploid_collapse:i'     => \$polycollapse,
 
@@ -225,6 +235,47 @@ else {
 }
 
 print STDERR "\n\n\tOUTPUT BASENAME:     $outbase\n";
+
+
+my %exc_samples = ();
+if ($excl_samples_file =~ m/.+/) {
+
+    print STDERR "\n\n\tEXCLUDE SAMPLES:     $excl_samples_file\n";
+    open my $es_fh, '<', $excl_samples_file;
+    while(<$es_fh>) {
+    
+	chomp($_);
+	my @data = split(/\t/, $_);
+	$exc_samples{$data[0]} = 1;
+    }
+    my $exc_samples_n = scalar(keys %exc_samples);
+    print STDERR "\t$exc_samples_n samples (tags) will be excluded.\n";
+}
+else {
+
+    print STDERR "\n\n\tEXCLUDE SAMPLES:     [None]\n";
+}
+
+my %exc_markers = ();
+if ($excl_markers_file =~ m/.+/) {
+
+    print STDERR "\n\n\tEXCLUDE MARKERS:     $excl_samples_file\n";
+    open my $em_fh, '<', $excl_markers_file;
+    while(<$em_fh>) {
+    
+	chomp($_);
+	my @data = split(/\t/, $_);
+	$exc_markers{$data[0]} = 1;
+    }
+    my $exc_markers_n = scalar(keys %exc_markers);
+    print STDERR "\t$exc_markers_n markers will be excluded\n";
+}
+else {
+
+    print STDERR "\n\n\tEXCLUDE MARKERS:     [None]\n";
+}
+
+
 
 my @out = split(':', $outtype);
 my %valid_out = (
@@ -398,6 +449,20 @@ else {
 print_header("2) Parsing VCF files");
 my %results = multithread_vcf_parser(\%vcfs, $threads, \%cov_range, \%filters);
 
+## It will apply here the selected samples
+
+if (scalar(keys %exc_samples) > 0) {
+
+    print STDERR "\n\tRemoving excluded samples from the dataset.\n";
+    my %selected_samples = %{$results{'tags'}};
+    foreach my $tag (sort keys %selected_samples) {
+	
+	if (exists $exc_samples{$tag}) {
+	    
+	    delete($results{'tags'}->{$tag});
+	}
+    }
+}
 
 ###############################################################################
 ## 3) PARSE THE COVERAGE FILES
@@ -445,10 +510,11 @@ foreach my $tag (keys %beds) {
 
 print_header("4) Filtering markers");
 
-my %selected_markers = apply_filters(\%results, \%filters);
+my %selected_markers = apply_filters(\%results, \%filters, \%exc_markers);
 
 my $marks_filtered = scalar(keys %selected_markers);
 print STDERR "\n\tTOTAL NUMBER OF MARKERS:\t\t$marks_filtered\n";
+
 
 ###############################################################################
 ## 5) WRITING THE OUTPUT
@@ -607,7 +673,7 @@ if ($out[0] =~ m/random/) {
 }
 elsif ($out[0] =~ m/regular/) {
 
-    my $name = $outbase . "hmp.txt"; 
+    my $name = $outbase . "_hmp.txt"; 
     $outpacks{$name} = \@defpack;
 }
 
@@ -781,8 +847,7 @@ foreach my $filename (sort keys %outpacks) {
 sub print_header {
     my $message = shift;
 
-    my $date = `date`;
-    chomp($date);
+    my $date = strftime "%a %b %e %H:%M:%S %Y", localtime;
 
     print STDERR "\n";
     print STDERR "============================================================";
@@ -1798,8 +1863,9 @@ sub parse_bed {
 
     my %genotypes = %{$geno_href};
 
-    my $min_cov = $cov_href->{'min. coverage'};
-    my $max_cov = $cov_href->{'max. coverage'};
+    ## Use some default min. and max. coverage
+    my $min_cov = $cov_href->{'min. coverage'} || 0;
+    my $max_cov = $cov_href->{'max. coverage'} || 10000000000000;
 
     ## Counters for stats
     my %counters = (
@@ -1810,6 +1876,11 @@ sub parse_bed {
     open my $bed_fh, '<', $bed_file;
     my $l = 0;
     my $L = `cat $bed_file | wc -l`;
+    if ($?) {
+
+	print STDERR "\n\tWARNING: wc failed: $?\n";
+	$L = 0;
+    }
     chomp($L);
 
     while(<$bed_fh>) {
@@ -1837,12 +1908,16 @@ sub parse_bed {
 	    if (scalar(@fields) == 5) {
 		
 		$seqid = $fields[0];
-		$pos = $fields[3];
+
+		## Change the position to 1-based
+		$pos = $fields[3] + 1; 
 		$depth = $fields[4];
 	    }
 	    elsif (scalar(@fields) == 3) {
 		
 		$seqid = $fields[0];
+
+		## Change the position to 1-based
 		$pos = $fields[1];
 		$depth = $fields[2];
 	    }
@@ -1908,6 +1983,8 @@ sub apply_filters {
 	|| die("ERROR: No results href was supplied to apply_filters()\n");
     my $fil_href = shift
 	|| die("ERROR: No filters href was supplied to apply_filters().\n");
+    my $exc_href = shift
+	|| die("ERROR: No excluded href was supplied to apply_filters().\n");
 
     unless (ref($res_href) eq 'HASH') {
 	
@@ -1917,8 +1994,14 @@ sub apply_filters {
 	
 	die("\nERROR: filters_href supplied to apply_filters() isnt HASHREF\n");
     } 
+    unless (ref($exc_href) eq 'HASH') {
+	
+	die("\nERROR: exclud_href supplied to apply_filters() isnt HASHREF\n");
+    } 
+
 
     my %selected_markers = ();
+    my %excluded_markers = %{$exc_href};
 
     ## Get the data and the filters from the hrefs
 
@@ -1938,6 +2021,7 @@ sub apply_filters {
 	'by max. distance'  => 0,
 	'by % missing data' => 0,
 	'not biallelic'     => 0,
+	'excluded list'     => 0,
     );
     
     foreach my $seq_id (sort keys %{$map_href}) {
@@ -2008,6 +2092,12 @@ sub apply_filters {
 		$filtcnt{'not biallelic'}++;
 	    }
 
+	    if (exists $excluded_markers{$mark_id}) {
+	    
+		$selected = 0;
+		$filtcnt{'excluded list'}++;
+	    }
+
 	    if ($selected == 1) {
     
 		$selected_markers{$mark_id} =  1;
@@ -2039,6 +2129,8 @@ __END__
 
  Options:
   -g group1=tag1  group tags                        [optional]
+  -S file         exclude samples                   [optional]
+  -M file         exclude markers                   [optional]
   -s int          sample size                       [optional]
   -c int          min. coverage                     [optional]      
   -C int          max. coverage                     [optional]
@@ -2053,6 +2145,7 @@ __END__
   -f tag=value    vcftag filter                     [optional]
   -o string       out base name                     [default:snp_combine_out]
   -t string       output type                       [default:regular]
+  -p int          threads                           [default:1]
   -H              print help
   --manual        access to the manual                
 
@@ -2079,6 +2172,14 @@ B<tag=bed_file>      Input BED files as TAG1=file with coverage data (mandatory)
 =item -g|--groups 
 
 B<group=tag1,tag2>   Groups for each of the samples (optional; none by default)
+
+=item -S|--samples_skip_file
+
+B<file>              File with a list of samples (tags) to exclude
+
+=item -M|--markers_skip_file
+
+B<file>              File with a list of markers to exclude from the analysis
 
 =item -s|--sample_size
 
@@ -2137,6 +2238,10 @@ B<output>            Output base name (snp_combine_out by default)
 
 B<type>              Output type ("by_sequence","by_binsize:x","random:m,f")
 
+=item -p|--threads
+
+B<threads>           Number of threads
+
 =item -H|--help|--usage|--manual|--man
 
 B<switch_help>       Print this help
@@ -2161,8 +2266,8 @@ B<switch_verbose>    Print more information during the program execution
  Available filters: -d (min. read depth for the SNP position)
                     -D (max. read depth for the SNP position)
                     -q (min. SNP score)
-                    #-l (select only markers from id list)
-                    #-e (exclude markers from the specified SeqID or chromosomes)
+                    -M (exclude markers from a list)
+                    -S (exclude samples from a list)
 
  Polyploid collapsing:
   This script was used to compare diploid and tetraploid at the same time. For
