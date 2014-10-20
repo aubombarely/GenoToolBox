@@ -510,9 +510,11 @@ my %segregation = ();
 my %segregation_stats = ();
     
 ## It will classify markers according their segregation ratio
-## It will use a Chi-square rati
+## It will use a Chi-square ratio
 
 my %selected_marks = ();
+
+my $test_c = 0;
 
 foreach my $chr (@chrs) {
 
@@ -528,6 +530,8 @@ foreach my $chr (@chrs) {
     
 	    if (exists $segreg{$genotypes_line}) {
 	    
+		$test_c++;
+
 		my $segregation = $segreg{$genotypes_line};
 		my @segr_value = split(/:/, $segregation);
 		my $total = 0;
@@ -582,6 +586,8 @@ foreach my $chr (@chrs) {
 	}
     }
 }
+
+print STDERR "\nTEST COUNT MARKERS: $test_c\n";
 
 print STDERR "\n\tSegregations Stats (Chi Square with p-value=";
 print STDERR "$chisq_pvalue):\n";
@@ -1004,6 +1010,8 @@ sub parse_hapmap {
     my %abh_marks = ();
     my %pos_marks = ();
 
+    my $test_c = 0;
+
     ## First open the file
 
     open my $ifh, '<', $in;
@@ -1110,7 +1118,7 @@ sub parse_hapmap {
 	    my $a = 0;
 	    foreach my $ind (@indiv) {
 	    
-      		$genotypes{$ind} = $geno[$a];		
+      		$genotypes{$ind} = join("", sort(split("", $geno[$a])));		
 		$a++;
 	    }
 
