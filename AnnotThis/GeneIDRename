@@ -1,0 +1,707 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GeneIDRename
+ Script to rename the Gene ID for GFF and Fasta
+
+=cut
+
+=head1 SYPNOSIS
+
+ GeneIDRename [-h] -g <gff3> [-f <fasta>] [-o <basename>] [-c <integer>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -g
+
+B<gff3>                 GFF3 file (mandatory)
+
+=item -f
+
+B<fasta>                Fasta file (or files separated by commas) (optional)
+
+=item -o
+
+B<output>               Output file basename (optional)
+
+=item -c
+
+B<n_characters>         Number of characters for the gene formating (default: 6)
+
+=item -h
+
+B<help>                 Print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script parse a GFF file and rename the gene ID and the exons based
+ in the order of apperance in the contigs.
+
+ For example:
+
+  Cupep3Scf000042 maker   gene    60911   63538  .       +       .       
+     ID=maker-Cupep3Scf000042-augustus-gene-0.10;
+     Name=maker-Cupep3Scf000042-augustus-gene-0.10
+  Cupep3Scf000042 maker   gene    76825   78608   .       +       .       
+     ID=maker-Cupep3Scf000042-augustus-gene-0.11;
+     Name=maker-Cupep3Scf000042-augustus-gene-0.11
+
+  For this case, the geneIDs will be renamed to: 
+     ID=maker-Cupep3Scf000042-augustus-gene-0.10; to Cupep3Scf000042g000010
+     ID=maker-Cupep3Scf000042-augustus-gene-0.11; to Cupep3Scf000042g000020
+
+  Trancripts IDs will be renamed as:
+     Cupep3Scf000042g00010.1 
+     Cupep3Scf000042g00020.1
+
+  Exons will be renamed as: 
+     Cupep3Scf000042g000010.1.exon.01 
+     Cupep3Scf000042g000020.1.exon.01
+
+  By default the script will rename these features using five characters, plus
+  a final zero to accomodate new genes. To change this behavior the option -c
+  can be used. 
+  
+
+    
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aurebg@vt.edu).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Bio::SeqIO;
+
+our ($opt_g, $opt_f, $opt_o, $opt_c, $opt_h);
+getopts("g:f:o:c:h");
+
+if (!$opt_g && !$opt_f && !$opt_o && !$opt_c && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+my $gff3 = $opt_g ||
+    die("\nERROR: -g <gff3> was not supplied to the script.\n\n");
+
+my @fasta = ();
+if ($opt_f) {
+
+    @fasta = split(/,/, $opt_f);
+}
+
+my $cn = 6;
+if ($opt_c) {
+
+    if ($opt_c !~ m/^\d+$/) {
+    
+	die("ERROR: -c <number_of_characters> is not a integer.\n");
+    }
+    else {
+    
+	$cn = $opt_c;
+    }
+}
+
+my $outbase = 'gene_id_rename';
+if ($opt_o) {
+
+    $outbase = $opt_o;
+}
+
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GeneIDRename Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+
+## It will store the GFF file into a hash sortable structure
+##
+## SeqID => Feature => Start => LineN
+## LineN => GFFLine
+## 
+## It also needs to store the number of exons per gene (for numbering)
+## TranscriptsID => N_exons
+##
+## Finally it will store the relations of IDs
+## oldID => newID
+
+print_header("1) Parsing GFF file.");
+
+open my $gfffh, '<', $gff3;
+my %sortedgff = ();
+my %gffdata = ();
+my %gfflines = ();
+
+## To facilitate the sorting of some hashes it will divide the data 
+## into two groups:
+## Ids that need to be changed (%gffdata) and those that don't need to
+## be changed (%gfflines)
+
+my %soch = (
+    'gene'                     => 1,
+    'tRNA'                     => 1,
+    'mRNA'                     => 1, 
+    'exon'                     => 1, 
+    'five_prime_UTR'           => 1,
+    'CDS'                      => 1, 
+    'three_prime_UTR'          => 1
+    );
+
+my %pcount = (
+    'tRNA'            => {},
+    'mRNA'            => {},
+    'exon'            => {},
+    'CDS'             => {},
+    'five_prime_UTR'  => {},
+    'three_prime_UTR' => {}
+    );
+
+my %equiv_ids = ();
+
+my $fasta = 0;
+my $line = 0;
+
+## Define the fields for GFF
+my @hd = ('seqid', 'source', 'type', 'start', 'end', 'score', 'strand', 
+	  'phase', 'attributes');
+
+## Also we define a hash with the attributes and their order
+## If during the parsing, it finds a new one, it will add with the
+## sort number 12
+
+## Order of the attributes
+my %at = (
+    'ID'            => 1,
+    'Name'          => 2,
+    'Alias'         => 3,
+    'Parent'        => 4,
+    'Target'        => 5,
+    'Gap'           => 6,
+    'Derives_from'  => 7,
+    'Note'          => 8,
+    'Dbxref'        => 9,
+    'Ontology_term' => 10,
+    'Is_circular'   => 11
+    );
+
+## It will sort the types as this:
+my %so = (
+    'contig'                   => 1, 
+    'match'                    => 2, 
+    'match_part'               => 3, 
+    'expressed_sequence_match' => 4,
+    'protein_match'            => 5,     
+    'gene'                     => 6,
+    'tRNA'                     => 7,
+    'mRNA'                     => 8, 
+    'exon'                     => 9, 
+    'five_prime_UTR'           => 10,
+    'CDS'                      => 11, 
+    'three_prime_UTR'          => 12
+    ); 
+
+while(<$gfffh>) {
+
+    chomp($_);
+    $line++;
+    
+    ## Ignore the header and the comments
+    if ($_ =~ m/#/) {
+    
+	if ($_ =~ m/#FASTA/i) {
+	
+	    $fasta = 1;
+	}
+    }
+    else {
+    
+	if ($fasta == 0) {
+	
+	    my %gffdt = ();	    
+	    my @dt = split(/\t/, $_);
+	    my $n = 0;
+	
+	    foreach my $h (@hd) {
+	    
+		if ($h !~ m/attributes/) {
+	
+		    $gffdt{$h} = $dt[$n];
+		}
+		else {
+
+		    my %attrdt = ();
+		    my @attr = split(/;/, $dt[$n]);
+		    foreach my $attr_item (@attr) {
+		    
+			if ($attr_item =~ m/^(.+)=(.+)$/) {
+			
+			    my $att_type = $1;
+			    my $att_value = $2;
+			    $attrdt{$att_type} = $att_value;
+
+			    unless (exists $at{$att_value}) {
+			    
+				$at{$att_value} = 12;
+			    }
+			}
+		    }
+
+		    $gffdt{$h} = \%attrdt;
+		}
+		$n++;
+	    }
+
+	    ## Add new types for the sorting SO
+
+	    unless (exists $so{$gffdt{type}}) {
+	    
+		$so{$gffdt{type}} = 0;
+	    }
+
+
+	    ## counts for types derived from other type
+	    
+	    my $parent = $gffdt{'attributes'}->{'Parent'};
+	    if (exists $pcount{$gffdt{'type'}}) {
+	    
+		if (exists $pcount{$gffdt{'type'}}->{$parent}) {
+		
+		    $pcount{$gffdt{'type'}}->{$parent}++;
+		}
+		else {
+		
+		    $pcount{$gffdt{'type'}}->{$parent} = 1;
+		}	    
+	    }
+	    
+	    ## Now it will add the data to the hashes
+	    
+	    my $seqid = $gffdt{'seqid'};
+	    my $st = $gffdt{'start'};
+	    my $type = $gffdt{'type'};
+
+	    if (exists $sortedgff{$seqid}) {
+	    
+		if (exists $sortedgff{$seqid}->{$st}) {
+		
+		    if (exists $sortedgff{$seqid}->{$st}->{$type}) {
+		    
+			push @{$sortedgff{$seqid}->{$st}->{$type}}, $line;
+		    }
+		    else {
+
+			$sortedgff{$seqid}->{$st}->{$type} = [$line];
+		    }	  
+		}
+		else {
+		
+		    $sortedgff{$seqid}->{$st} = { $type => [$line] };
+		}
+	    }
+	    else {
+	   
+		$sortedgff{$seqid} = { $st => { $type => [$line] } };
+	    }
+
+	    if (exists $soch{$type}) {
+	    
+		$gffdata{$line} = \%gffdt;	    
+	    }   
+	    else {
+	    
+		$gfflines{$line} = $_;
+	    }
+	}
+    }
+
+    $line++;
+}
+
+my $line_n = scalar(keys %gffdata) + scalar(keys %gfflines);
+print STDERR "\t$line_n GFF lines have been parsed.\n";
+
+##############################################################################
+## SORT GFF LINES
+##############################################################################
+
+print_header("2) Sorting GFF");
+
+my @sorted_gff = ();
+
+foreach my $seqid (sort keys %sortedgff) {
+
+    my %sortedgff_sq = %{$sortedgff{$seqid}};
+    foreach my $start (sort {$a <=> $b} keys %sortedgff_sq) {
+    
+	my %sortedgff_st = %{$sortedgff_sq{$start}};
+
+	foreach my $stype (sort {$so{$a} <=> $so{$b}} keys %so) {
+
+	    if (exists $sortedgff_st{$stype}) {
+
+		push @sorted_gff, @{$sortedgff_st{$stype}};
+	    }
+	}
+    }
+}
+my $line_s = scalar(@sorted_gff);
+print STDERR "\t$line_s GFF lines have been sorted.\n";
+
+
+
+###############################################################################
+## PRODUCE THE OUTPUT
+###############################################################################
+
+## It will define a counter for genes.
+my %gene_c = ();
+
+## for the recount of exons and cds will need new hashes
+my %rcount = (
+    'tRNA'            => {},
+    'mRNA'            => {},
+    'exon'            => {},
+    'CDS'             => {},
+    'five_prime_UTR'  => {},
+    'three_prime_UTR' => {}
+    );
+
+## It will sort the %at
+
+my @attsorted = sort {$at{$a} <=> $at{$b}} keys %at;
+
+print_header("3) Procesing/Writting GFF data.");
+
+open my $ogff_fh, '>', $outbase . '.gff';
+
+print $ogff_fh "##gff-version 3\n";
+
+foreach my $l (@sorted_gff) {	    
+    	    	   	    
+    ## Get the types that need to modify its name
+
+    if (exists $gffdata{$l}) {
+
+	## Define the printing line 
+	my @line = ();
+
+	## Get the data
+	my %gffline = %{$gffdata{$l}}; 
+	my $seqid = $gffline{seqid};
+	my $type = $gffline{type};
+	my %attr = %{$gffline{attributes}};
+	        
+	## Counter for gene
+	unless (exists $gene_c{$seqid}) {
+	    
+	    $gene_c{$seqid} = 0;
+	}
+	
+	if ($type eq 'gene') {
+	
+	    $gene_c{$seqid}++;
+	}
+	    
+	my $old_gene_id = $gffline{attributes}->{ID};
+		
+	## Build the default gene_id
+		
+	my $gc = $gene_c{$seqid};
+	my $gbase = sprintf("%0".$cn."s",$gc);
+	my $new_gene_id = $seqid . 'g' . $gbase . "0";
+
+	## If the gene is a tRNA it will modify the gene name
+	if ($old_gene_id =~ m/tRNA/i) {
+		
+	    $new_gene_id = $seqid . 'tRNA' . $gbase . "0";
+	}
+	
+	## Now it will modify the ID depending if it is a gene,
+	## mRNA, exons...
+
+	if (exists $pcount{$type}) {
+
+	    if ($type eq 'mRNA') {
+
+		## It will set up a new counter
+		unless (exists $rcount{$type}->{$attr{Parent}}) {
+			    
+		    $rcount{$type}->{$attr{Parent}} = 1;
+		}
+		else {
+		    
+		    $rcount{$type}->{$attr{Parent}}++;
+		}
+		    
+		$new_gene_id .= ".". $rcount{$type}->{$attr{Parent}}; 
+	    }
+	    elsif ($type eq 'tRNA') {
+		
+		## It will set up a new counter
+		unless (exists $rcount{$type}->{$attr{Parent}}) {
+		    
+		    $rcount{$type}->{$attr{Parent}} = 1;
+		}
+		else {
+		    
+		    $rcount{$type}->{$attr{Parent}}++;
+		}
+		
+		$new_gene_id .= ".". $rcount{$type}->{$attr{Parent}}; 
+		
+	    }
+	    else {
+		
+		my $npi = $equiv_ids{$attr{Parent}};
+		my $fn = $pcount{$type}->{$attr{Parent}};
+		if ($gffline{strand} eq '-') {		
+		    
+		    $pcount{$type}->{$attr{Parent}}--;
+		}
+		else {
+		    
+		    unless (exists $rcount{$type}->{$attr{Parent}}) {
+			    
+			$rcount{$type}->{$attr{Parent}} = 1;
+		    }
+		    else {
+			
+			$rcount{$type}->{$attr{Parent}}++;
+		    }
+		    
+		    $fn = $rcount{$type}->{$attr{Parent}};
+		}
+		$new_gene_id = $npi . ":" . $type . ":" . $fn;
+	    }
+	}
+	
+	## Add the equivalences
+	$equiv_ids{$old_gene_id} = $new_gene_id;
+
+	## Now it will prepare the printing line
+	## Before the attributes all the fields will be the same
+				
+	foreach my $hd (@hd) {
+
+	    if ($hd eq 'attributes') {
+	
+		## Now it will build the new attributes field
+			
+		my @attline = ();
+
+		## Modify the attribute Alias
+
+		if (exists $attr{Alias}) {
+			
+		    my @alias = split(/,/, $attr{Alias});
+		    push @alias, $old_gene_id;
+		    $attr{Alias} = join(",", @alias);
+		}
+		else {
+		    
+		    $attr{Alias} = $old_gene_id;
+		}
+		
+		$attr{ID} = $new_gene_id;
+
+		if ($attr{Name} && $attr{Name} eq $attr{ID}) {
+				    
+		    $attr{Name} = $new_gene_id; 
+		}
+		if ($attr{Parent}) {
+		
+		    $attr{Parent} = $equiv_ids{$attr{Parent}};
+		}
+
+		foreach my $attp (@attsorted) {
+		    
+		    if ($attr{$attp}) {
+
+			push @line, $attp . "=" . $attr{$attp}; 
+		    }
+		}
+		push @line, join(";", @attline);
+	    }
+	    else {
+		
+		push @line, $gffline{$hd};
+	    }	
+	}
+
+	my $pline = join("\t", @line);
+	print $ogff_fh "$pline\n";
+    }
+    else {
+	
+	## It will not modify the output
+	my $gffline = $gfflines{$l}; 
+
+	if ($gffline =~ m/\tcontig\t/) {
+	    
+	    my @ctgline = split(/\t/, $gffline);
+
+	    print $ogff_fh "##sequence-region $ctgline[0] $ctgline[3] ";
+	    print $ogff_fh "$ctgline[4]\n";
+	}
+	
+	print $ogff_fh "$gffline\n";
+    }
+}    
+
+
+##############################################################################
+## PROCESS THE FASTA FILES
+##############################################################################
+
+if (scalar(@fasta) > 0) {
+
+    print_header("4) Procesing Fasta files.");
+    
+    foreach my $fas (@fasta) {
+    
+	my $iseqio = Bio::SeqIO->new(-file => $fas, -format => 'fasta');
+	
+	## Remove the suffix
+	$fas =~ s/\.w+$//;
+	my $outname = $fas . '_renamed_ids.fa';
+
+	my $oseqio = Bio::SeqIO->new(-file => ">$outname", -format => 'fasta');
+    
+	while( my $seq = $iseqio->next_seq() ) {
+	
+	    my $seqid = $seq->display_id();
+	    if (exists $equiv_ids{$seqid}) {
+	    
+		$seq->display_id($equiv_ids{$seqid});
+	    }
+
+	    $oseqio->write_seq($seq);
+	}
+    }
+}
+else {
+
+    print STDERR "\nNo fasta files were supplied.\n";
+}
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GeneIDRename Ends ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+       This script parse a GFF file and rename the gene ID and the exons based
+     in the order of apperance in the contigs.
+
+       For example:
+
+        Cupep3Scf000042 maker   gene    60911   63538  .       +       .       
+          ID=maker-Cupep3Scf000042-augustus-gene-0.10;
+          Name=maker-Cupep3Scf000042-augustus-gene-0.10
+        Cupep3Scf000042 maker   gene    76825   78608   .       +       .       
+          ID=maker-Cupep3Scf000042-augustus-gene-0.11;
+          Name=maker-Cupep3Scf000042-augustus-gene-0.11
+
+       For this case, the geneIDs will be renamed to: 
+          ID=maker-Cupep3Scf000042-augustus-gene-0.10; to Cupep3Scf000042g000010
+          ID=maker-Cupep3Scf000042-augustus-gene-0.11; to Cupep3Scf000042g000020
+
+       Trancripts IDs will be renamed as:
+          Cupep3Scf000042g00010.1 
+          Cupep3Scf000042g00020.1
+
+       Exons will be renamed as: 
+          Cupep3Scf000042g000010.1.exon.01 
+          Cupep3Scf000042g000020.1.exon.01
+
+       By default the script will rename these features using five characters, 
+     plus a final zero to accomodate new genes. To change this behavior the 
+     option -c can be used. 
+
+    Usage:
+      
+       GeneIDRename [-h] -g <gff3> [-f <fasta>] [-o <basename>] [-c <integer>]
+      
+    Flags:
+
+      -g <gff3>           GFF3 file (mandatory)
+      -f <fasta>          Fasta file(s) (separated by commas) (optional)
+      -o <output>         Output file basename (optional)
+      -c <n_characters>   Number of characters for the gene format (default: 6)
+      -h <help>           Print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+####
+1; #
+####
