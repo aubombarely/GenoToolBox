@@ -236,9 +236,11 @@ if ($gff) {
 			my @attribs = split(/;/, $data[$n]);
 			foreach my $att (@attribs) {
 		
-			    if ($att =~ m/^(.+)=(.+)%/) {
-		    	
-				$attr{$1} = $2;
+			    if ($att =~ m/^(.+)=(.+)$/) {
+				
+				my $key = $1;
+				my $val = $2;
+				$attr{$key} = $val;
 			    }		
 			}
 
@@ -252,13 +254,15 @@ if ($gff) {
 		## Remenber that GFF is start(1-based) but we want to have
 		## start(0-based).
 
+		my $feat_id = $gffdata{attributes}->{ID};		
+
 		if ($gffdata{type} eq $feat) {
 		
 		    $bins{$bin_n} = { 
 			seqid => $gffdata{seqid},
 			start => $gffdata{start} - 1,
 			end   => $gffdata{end},
-			name  => $gffdata{attributes}->{ID}
+			name  => $feat_id
 		    };
 
 		    if (exists $regions{$gffdata{seqid}}) {
