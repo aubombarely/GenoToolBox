@@ -1,0 +1,906 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use autodie;
+
+use POSIX qw(strftime);
+
+use Config;
+
+use Getopt::Long;
+use Pod::Usage;
+use List::Util 'shuffle';
+use Statistics::Basic qw(:all);
+use Math::BigFloat;
+use Scalar::Util 'looks_like_number';
+
+
+Getopt::Long::Configure ("bundling");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+## Get the arguments and check them
+
+## Input options:
+my $hapmap = '';
+my $gff = '';
+my @ancestors = ();
+
+## Input filter
+my $rm_indels = 0;
+
+## Assigning option
+my $feat = '';
+my $bin_size = 0;       ##   0 By default
+my $min_perc = 30;      ## 30% By default 
+my $min_total_var = 5;  ## at least 5 SNPs per bin (default)
+my $min_indiv_var = 2;  ## at least 2 SNPs per site (default)   
+
+## Output
+my $outbase = 'region_SNPanalyzer_out';
+
+## Message options
+my $usage = 0;
+my $help = 0;
+my $manual = 0;
+my $verbose = 0;
+
+
+GetOptions(
+
+    ## Input options:
+    'h|hapmap=s'                    => \$hapmap, 
+    'g|gff:s'                       => \$gff,
+    'a|ancestors=s'                 => \@ancestors,
+
+    ## Input filter options
+    'I|rm_indels!'                  => \$rm_indels,
+
+    ## Assigning options:
+    'f|feature:s'                   => \$feat,
+    'b|bin_size:i'                  => \$bin_size,
+    'p|min_percentage:i'            => \$min_perc,
+    't|min_total_variation:i'       => \$min_total_var,
+    'i|min_individual_variation:i'  => \$min_indiv_var,
+    
+    ## Output options
+    'o|out|output:s'             => \$outbase,
+
+    ## Message options
+    'usage!'                     => \$usage,
+    'H|help!'                    => \$help,
+    'manual|man!'                => \$manual,
+    'V|verbose!'                 => \$verbose,  
+    );
+
+## To set up multiple values as comma separated
+@ancestors = split(/,/,join(',',@ancestors)); 
+
+if ($usage) {
+    pod2usage(-verbose => 0, -exitval => 0);
+}
+elsif ($help) {
+    pod2usage(-verbose => 1, -exitval => 0);
+}
+elsif ($manual) {
+    pod2usage(-verbose => 2, -exitval => 0);
+}
+elsif ($hapmap !~ /.+/) {
+    pod2usage(
+	-verbose => 0, 
+	-exitval => 0, 
+	-message => 
+	"\n\nERROR: -h <hapmap> is a mandatory argument.\n",
+	);
+}
+
+
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## RegionSNPAnalyzer Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+print_header("0) Checking arguments");
+
+print STDERR "\tINPUT HAPMAP FILE: $hapmap\n";
+
+print STDERR "\n\tINPUT GFF FILE: ";
+if ($gff =~ m/.+/) {
+
+    print STDERR "$gff\n";
+}
+else {
+
+    print STDERR "none\n";
+}
+
+my %ancest = ();
+if (scalar(@ancestors) < 2) {
+
+    die("\n\tERROR: At least to ancestors should be used.\n\n");
+}
+
+print STDERR "\n\tANCESTORS:\n";
+foreach my $anc (@ancestors) {
+
+    $ancest{$anc} = 1;
+    print STDERR "\t\t$anc\n";
+}
+
+
+print STDERR "\n\n\tOUTPUT BASENAME:     $outbase\n";
+
+
+###############################################################################
+## 1) PARSE HAPMAP FILE
+###############################################################################
+##
+## The structure for the parsing will be:
+## %hmp = ( $seqid => { $pos => { $sample => $genotype } } );
+##
+
+print_header("1) Parsing the Hapmap file");
+
+my %hmp = parse_hapmap($hapmap, $rm_indels);
+
+## Get the array for the samples just getting the first of each
+
+my $seqn = scalar(keys %hmp);
+print STDERR "\tHapmap file parsed. It contains $seqn sequences.\n";
+
+print_header("2) Extracting sample names");
+
+my @seqids = sort(keys(%hmp));
+my @pos_seq1 = keys(%{$hmp{$seqids[0]}});
+my @allsamples = keys(%{$hmp{$seqids[0]}->{$pos_seq1[0]}});
+
+my @samples = ();
+foreach my $smp (sort @allsamples) {
+	
+    unless (exists $ancest{$smp}) {
+
+	push @samples, $smp;
+	print STDERR "\t$smp\n";
+    }
+}
+
+
+###############################################################################
+##
+## Now the script will create bins to count the SNPs. They can be:
+##  * Fixed size bins (e.g. 10Kb)
+##  * GFF features (e.g. exons)
+##
+## Structure of the bins:
+## %bins = { $ bin_id => { seqid => $seqid, 
+##                         start => $start, 
+##                         end   => $end, 
+##                         name  => $name }}
+##
+## It also will need an easy way to search for these bins
+## %regions = { $seqid => { $start => $bin_id }}
+##
+## bins can't overlap
+##
+##
+
+print_header("3) Creating Bins");
+
+my $bin_n = 0;
+my %bins = ();
+my %regions = ();
+
+if ($gff) {
+
+    unless ($feat) {
+    
+	die("\tERROR: The use of GFF file requires the use of -f|--feat.\n");
+    }
+    
+    my $bin_n++;
+    my $fasta = 0;
+    my @gfffields = ( 'seqid', 'source', 'type', 'start', 'end', 'score',
+		      'strand', 'phase', 'attributes');
+
+    open my $gff_fh, '<', $gff;
+
+    print STDERR "\tParsing the GFF file: $gff\n";
+
+    while(<$gff_fh>) {
+    
+	chomp($_);
+
+	if ($_ !~ m/^#/) {
+
+	    if ($fasta == 0) {
+
+		my %gffdata = ();
+	
+		my @data = split(/\t/, $_);
+		my $n = 0;
+
+		foreach my $field (@gfffields) {
+		
+		    if ($field ne 'attributes') {
+
+			$gffdata{$field} = $data[$n];
+		    }
+		    else {
+	    
+			my %attr = ();
+			my @attribs = split(/;/, $data[$n]);
+			foreach my $att (@attribs) {
+		
+			    if ($att =~ m/^(.+)=(.+)%/) {
+		    	
+				$attr{$1} = $2;
+			    }		
+			}
+
+			$gffdata{$field} = \%attr;
+		    }
+		
+		    $n++;
+		}
+
+		## Now it will select the lines where type = $feat
+		## Remenber that GFF is start(1-based) but we want to have
+		## start(0-based).
+
+		if ($gffdata{type} eq $feat) {
+		
+		    $bins{$bin_n} = { 
+			seqid => $gffdata{seqid},
+			start => $gffdata{start} - 1,
+			end   => $gffdata{end},
+			name  => $gffdata{attributes}->{ID}
+		    };
+
+		    if (exists $regions{$gffdata{seqid}}) {
+		    
+			$regions{$gffdata{seqid}}->{$gffdata{start}} = $bin_n;
+		    }
+		    else {
+
+			$regions{$gffdata{seqid}} = {$gffdata{start} => $bin_n};
+		    }
+
+		    $bin_n++;
+		}		
+	    }
+	}
+	elsif ($_ =~ m/##FASTA/) {
+	
+	    $fasta = 1;
+	}
+    }
+}
+elsif ($bin_size > 0) {
+
+    print STDERR "\tNo GFF file. Creating bins based in bin size = $bin_size\n";
+
+    ## To create the bins it will need to extract information about the 
+    ## hapmap file (seqid and max_position). This could be extracted
+    ## from %hmp
+
+    foreach my $seqid (sort keys %hmp) {
+
+	my %hmp_p = %{$hmp{$seqid}};
+	my @positions = sort({$a <=> $b} keys %hmp_p);
+
+	## Now it will create the bins with start(1-based)
+
+	my $n = 0;
+	while($bin_size * $n <= $positions[-1]) {
+	
+	    my $start = $bin_size * $n;
+	    my $end = ($bin_size * ($n + 1));
+	    if ($end > $positions[-1]) {
+	    
+		$end = $positions[-1];
+	    }
+
+	    $bins{$bin_n} = { 
+		seqid => $seqid,
+		start => $start,
+		end   => $end,
+		name  => $bin_n
+	    };
+
+	    if (exists $regions{$seqid}) {
+		    
+		$regions{$seqid}->{$start} = $bin_n;
+	    }
+	    else {
+		
+		$regions{$seqid} = {$start => $bin_n };
+	    }
+	    
+	    $n++;
+	    $bin_n++;	
+	}
+    }
+}
+
+my $bin_c = scalar(keys %bins);
+print STDERR "\t$bin_c bins have been created.\n";
+
+
+##############################################################################
+## Identify the origins of the SNPs
+##############################################################################
+##
+## For the origin identification it'll add the data to a hash
+## $sample => { $bin_id => { $genotype => $count } }
+
+print_header("4) Identifying SNP by ancestors");
+
+my $missing_bin = 0;
+my $missing_seq = 0;
+
+my %bincmp = ();
+my %types_counts = ();
+
+## Add the samples to the bed hash with anonymous hashes for the origins
+
+foreach my $smp (@samples) {
+
+    $bincmp{$smp} = {};
+    $types_counts{$smp} = {};
+}
+
+
+
+my $i = 0;
+foreach my $seqid (sort keys %hmp) {
+
+    ## get the hash for the hapmap
+    my %hmp_p = %{$hmp{$seqid}};
+
+    ## and for the bins (regions)
+    if (exists $regions{$seqid}) {
+
+	my %reg_p = %{$regions{$seqid}};
+	my @reg_pos = sort {$a <=> $b} keys %reg_p;
+    
+	foreach my $pos (sort {$a <=> $b} keys %hmp_p) {
+
+	    ## Once it get the position, it'll compare with the regions
+	    ## They don't overlap so the requeriment to assign an SNP to a 
+	    ## bin will be $pos > $start and $pos < $next_start.
+	    
+	    ## Remember that Hapmap is start (1-based) and Bed/Bins (0-based)
+	    
+	    my $region = '';
+	    foreach my $start (@reg_pos) {
+		
+		my $end = $bins{$reg_p{$start}}->{end};
+		if ($pos >= $start+1 && $pos <= $end) {
+
+		    $region = $start;
+		}
+	    }
+	    
+	    ## If find a region...
+
+	    if ($region =~ m/^\d+$/) {
+	
+		my $bin_id = $regions{$seqid}->{$region};
+		my %geno = %{$hmp_p{$pos}};
+
+		foreach my $sample (sort @samples) {
+
+		    ## create the empty anonymous hash for each sample
+		    ## in the bincmp
+
+		    unless (exists $bincmp{$sample}->{$bin_id}) {
+		    
+			$bincmp{$sample}->{$bin_id} = {};
+		    }
+	
+		    my @origin = ();
+		    my @keys = keys %geno;
+
+		    my $gn = $geno{$sample};
+
+		    ## Posibilities
+		    ## 1) homozygous/heterozygous ancestors
+		    ##    It'll filter the heterozygous ancestors (AHET)
+		    ## 2) ancestors are the same
+		    ##    It'll filter these SNPs too (ASAM)
+		    ## 3) ancestors are homozygous and different
+		    ##    Then it will compare the sample genotype with
+		    ##    the ancestors.
+
+		    my $ahet = 0;
+		    my $asam = 0;
+		    my %ageno = ();
+		    
+		    ## Check ancestors status
+		    
+		    foreach my $anc (sort keys %ancest) {
+
+			my %nt_a = ();
+			$ageno{$geno{$anc}}++;
+			
+			foreach my $nta (sort(split(//, $geno{$anc}))) {
+
+			    $nt_a{$nta}++;
+			}
+			if (scalar(keys %nt_a) > 1) {
+			    
+			    $ahet = 1;
+			}
+		    }
+
+		    if (scalar(keys %ageno) == 1) {
+		    
+			$asam = 1;
+		    }
+		    
+		    ## Supposing that the two flags are 0, it will asign the 
+		    ## genotypes for the sample
+		    
+		    my @sample_gn = sort(split(//, $gn));
+
+		    if ($ahet == 0 && $asam == 0) {
+			
+			foreach my $anc (sort keys %ancest) {
+			
+			    my @ancest_gn = sort(split(//, $geno{$anc}));
+
+			    ## Ancestors should be homozygous, so it can use
+			    ## the first
+
+			    foreach my $nts (@sample_gn) {
+
+				if ($nts eq $ancest_gn[0]) {
+				    
+				    push @origin, $anc;
+				}			    
+			    }			
+			}
+		    }
+	    
+		    ## By default add unknown 'UNK' if it isn't like 
+		    ## one of the ancest.
+	    		    
+		    while(scalar(@origin) < scalar(@sample_gn)) {
+			
+			push @origin, "UNK";
+		    }
+	    
+		    my $origin_line = join("|", sort(@origin));
+		    if ($ahet == 1) {
+		    
+			$origin_line = "-AHET";
+		    }
+		    elsif ($asam == 1) {
+		    
+			$origin_line = "-ASAM";
+		    }
+		    
+		    $types_counts{$sample}->{$origin_line}++;
+
+		    ## Now it will add the origin line to a counter per bin
+
+		    if (exists $bincmp{$sample}->{$bin_id}->{$origin_line}) {
+		    
+			$bincmp{$sample}->{$bin_id}->{$origin_line}++;
+		    }
+		    else {
+		    
+			$bincmp{$sample}->{$bin_id}->{$origin_line} = 1;
+		    }
+		}
+	    }
+	    else {
+	    
+		$missing_bin++;
+	    }
+	}	
+    }
+    else {
+    
+	$missing_seq++;
+    }
+}
+
+if ($missing_bin > 0) {
+
+    print STDERR "\n\tWARNING: There are $missing_bin SNPs outside bins.\n";
+}
+if ($missing_seq > 0) {
+
+    print STDERR "\n\tWARNING: There are $missing_seq seqids without bins.\n";
+}
+
+print_table(\%types_counts);
+
+
+print_header("5) Analyzing the origin for each bin");
+
+foreach my $sample (sort keys %bincmp) {
+
+    open my $outfh, '>', $outbase . "." . $sample . ".bed";
+
+    foreach my $bin_id (sort {$a <=> $b} keys %bins) {
+
+	my %bindata = %{$bins{$bin_id}};
+	if (exists $bincmp{$sample}->{$bin_id}) {
+	    
+	    my %bincomp = %{$bincmp{$sample}->{$bin_id}};
+	    
+	    ## define the assignment variable
+
+	    my $assigned = "";
+
+	    ## Now there are three arguments that it will use to assign the
+	    ## bin to an ancestor.
+	    ## $min_perc
+	    ## $min_total_var
+	    ## $min_indiv_var
+
+	    ## 1) Calculate the total (total_re ignore the progenitor het/same).
+	    my $total_ab = 0;
+	    my $total_re = 0;
+
+	    foreach my $type (keys %bincomp) {
+	    
+		$total_ab += $bincomp{$type};
+		if ($type !~ m/^-A/) {
+		
+		    $total_re += $bincomp{$type};
+		}
+	    }
+
+	    ## 2) Apply the filter min_total_var
+
+	    if ($total_re < $min_total_var) {
+	    
+		$assigned = "Insufficient Variation";
+	    }
+
+	    ## 3) Apply the min_indiv and min_perc
+
+	    my @comp = ();
+
+	    foreach my $type (keys %bincomp) {
+	    
+		if ($type !~ m/^-A/) {
+		
+		    if ($bincomp{$type} >= $min_indiv_var) {
+		    
+			## Calculate the percentage
+			my $perc = $bincomp{$type} * 100 / $total_re;
+
+			if ($perc >= $min_perc) {
+
+			    push @comp, $type;
+			}
+		    }
+		}
+	    }
+
+	    if (scalar(@comp) > 0) {
+	    
+		$assigned = join("+", sort(@comp));
+	    }
+	    else {
+	    
+		$assigned = "Unclear";
+	    }
+
+	    my @line = ($bindata{seqid}, $bindata{start}, $bindata{end}, 
+			$bindata{name}, $assigned);
+
+	    my $pline = join("\t", @line); 
+	    print $outfh "$pline\n";
+	}
+    }
+}
+
+
+
+
+##############################################################################
+## print_header 
+##############################################################################
+#  Usage: print_header($string)
+#  Desc: format a line and print as a header
+#  Ret: none
+#  Args: $string, with the message to print
+#  Side_Effects: none
+
+sub print_header {
+    my $message = shift;
+
+    my $date = strftime "%a %b %e %H:%M:%S %Y", localtime;
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+##############################################################################
+## print_table 
+##############################################################################
+#  Usage: print_table($hashref, $rev)
+#  Desc: format a hash to print as a table
+#  Ret: none
+#  Args: $hashref to print, $rev to set up a reverse order of rows
+#  Side_Effects: none
+
+sub print_table {
+    my $hashref = shift;
+    my $rev = shift;
+    my %hash = %{$hashref};
+
+    my $sep = " " x 8 . "-" x 52;
+    my @line = ($sep);
+
+    ## Get the header
+
+    my $header_line = sprintf("%10s", "TAG");
+    my @tags = sort(keys(%hash));
+    my @fields = sort(keys(%{$hash{$tags[0]}}));
+    if ($rev) {
+	@fields = reverse(@fields);
+    }
+
+    foreach my $key (@fields) {
+    
+	$header_line .= sprintf("%10s", uc($key));
+    }
+    push @line, $header_line;
+    push @line, $sep;
+
+    ## Add the data
+
+    foreach my $key (sort(keys %hash)) {
+
+	my $data =  sprintf("%10s", $key);
+	foreach my $f (@fields) {
+	    $data .= sprintf("%10s", $hash{$key}->{$f}); 
+	}
+	push @line, $data
+    }
+    push @line, $sep;
+
+    my $ptable = join("\n", @line);
+    print STDERR "\n$ptable\n";
+}
+
+###############################################################################
+## parse_hapmap
+###############################################################################
+
+
+sub parse_hapmap {
+
+    my $hapmap = shift ||
+	die("ERROR: No hapmap file was supplied to parse_hapmap().\n");
+
+    my $rm_indels = shift;
+
+
+    ## Define the variable
+    my %hpmp = ();
+
+    open my $hapmap_fh, '<', $hapmap;
+    
+    my @header = ();
+    my @samples = ();
+    my %fixfields = (
+	'rs#'       => 1, 
+	'alleles'   => 1, 
+	'chrom'     => 1, 
+	'pos'       => 1, 
+	'strand'    => 1, 
+	'assembly'  => 1, 
+	'center'    => 1, 
+	'protLSID'  => 1, 
+	'assyLSID'  => 1, 
+	'panelLSID' => 1, 
+	'QCcode'    => 1
+	);
+    
+    while(<$hapmap_fh>) {
+
+	chomp($_);
+	if ($_ =~ m/^rs#/) {
+	
+	    @header = split(/\t/, $_);	    
+	    
+	}
+	else {
+	
+	    my @data = split(/\t/, $_);
+	    
+	    my %dt = ();
+	    my %gn = ();
+
+	    ## Map the data with the header
+
+	    my $n = 0;
+	    foreach my $head (@header) {
+	    
+		$dt{$head} = $data[$n];
+		
+		unless (exists $fixfields{$head}) {
+		
+		    $gn{$head} = $data[$n];
+		}
+		$n++;
+	    }
+
+	    my @alleles = split(/\//, $dt{'alleles'});
+	    my $select = 1;
+
+	    if (length($alleles[0]) != length($alleles[1]) && $rm_indels == 1) {
+	    
+		$select = 0;
+	    }
+
+
+	    ## Add the data to the %hpmp hash
+
+	    if ($select == 1) {
+		if (exists $hpmp{$dt{'chrom'}}) {
+	    
+		    $hpmp{$dt{'chrom'}}->{$dt{'pos'}} = \%gn;
+		}
+		else {
+		    
+		    $hpmp{$dt{'chrom'}} = { $dt{'pos'} => \%gn };
+		}
+	    }
+	}
+    }
+
+    return(%hpmp);
+}
+    
+    
+###############################################################################
+## parse_gff
+###############################################################################
+
+
+sub parse_gff {
+
+    my $gff = shift ||
+	die("ERROR: No gff file was supplied to parse_gff().\n");
+    
+    ## It will keep the order of the file, so it will store the data into a
+    ## array
+
+    my @gff = ();
+    my @gfffields = ( 'seqid', 'source', 'type', 'start', 'end', 'score',
+		      'strand', 'phase', 'attributes');
+
+    open my $gff_fh, '<', $gff;
+
+    while(<$gff_fh>) {
+    
+	chomp($_);
+	
+	my %gffdata = ();
+	
+	my @data = split(/\t/, $_);
+	my $n = 0;
+
+	foreach my $field (@gfffields) {
+
+	    if ($field ne 'attributes') {
+
+		$gffdata{$field} = $data[$n];
+	    }
+	    else {
+	    
+		my %attr = ();
+		my @attribs = split(/;/, $data[$n]);
+		foreach my $att (@attribs) {
+		
+		    if ($att =~ m/^(.+)=(.+)%/) {
+		    	
+			$attr{$1} = $2;
+		    }		
+		}
+
+		$gffdata{$field} = \%attr;
+	    }
+
+	    $n++;
+	}
+	push @gff, \%gffdata;
+    }
+
+    return @gff;
+}
+
+
+
+
+__END__
+
+=head1 NAME
+
+ RegionSNPAnalyzer
+ Tool to count SNP composition for genomic regions
+
+=head1 SYNOPSIS
+
+ RegionSNPAnalyzer [options] -h <hapmap_file>
+
+ Options:
+  -h <file>       hapmap file with the polymorphisms             [mandatory]
+  -a <list>       list of sample names (ancestors)               [mandatory]
+  -g <file>       gff file with interest regions                 [optional]
+  -f <ontology>   sequence ontology to get specific gff features [optional]
+  -b <numeric>    bin size to count polymorphisms                [optional]
+  -p <numeric>    min. percent to assign a region to an ancestor [optional]
+  -t <numeric>    min. total variation to consider a region      [optional]
+  -i <numeric>    min. individual variation to consider ancestor [optional]
+  -I              remove indels during hapmap parsing            [optional]
+  -H              print help
+  --manual        access to the manual                
+  
+=head1 EXAMPLE
+
+ RegionSNPAnalyzer -h petunia_snps.hmp -g petunia_genemodels.gff -f gene
+                   -a Pa,Pi -p 30 -t 20 -i 5
+
+=head1 OPTIONS
+
+=over
+
+=item -h|--hapmap
+
+B<file>              Input Hapmap file with SNP data (mandatory)
+
+=item -a|--ancestors
+
+B<list>              List for the ancestors separated by commas (mandatory)
+
+=item -g|--gff 
+
+B<file>              Input GFF file for the regions to analyze [optional] 
+
+=item -f|--feature
+
+B<ontology>          Sequence ontology to select region in the GFF [optional]
+
+=item -H|--help|--usage|--manual|--man
+
+B<switch_help>       Print this help
+
+=item -V|--verbose 
+
+B<switch_verbose>    Print more information during the program execution
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+
+ 
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (ab782@cornell.edu).
+
+=cut
