@@ -1,0 +1,337 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ BestReciprocalBlast
+ This script parse reciprocal blast
+
+=cut
+
+=head1 SYPNOSIS
+
+ BestReciprocalBlast -r <blast_result> -o <out_filename> [-i <min_identity>] 
+                     [-l <min_alignment_length>] [-e <max_evalue>] 
+                     [-s <min_score>] 
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -r
+
+B<blast_resultfile>             blast result file in m8/o6 format (mandatory)
+
+=item -o
+
+B<output_filename>              output filename (mandatory)
+
+=item -p
+
+B<dataset_prefixes>             dataset prefixes (mandatory, e.g: SL1, SL2)
+
+=item -i
+
+B<min_identity>                 minimum identity
+
+=item -l
+
+B<min_alignment_length>         minimun alignment length
+
+=item -e
+
+B<max_evalue>                   maximum e-value
+
+=item -s
+
+B<min_score>                    minimum score 
+
+=item -h
+
+B<help>                         print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script parse the Blast result file, filtering for minimum identity (-i), 
+ minimum alignment length (-l), maximum e-value (-e) and minimum score (-s).
+
+ After the filtering it will match the best blast (max. score) and printing it
+ if they match.
+
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (aurebg@vt.edu).
+
+=cut
+
+=head1 METHODS
+
+ BestReciprocalBlast
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use File::Basename;
+use Getopt::Std;
+use Math::BigFloat;
+
+our ($opt_r, $opt_p, $opt_o, $opt_i, $opt_l, $opt_e, $opt_s, $opt_h);
+getopts("r:p:o:i:l:e:s:h");
+
+if (!$opt_r && !$opt_p && !$opt_o && !$opt_i && !$opt_l && !$opt_e && !$opt_s 
+    && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+## Check variables.
+
+my $blastin = $opt_r 
+    || die("DATA ARGUMENT -r <blast_result_file> HAS NOT BEEN SUPPLIED.\n");
+
+
+my $blastout = $opt_o
+    || die("DATA ARGUMENT -o <output_filename> HAS NOT BEEN SUPPLIED.\n");
+
+my $dtprex = $opt_p
+    || die("DATA ARGUMENT -p <dataset_prefixes> HAS NOT BEEN SUPPLIED.\n");
+
+my ($prex1, $prex2) = split(/,/, $dtprex);
+if ($prex2 !~ /.+/) {
+
+    die("DATA ARGUMENT -p <dataset_prefixes> ERROR. Only one was supplied.\n"); 
+}
+
+
+
+if ($opt_i) {
+
+    if ($opt_i !~ /^(\d+)$/) {
+    
+	die("DATA ARGUMENT -i <min_identity> ISN'T NUMERIC.\n");
+    }
+}
+
+if ($opt_l) {
+
+    if ($opt_l !~ /^(\d+)$/) {
+    
+	die("DATA ARGUMENT -l <min_alignment_length> ISN'T NUMERIC.\n");
+    }
+}
+
+if ($opt_s) {
+
+    if ($opt_s !~ /^(\d+)$/) {
+    
+	die("DATA ARGUMENT -s <min_score> ISN'T NUMERIC.\n");
+    }
+}
+
+my $ev_obj;
+if ($opt_e) {
+    
+    $ev_obj = Math::BigFloat->new($opt_e);
+    
+    if ($ev_obj->is_nan()) {
+    
+	die("DATA ARGUMENT -e <max_evalue> ISN'T NUMERIC.\n");
+    }
+}
+
+## Print header
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## BestReciprocalBlast ($date)     ##";
+print STDERR "\n############################################################\n";
+
+my %blasthits = ();
+
+print STDERR "\n1- Parsing the Blast result file.\n";
+
+open my $blastfh, '<', $blastin;
+while(<$blastfh>) {
+
+    chomp($_);
+    my ($qseqid, $sseqid, $pident, $length, $mismatch, $gapopen, $qstart,
+	$qend, $sstart, $send, $evalue, $bitscore, @extra) = split(/\t/, $_); 
+
+    my $qprex;
+    if ($qseqid =~ /$prex1/) {
+    
+	$qprex = 1;
+    }
+    elsif ($qseqid =~ /$prex2/) {
+    
+	$qprex = 2;
+    }
+    else {
+    
+	print STDERR "WARNING qseqid $qseqid doesn't have any prefix.\n";
+    }
+
+    my $sprex;
+    if ($sseqid =~ /$prex1/) {
+    
+	$sprex = 1;
+    }
+    elsif ($sseqid =~ /$prex2/) {
+    
+	$sprex = 2;
+    }
+    else {
+    
+	print STDERR "WARNING sseqid $sseqid doesn't have any prefix.\n";
+    }
+
+
+
+    my $select = 1;
+
+    ## Conditions to de-select the hit
+
+    ## 1- Same ID or same prefix
+    if ($qseqid eq $sseqid) {
+    
+	$select = 0;
+    }
+    else {
+    
+	if ($qprex eq $sprex) {
+	
+	    $select = 0;
+	}
+    }
+
+    ## 2- %ID < min_identity
+    if ($opt_i && $pident < $opt_i) {
+    
+	$select = 0;
+    }
+
+    ## 3- AlignLength < min_align_length
+    if ($opt_l && $length < $opt_l) {
+    
+	$select = 0;
+    }
+
+    ## 4- Score < min_bitscore
+    if ($opt_s && $bitscore < $opt_s) {
+    
+	$select = 0;
+    }
+
+    ## 5- evalue > max_evalue
+    if ($ev_obj && $ev_obj->bcmp($evalue) < 0 ) {
+    
+	$select = 0;
+    }
+
+    if ($select == 1) {
+
+	if (exists $blasthits{$qseqid}) {
+	
+	    ## Get the first hit only
+	    unless (exists $blasthits{$qseqid}) {
+
+		$blasthits{$qseqid}->{$sseqid} = $bitscore;
+	    }
+	}
+	else {
+	
+	    $blasthits{$qseqid} = {$sseqid => $bitscore};
+	}
+    }
+}
+
+##
+## Now it will scan all the entries to get the best reciprocal match
+
+print STDERR "\n2- Processing the best reciprocal matches\n";
+
+open my $outfh, '>', $blastout;
+my $c = 0;
+
+foreach my $qseq_id (sort keys %blasthits) {
+
+    my %hits = %{$blasthits{$qseq_id}};
+    my @sortedhits = sort {$hits{$a} <=> $hits{$b}} keys %hits;
+    
+    if (exists $blasthits{$sortedhits[0]}) {
+	my %rechits = %{$blasthits{$sortedhits[0]}};
+	my @recsortedhits = sort {$rechits{$b} <=> $rechits{$a}} keys %rechits;
+
+	if ($qseq_id eq $recsortedhits[0]) {
+    
+	    print $outfh "$qseq_id\t$sortedhits[0]\n";
+	    $c++;
+	}
+    }
+}
+
+print STDERR "\n\t$c best reciprocal matches were found.\n\n";
+
+
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+       This script parse the Blast result file, filtering for minimum identity 
+       (-i), minimum alignment length (-l), maximum e-value (-e) and minimum 
+       score (-s).
+
+       After the filtering it will match the best blast (max. score) and 
+       printing it if they match.
+    
+    Usage:
+   
+       BestReciprocalBlast -r <blast_result> -o <out_filename> 
+                           [-i <min_identity>] [-l <min_alignment_length>] 
+                           [-e <max_evalue>] [-s <min_score>] [-h] 
+      
+    Flags:
+
+     -r <blast_resultfile>     blast result file in m8/o6 format (mandatory)
+     -o <output_filename>      output filename (mandatory)
+     -i <min_identity>         minimum identity (e.g. 90) 
+     -l <min_alignmentlength>  minimun alignment length (e.g. 200)
+     -e <max_evalue>           maximum e-value (e.g. 1e-10)
+     -s <min_score>            minimum score (e.g. 500) 
+     -h                        print help  
+
+EOF
+exit (1);
+}
+
