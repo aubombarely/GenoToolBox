@@ -124,6 +124,7 @@ use warnings;
 use autodie;
 
 use Getopt::Std;
+use Math::BigFloat;
 
 our ($opt_s, $opt_p, $opt_o, $opt_r, $opt_g, $opt_U, $opt_V, $opt_h);
 getopts("s:p:o:r:g:UVh");
@@ -149,16 +150,20 @@ my $prfx = $opt_p ||
 
 my @prefix = split(/,/, $prfx);
 
+
+my ($r_obj, $g_obj);
 if (defined $opt_r) {
 
-    if ($opt_r !~ m/^\d+$/) {
+    $r_obj = Math::BigFloat->new($opt_r);
+    if ($r_obj->is_nan()) {
     
 	die("ARGUMENT ERROR: -r <xsas_score_ratio> is not a numeric value.\n");
     }
 } 
 if (defined $opt_g) {
 
-    if ($opt_g !~ m/^-?\d+$/) {
+    $g_obj = Math::BigFloat->new($opt_g);
+    if ($g_obj->is_nan()) {
     
 	die("ARGUMENT ERROR: -g <xsas_score_sum> is not a numeric value.\n");
     }
@@ -229,7 +234,7 @@ while (<$samio>) {
 			$selection = 1;
 		    }
 		}
-		elsif (defined $opt_r && $opt_r =~ m/^\d+$/) {
+		elsif (defined $opt_r) {
 		
 		    my $as = $f[11];
 		    $as =~ s/AS:i://;
@@ -248,22 +253,22 @@ while (<$samio>) {
 		
 			$selection = 1;
 		    }
-		    elsif ($xs * $as > 0 && $xs/$as >= $opt_r) {
+		    elsif ($xs * $as > 0 && $r_obj->bcmp($xs/$as) >= 1) {
 		    
 			$selection = 1;
 		    }
-		    elsif ($xs * $as < 0 && -($xs/$as) >= $opt_r) {
+		    elsif ($xs * $as < 0 && $r_obj->bcmp(-($xs/$as)) >= 1) {
 			$selection = 1;
 		    }
 		}
-		elsif (defined $opt_g && $opt_g =~ m/^\d+$/) {
+		elsif (defined $opt_g) {
 		
 		    my $as = $f[11];
 		    $as =~ s/AS:i://;
 		    my $xs = $f[12];
 		    $xs =~ s/XS:i://;
 
-		    if ($as + $xs >= $opt_g) {
+		    if ($g_obj->bcmp($as + $xs) >= 1) {
 		    
 			$selection = 1;
 		    }
