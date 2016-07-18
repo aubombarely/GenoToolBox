@@ -1,0 +1,519 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GetSharedCoverage
+ Tool get the shared coverage between different samples
+
+=cut
+
+=head1 SYPNOSIS
+
+ GetSharedCoverage [-h] -l <bam_file_list> -g <genome_length_file> 
+                        [-c <min_coverage>] [-o <outbase>] [-t <threads>]
+                       
+=head1 EXAMPLE
+
+ GetSharedCoverage -l test_bamfiles.txt -g v038.genome.sizes.txt -t 6 -c 5 
+
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -l
+
+B<bamfile_list>           bamfile list file (one file per row) (mandatory)
+
+=item -g
+
+B<genome_lengths>         file with two columns, SeqID Length (mandatory)
+
+=item -c
+
+B<min_coverage>           minimum coverage (default 5)
+
+=item -o
+
+B<outbase>                output base name (default sharedcov)
+
+=item -t
+
+B<num_threads>            number of threads to run bedtools (default 1)
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script run several bedtools to calculate the shared regions between 
+ several bam files with certain coverage (-c). It follow several steps:
+
+ 1- Run bedtools genomecov per file.
+ 2- Convert genomecov output to a bed file
+ 3- Run bedtool insersect for each of the files
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aurebg@vt.edu).
+
+=cut
+
+=head1 METHODS
+
+ GetSharedCoverage
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use List::Util 'shuffle';
+
+use Config;
+use threads;
+
+our ($opt_l, $opt_g, $opt_c, $opt_o, $opt_t, $opt_h);
+getopts("l:g:c:o:t:h");
+if (!$opt_l && !$opt_g && !$opt_c && !$opt_o && !$opt_t && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GetSharedCoverage Starts ($date)  ##\n";
+print STDERR "############################################################\n\n";
+
+print_header("0) Checking arguments");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+$Config{useithreads} or 
+    die('THREAD ERROR: Recompile Perl with threads to run this program.');
+
+## Get the arguments and check them
+
+my $bamlist = $opt_l || 
+    die("INPUT ARG. ERROR: -l <bamfile_list> argument was not supplied.\n");
+
+print STDERR "\tBam files list file: $bamlist\n";
+
+my $gsize = $opt_g ||
+    die("INPUT ARG. ERROR: -g <genomesize> argument was not supplied.\n");
+
+print STDERR "\tGenome size file: $gsize\n";
+
+my $cov = 1;
+if ($opt_c) {
+
+    if ($opt_c !~ m/^\d+$/) {
+    
+	die("INPUT ARG. ERROR: -c <min_coverage> is not a numeric value.\n"); 
+    } 
+
+    $cov = $opt_c;
+} 
+
+print STDERR "\tMin. coverage: $cov\n";
+
+my $outbase = $opt_o || 'sharedcov';
+print STDERR "\tOutbase name: $outbase\n";
+
+my $threads = 1; 
+if ($opt_t) {
+
+    if ($opt_t !~ m/^\d+$/) {
+    
+	die("INPUT ARG. ERROR: -t <num_threads> is not a numeric value.\n"); 
+    } 
+
+    $threads = $opt_t;
+}
+print STDERR "\tScript threads: $threads\n";
+ 
+    
+###############################################################################
+## RUNNING GENOMECOVERAGE
+###############################################################################
+
+print_header("1) Parsing bamfile input file file");
+
+my @bamfiles = (); 
+open my $bl_fh, '<', $bamlist;
+while(<$bl_fh>) {
+
+    chomp($_); 
+    push @bamfiles, $_;
+}
+ 
+my $nbams = scalar(@bamfiles); 
+print STDERR "\t$nbams files have been added to the processing list.\n"; 
+
+print_header("2) Running bedtools genomecov");
+
+## First package the files based in the number of threads
+
+my @packages = ();
+my @outnames_r1 = ();
+my @outnames_r2 = ();
+ 
+my ($f, $p) = (1, 0);
+
+
+foreach my $bam (@bamfiles) {
+
+    my $out1 = $bam;
+    $out1 =~ s/.bam//;
+    my $outname1 = $outbase . "_" . $out1 . ".cov.txt";
+    
+    my $out2 = $bam;
+    $out2 =~ s/.bam//;
+    my $outname2 = $outbase . "_" . $out2 . ".cov.bed";
+
+    if ($f < $threads) {
+    
+	if ($f == 1) {
+	
+	    push @packages, [$bam];
+	    push @outnames_r1, [$outname1];
+	    push @outnames_r2, [$outname2];
+	}
+	else {
+	
+	    push @{$packages[$p]}, $bam;
+	    push @{$outnames_r1[$p]}, $outname1;
+	    push @{$outnames_r2[$p]}, $outname2;
+	}
+    }
+    else {
+    
+	push @{$packages[$p]}, $bam;
+	push @{$outnames_r1[$p]}, $outname1;
+	push @{$outnames_r2[$p]}, $outname2;
+	$f = 0;
+	$p++;
+    }
+    $f++;
+}
+
+my $n_packages = scalar(@packages); 
+print STDERR "\n\tJobs have been divided into $n_packages packages.\n";
+
+my $j_exec1 = 0;
+my $s1 = 0;
+
+foreach my $pack (@packages) {
+
+    $s1++;
+    my @exjobs = @{$pack};
+    my @th_procs = ();
+
+    print STDERR "\n\tRunning package $s1 ($threads threads)\n";
+
+    my $ss1 = 0;
+    foreach my $bam (@{$pack})  {
+	my @jobfiles = ($bam, $gsize, $outnames_r1[$s1 - 1]->[$ss1], $cov); 
+        my $th_proc = threads->create(\&run_batchgenomecov, @jobfiles);
+        push @th_procs, $th_proc;
+	$ss1++;
+    }
+
+    foreach my $th (@th_procs) {
+        my $th_id = $th->tid();
+        my $th_res = $th->join();
+
+        unless (defined($th_res)) {
+            warning("\tExecution error for thread $th_id\n");
+            my $error = $th->error();
+            print "\n===== ERROR $th_id =====\n$error\n===================\n";
+        }
+        $j_exec1++;
+    }
+}
+
+print STDERR "\n\t$j_exec1 jobs have been executed in $s1 packages.\n";
+
+print_header("3) Transforming bedtools genomecov to bed format");
+
+my $j_exec2 = 0;
+my $s2 = 0;
+
+my @outfiles2 = ();
+
+foreach my $pack (@outnames_r1) {
+
+    $s2++;
+    my @exjobs = @{$pack};
+    my @th_procs = ();
+
+    print STDERR "\n\tRunning package $s2 ($threads threads)\n";
+
+    my $ss2 = 0;
+    foreach my $gcov (@{$pack})  {
+
+	my $outfile2 = $outnames_r2[$s2 - 1]->[$ss2];
+	push @outfiles2, $outfile2;
+
+	my @jobfiles = ($gcov, $outfile2);
+        my $th_proc = threads->create(\&run_batchgenomecov2bed, @jobfiles);
+        push @th_procs, $th_proc;
+	$ss2++;
+    }
+
+    foreach my $th (@th_procs) {
+        my $th_id = $th->tid();
+        my $th_res = $th->join();
+
+        unless (defined($th_res)) {
+            warning("\tExecution error for thread $th_id\n");
+            my $error = $th->error();
+            print "\n===== ERROR $th_id =====\n$error\n===================\n";
+        }
+        $j_exec2++;
+    }
+}
+
+print STDERR "\n\t$j_exec2 jobs have been executed in $s2 packages.\n";
+
+## At this point it will run iteractively the command bedtool intersect
+
+print_header("4) Running bedtools intersect");
+
+my $first = shift(@outfiles2); 
+my $i = 0;
+
+foreach my $second (@outfiles2) {
+
+    $i++;
+    my $i_out = $outbase . "_bedtools_intersect_" . $i . ".bed.txt";
+    my $cmd3 = "bedtools intersect -a $first -b $second > $i_out";
+    system($cmd3);
+    $first = $i_out;
+}
+
+print STDERR "\nFinal Bedtools Intersect file: $first\n";
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## Hapmap2Mapmaker Ends ($date)   ##\n";
+print STDERR "############################################################\n\n";
+exit;
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+        This script run several bedtools to calculate the shared regions between 
+      several bam files with certain coverage (-c). It follow several steps:
+
+       1- Run bedtools genomecov per file.
+       2- Convert genomecov output to a bed file
+       3- Run bedtool insersect for each of the files       
+
+    Usage:
+
+      GetSharedCoverage [-h] -l <bam_file_list> -g <genome_length_file> 
+                            [-c <min_coverage>] [-o <outbase>] [-t <threads>]
+
+    Example:
+   
+      GetSharedCoverage -l test_bamfiles.txt -g v038.genome.sizes.txt -t 6 -c 5
+ 
+    Flags:
+      -l <bamfile_list>         bamfile list file (one file per row) (mandatory)
+      -g <seq_lengths>          file with two columns, SeqID Length (mandatory)
+      -c <min_coverage>         minimum coverage (default 5)
+      -o <outbase>              output base name (default sharedcov)
+      -t <num_threads>          number of threads to run bedtools (default 1)
+      -h <help>                 print the help
+
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+=head2 run_batchgenomecov
+
+  Usage: run_batchgenomecov($bamfile, $genomesize, $outname);
+  
+  Desc: run bedtools genomecov
+  
+  Ret: nothing
+  
+  Args: $bamfile, bamfile name
+        $genomesize, genome size file
+        $outname, outfile name
+  
+  Side_Effects: die of something is wrong
+  
+  Example: run_batchgenomecov($bamfile, $genomesize, $outname)
+
+=cut
+
+sub run_batchgenomecov {
+    
+    my $bamfile = shift ||
+        die("ERROR: No bam file was supplied to run_batchgenomecov.\n");
+    my $seqsizes = shift ||
+        die("ERROR: No seq sizes file was supplied to run_batchgenomecov.\n");
+    my $outname = shift ||
+	die("ERROR: No out name was supplied to run_batchgenomecov.\n"); 
+    my $cov = shift ||
+	die("ERROR: No coverage was supplied to run_batchgenomecov.\n"); 
+    
+
+    my $cmd1 = "bedtools genomecov -d -ibam $bamfile -g $seqsizes | ";
+    $cmd1 .= "awk '{ if (\$3 >= $cov) print \$0}' > $outname";
+
+    #print STDERR "\tRunning: $cmd1\n";
+    system($cmd1);
+ 
+    return 1;
+}
+
+=head2 run_batchgenomecov
+
+  Usage: run_batchgenomecov($bamfile, $genomesize, $outname);
+  
+  Desc: run bedtools genomecov
+  
+  Ret: nothing
+  
+  Args: $gcovfile, genome coverage filename
+        $outname, outfile name
+  
+  Side_Effects: die of something is wrong
+  
+  Example: run_batchgenomecov($gcovfile, $outname)
+
+=cut
+
+sub run_batchgenomecov2bed {
+    
+    my $gcovfile = shift ||
+        die("ERROR: No gcovfile file was supplied to run_batchgenomecov2bed.\n");
+    my $outname = shift ||
+	die("ERROR: No out name was supplied to run_batchgenomecov2bed\n"); 
+    
+    open my $gcov_fh, '<', $gcovfile;
+
+    my ($ppos, $seqreg) = (0, 0);
+    my $psid = '';
+    my %bed = ();
+
+    while(<$gcov_fh>) {
+    
+	chomp($_);
+	my ($seqid, $pos, $cov) = split(/\t/, $_);
+	if ($seqid ne $psid) {
+	
+	    # new sequence, define start
+	    $bed{$seqid} = [{start => $pos, size => 1}];
+	    
+	    # reset the sequence region counter
+	    $seqreg = 0;
+	}
+	else {
+	
+	    if ($pos == $ppos + 1) {
+	    
+		## Add one to the size
+		$bed{$seqid}->[$seqreg]->{size}++;
+	    }
+	    else {
+	    
+		## it means a new region
+		push @{$bed{$seqid}}, {start => $pos, size => 1};
+		$seqreg++;
+	    }	
+	}
+
+	$ppos = $pos;
+	$psid = $seqid;
+    }
+
+    ## Now it will print the output
+    open my $bedcov_fh, '>', $outname;
+    
+    foreach my $sid (sort keys %bed) {
+    
+	foreach my $region_href (@{$bed{$sid}}) {
+	
+	    my $start = $region_href->{start};
+	    my $end = $start + $region_href->{size};
+	    print $bedcov_fh "$sid\t$start\t$end\n"
+	}
+    }
+ 
+    return 1;
+}
+
+
+
+
