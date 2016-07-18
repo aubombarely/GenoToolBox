@@ -305,8 +305,17 @@ foreach my $second (@outfiles2) {
 
     $i++;
     my $i_out = $outbase . "_bedtools_intersect_" . $i . ".bed.txt";
-    my $cmd3 = "bedtools intersect -a $first -b $second > $i_out";
-    system($cmd3);
+
+    if (-s $i_out > 0) {
+
+	my $cmd3 = "bedtools intersect -a $first -b $second > $i_out";
+	system($cmd3);
+    }
+    else {
+    
+	print STDERR "\nWARNING: No intersection was detected for $first and ";
+	print STDERR "$second\n";
+    }
     $first = $i_out;
 }
 
