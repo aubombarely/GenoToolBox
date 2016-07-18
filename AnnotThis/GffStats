@@ -1,0 +1,382 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GffStats
+ Script to produce feature stats for a GFF file
+
+=cut
+
+=head1 SYPNOSIS
+
+ GffStats [-h] -g <gff3> -o <outbase_name> [-f <feature>][-D]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -g
+
+B<gff3>                         GFF3 file (mandatory)
+
+=item -o
+
+B<output>                       Output basename (mandatory)
+
+=item -f
+
+B<feature>                      Analyze only this feature (default 'mRNA')
+
+=item -D
+
+B<print_distributions>          Print distributions
+
+=item -h
+
+B<help>                         Print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script analyzes the features for a GFF3 file producing the 
+ following output:
+
+ * Number of elements (e.g. gene 34210)
+ * Average elements per SeqID (e.g. 35)
+ * Number of SeqIDs without the element (e.g. 1029)
+ * Average size of the elements (e.g. 12431 bp)
+ * Average distance between elements (e.g. 129321 bp) 
+ * Total sum size of all the elements (e.g. 42631231 bp)
+
+ Additionally when -D it is used it will print files with the distribution
+ of these elements.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely
+  (aurebg@vt.edu).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use List::Util qw(sum max min);
+use Math::BigFloat;
+
+our ($opt_g, $opt_o, $opt_f, $opt_D, $opt_h);
+getopts("g:o:f:Dh");
+
+if (!$opt_g && !$opt_o && !$opt_f && !$opt_D && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+my $gff3_file = $opt_g ||
+    die("\nERROR: -g <gff3> was not supplied to the script.\n\n");
+
+my $outbase = $opt_o ||
+    die("\nERROR: -o <outbasename> was not supplied to the script.\n\n");
+
+
+my $selected_feat = $opt_f;
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GffStats Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+print_header("1) Parsing GFF file.");
+
+open my $gff, '<', $gff3_file;
+my %gff = ();
+my %seqid_c = ();
+my %seqid_l = (); 
+my $clines = 0;
+my $sort_error = 0;
+
+while(<$gff>) {
+
+    chomp($_);
+    $clines++;	
+
+    ## Ignore the comments	
+    if ($_ !~ /#/) {
+
+	## Slice the line in each of the data types
+
+	my ($sid, $src, $ft_type, $st, $en, $score, $str, $frm, $attline) = 
+	    split(/\t/, $_); 
+	my $ft_size = $en - $st;
+
+	my $selected = 0;
+	if ($selected_feat) {
+
+	    if ($selected_feat eq $ft_type) {
+
+		$selected = 1;
+	    }
+	}
+	else {
+	
+	    $selected = 1;
+	}
+
+	## Features can be repeated across different types of annotations
+	## it will analyze both
+
+	my $ft = $src . "-" . $ft_type;
+
+	## Parsing the GFF file, it will store distance between features per 
+	## SeqIDs and size of the features. Distance between features can be 
+	## used later on to calculate how many features are per SeqID 
+	## (num_dis + 1)
+
+	## 1- Store the distance between features
+
+	if ($selected == 1) {
+	    if (exists $seqid_l{$sid}) {
+	
+		if (exists $seqid_l{$sid}->{$ft}) {
+		
+		    my $ft_dis = $st - $seqid_l{$sid}->{$ft};
+		    push @{$seqid_c{$sid}->{$ft}}, $ft_dis;
+		    $seqid_l{$sid}->{$ft} = $en;
+		    
+		    if ($ft_dis < 0) {
+			
+			$sort_error++;
+		    } 			
+		}
+		else {
+		
+		    $seqid_l{$sid}->{$ft} = $en;
+		    $seqid_c{$sid}->{$ft} = [];
+		}	
+	    }
+	    else {
+		
+		$seqid_l{$sid} = {$ft => $en};
+		$seqid_c{$sid} = {$ft => []};
+	    }
+
+	    ## 2- Store the size of the feature in the %gff
+
+	    if (exists $gff{$ft}) {
+		
+		push @{$gff{$ft}}, $ft_size;
+	    }
+	    else {
+		
+		$gff{$ft} = [$ft_size];
+	    }
+	}
+    } 
+}
+
+if ($sort_error > 1) {
+
+    print STDERR "\n\tWARNING: There are $sort_error unsorted lines.\n";
+} 
+
+print STDERR "\n\t$clines lines have been processed from the GFF file\n";
+
+print_header("2) Processing the data");
+
+## First create the hash for the stats
+
+my %gffstats = ();
+my @header = ('FEAT', "TotalSize[bp]", "MaxSize[bp]", "MinSize[bp]", 
+        "AverageSize[bp]", "TotalDist[bp]", "MaxDist[bp]", "MinDist[bp]", 
+        "AverageDist[bp]", "TotalFeats", "MaxFeats/Seq", "MinFeats/Seq", 
+        "AverageFeats/Seq"
+	);
+  
+my $headline = join("\t", @header); 
+
+## Create the output files
+my $outstats = $outbase . "_stats.txt";
+open my $st_fh, '>', $outstats;
+
+print $st_fh "$headline\n"; 
+
+my %ft_stats = (); 
+
+foreach my $ft (sort keys %gff) {
+
+	my @data = ($ft); 
+	    
+	my @sizes = @{$gff{$ft}}; 
+	my $maxsize = max(@sizes);
+	my $minsize = min(@sizes);
+	my $totalsize = sum(@sizes);  
+	my $avesize = $totalsize/scalar(@sizes);
+	my $avgs_obj = Math::BigFloat->new($avesize)->bfround(1);
+	$avesize = $avgs_obj->bstr(1);
+
+	if ($opt_D) {
+	
+	    my $distfile = $outbase . "SizeDistrib4" . $ft . ".txt";
+	    open my $d_fh, '>', $distfile;
+	    foreach my $sz (@sizes) {
+	    
+		print $d_fh "$sz\n";
+	    }
+	    close $d_fh;
+	}
+
+	push @data, ($totalsize, $maxsize, $minsize, $avesize); 
+
+	my @distances = ();
+	my @ft_per_ids = (); 
+	foreach my $seqid (sort keys %seqid_c) {
+
+	    if (exists $seqid_c{$seqid}->{$ft}) {
+		my @dist_by_seqid = @{$seqid_c{$seqid}->{$ft}};
+		push @ft_per_ids, scalar(@dist_by_seqid) + 1; 
+		push @distances, @dist_by_seqid;
+	    }
+	}	 
+
+	my ($maxdist, $mindist, $totaldist, $avedist) = ('NA','NA','NA','NA');
+	
+	if (scalar(@distances) > 0) {
+	
+	    $maxdist = max(@distances);
+	    $mindist = min(@distances);
+	    $totaldist = sum(@distances);
+	    $avedist = $totaldist/scalar(@distances);
+	    my $avg_obj = Math::BigFloat->new($avedist)->bfround(1);
+	    $avedist = $avg_obj->bstr(1);
+	}
+	 
+	push @data, ($totaldist, $maxdist, $mindist, $avedist);
+	
+	my ($maxftseq,$minftseq,$totalftseq,$aveftseq) = ('NA','NA','NA','NA'); 
+
+	if (scalar(@ft_per_ids) > 0) {
+    
+	    $maxftseq = max(@ft_per_ids);
+	    $minftseq = min(@ft_per_ids);
+	    $totalftseq = sum(@ft_per_ids);
+	    $aveftseq = $totalftseq/scalar(@ft_per_ids);
+	    my $avg_obj = Math::BigFloat->new($aveftseq)->bfround(1);
+	    $aveftseq = $avg_obj->bstr(1);
+	}
+
+	if ($opt_D) {
+	
+	    my $itemsfile = $outbase . "FtPerSeqDistrib4" . $ft . ".txt";
+	    open my $i_fh, '>', $itemsfile;
+	    foreach my $item (@ft_per_ids) {
+	    
+		print $i_fh "$item\n";
+	    }
+	    close $i_fh;
+	}
+
+	$ft_stats{$ft} = $totalftseq;
+
+	push @data, ($totalftseq, $maxftseq, $minftseq, $aveftseq);
+	my $dataline = join("\t", @data); 
+
+	print $st_fh "$dataline\n"; 
+}
+
+print STDERR "\n\tFeatures processed:\n";
+foreach my $pft (sort keys %ft_stats) {
+
+    print STDERR "\t\t$pft\t$ft_stats{$pft}\n";
+}
+    
+print STDERR "\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+   
+    Description:
+
+       This script analyzes the features for a GFF3 file producing the 
+       following output:
+
+         * Number of elements (e.g. gene 34210)
+         * Average elements per SeqID (e.g. 35)
+         * Number of SeqIDs without the element (e.g. 1029)
+         * Average size of the elements (e.g. 12431 bp)
+         * Average distance between elements (e.g. 129321 bp) 
+         * Total sum size of all the elements (e.g. 42631231 bp)
+
+       Additionally when -D it is used it will print files with the distribution
+       of these elements.
+
+    Usage:
+      
+       GffStats [-h] -g <gff3> -o <outbasename> [-f <feature>][-D]
+      
+    Flags:
+
+      -g <gff3>                  GFF3 file (mandatory)
+      -a <outbasename>           Basename for output files (mandatory)
+      -f <feature>               Select only one type of feature (e.g. 'mRNA')
+      -D <print_distributions>   Produce an output with the distributions
+      -h <help>                  print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+####
+1; #
+####
