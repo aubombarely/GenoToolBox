@@ -11,8 +11,9 @@
 
  GenePromotorSearch -q <query.fasta> -s <subject.fasta> -t <search_type>
                     [-b <blast_line>] -g <genome.fasta> -a <genome.gff>
-                    [-p <promoter_region>] [-G]
-                    [-c <min_perc_coverage>] [-i <min_perc_identity>] 
+                    [-p <promoter_region>] [-G][-S]
+                    [-c <min_perc_qcov>] [-d <min_perc_scov>] 
+                    [-i <min_perc_identity>] 
 
 =head2 I<Flags:>
 
@@ -48,7 +49,11 @@ B<promoter_region>        region to get from the genes (default D:2000)
 
 =item -c
 
-B<min_perc_coverage>      minimum blast hit coverage percentage (default 70)
+B<min_perc_qcov>          minimum blast query hit coverage perc. (default 70)
+
+=item -d
+
+B<min_perc_scov>          minimum blast subject hit coverage perc. (default 70)
 
 =item -i
 
@@ -56,7 +61,11 @@ B<min_perc_identity>      minimum blast hit identity percentage (default 30)
 
 =item -G
 
-B<include_geneseq>        include the gene sequence (default no)
+B<use_blasthits_coords>   use the blast hits coordinates instead (default no)
+
+=item -S
+
+B<retrieve_seqhit>        retrieve the sequence based on BlastHit (default no)
 
 =item -o
 
@@ -85,9 +94,10 @@ B<help>                   print the help
 
     * Blast will be run always as -outfmt '6 std qlen slen'
 
-    * Once it gets the result. It will filter them based in two parameters:
-        a- min. percentage of coverage for the hit (-c)
-        b- min. percentage of identity for the hit (-i)
+    * Once it gets the result. It will filter them based in 3 parameters:
+        a- min. percentage of coverage for the query hit (-c)
+        b- min. percentage of coverage for the subject hit (-d)
+        c- min. percentage of identity for the hit (-i)
 
     * It will produce a list of ID to search in the GFF3
 
@@ -105,6 +115,9 @@ B<help>                   print the help
     + Gene/mRNA - starnd, B will get from [Start - XXXX] to [End + XXXX]
     
     (B will include the gene sequence by default)
+
+    If -S is used it will replace the GFF coords by the Blast Hit 
+    coordinates
 
  3- With the bed file, it will use bedtools getfasta. For the - strand it will 
     return the reverse complementary
@@ -135,11 +148,12 @@ use Math::BigFloat;
 use List::Util qw(sum max min);
 use Bio::SeqIO;
 
-our ($opt_q, $opt_s, $opt_t, $opt_b, $opt_g, $opt_a, $opt_p, $opt_c, $opt_i, 
-     $opt_o, $opt_G, $opt_h);
-getopts("q:s:t:b:g:a:p:c:i:o:Gh");
+our ($opt_q, $opt_s, $opt_t, $opt_b, $opt_g, $opt_a, $opt_p, $opt_c, $opt_d, 
+     $opt_i, $opt_o, $opt_G, $opt_S, $opt_h);
+getopts("q:s:t:b:g:a:p:c:d:i:o:GSh");
 if (!$opt_q && !$opt_s && !$opt_t && !$opt_b && !$opt_g && !$opt_a && !$opt_p
-    && !$opt_c && !$opt_i && !$opt_o && !$opt_G && !$opt_h) {
+    && !$opt_c && !$opt_d && !$opt_i && !$opt_o && !$opt_G && !$opt_S && 
+    !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -165,7 +179,7 @@ my $query = $opt_q ||
     die("\nERROR: -q <query.fasta> argument was not supplied.\n");
 
 print STDERR "\n\tQUERY_FILE=$query\n"; 
-my $nseq_query = `grep -c $query`; 
+my $nseq_query = `grep -c '>' $query`; 
 chomp($nseq_query); 
 print STDERR "\tQUERY_SEQCOUNT=$nseq_query\n";
 
@@ -173,7 +187,7 @@ my $subject = $opt_s ||
     die("\nERROR: -s <subject.fasta> argument was not supplied.\n");
 
 print STDERR "\tSUBJECT_FILE=$subject\n";
-my $nseq_subject = `grep -c $subject`; 
+my $nseq_subject = `grep -c '>' $subject`; 
 chomp($nseq_subject); 
 print STDERR "\tSUBJECT_SEQCOUNT=$nseq_subject\n";
 
@@ -238,7 +252,7 @@ my $genome_gff = $opt_a ||
 print STDERR "\tGENOME_GFF_FILE=$genome_gff\n";
 
 my %prom_args = (region => "D", size => 2000); 
-my %regions2words = (D => "Downstream", U => "Upstream");
+my %regions2words = (D => "Downstream", U => "Upstream", B => "Both_Regions");
 
 if ($opt_p) {
 
@@ -255,19 +269,34 @@ if ($opt_p) {
 print STDERR "\tPROMOTER_REGION=$regions2words{$prom_args{region}}\n"; 
 print STDERR "\tPROMOTOR_SIZE=$prom_args{size}\n";
 
-my $mincov = 70;
+my $minqcov = 70;
 if ($opt_c) {
     
     if ($opt_c !~ m/^\d+$/) {
 	
-	die("ERROR: -c <min_blasthit_seqcov> is not numeric.\n"); 
+	die("ERROR: -c <min_blasthit_qseqcov> is not numeric.\n"); 
     }
     else {
     
-	$mincov = $opt_c;
+	$minqcov = $opt_c;
     }
 }
-print STDERR "\tMIN_BLASTHIT_SEQCOV=$mincov\n";
+print STDERR "\tMIN_BLASTHIT_QUERY_SEQCOV=$minqcov\n";
+
+my $minscov = 70;
+if ($opt_d) {
+    
+    if ($opt_d !~ m/^\d+$/) {
+	
+	die("ERROR: -s <min_blasthit_sseqcov> is not numeric.\n"); 
+    }
+    else {
+    
+	$minscov = $opt_d;
+    }
+}
+print STDERR "\tMIN_BLASTHIT_SUBJECT_SEQCOV=$minscov\n";
+
 
 my $minident = 30;
 if ($opt_i) {
@@ -368,12 +397,12 @@ while(<$blast_fh>) {
 
     ## Check if it meets all the requirements
     my $select = 1;
-    if ($qcov < $mincov) {
+    if ($qcov < $minqcov) {
     
 	$select = 0;
 	$low_qcov++;
     }
-    if ($scov < $mincov) {
+    if ($scov < $minscov) {
     
 	$select = 0;
 	$low_scov++;
@@ -395,6 +424,7 @@ while(<$blast_fh>) {
 	}
 
 	$selected_ids{$sid} = { 
+	    seqid  => $sid,
 	    start  => $sstart, 
 	    end    => $send, 
 	    strand => $strand 
@@ -468,6 +498,12 @@ while(<$gff_fh>) {
 
 my $n_found = scalar(keys %selected_found); 
 print STDERR "\t$n_found ID hits found at the GFF file.\n\n";
+
+if ($opt_S) {
+
+    print STDERR "\n\t-S turn ON, replacing GFF for BlastHits coordinates.\n";
+    %selected_found = %selected_ids;
+}
 
 print_header("4) Producing the bed file");
 
@@ -677,9 +713,10 @@ sub help {
 
         * Blast will be run always as -outfmt '6 std qlen slen'
 
-        * Once it gets the result. It will filter them based in two parameters:
-            a- min. percentage of coverage for the hit (-c)
-            b- min. percentage of identity for the hit (-i)
+        * Once it gets the result. It will filter them based in 3 parameters:
+            a- min. percentage of coverage for the query hit (-c)
+            b- min. percentage of coverage for the query hit (-d)
+            c- min. percentage of identity for the hit (-i)
 
         * It will produce a list of ID to search in the GFF3
 
@@ -699,6 +736,9 @@ sub help {
 
          B will get also the sequence of the gene
 
+         If -S is used it will replace the GFF coords by the Blast Hit 
+         coordinates
+
       3- With the bed file, it will use bedtools getfasta. For the - strand it
          will return the reverse complementary
 
@@ -706,8 +746,9 @@ sub help {
     
        GenePromotorSearch -q <query.fasta> -s <subject.fasta> -t <search_type>
                     [-b <blast_line>] -g <genome.fasta> -a <genome.gff>
-                    [-p <promoter_region>] [-G]
-                    [-c <min_perc_coverage>] [-i <min_perc_identity>] 
+                    [-p <promoter_region>] [-G] [-S]
+                    [-c <min_perc_qcov>] [-d <min_perc_scov>]  
+                    [-i <min_perc_identity>] 
 
     Flags:
 
@@ -718,9 +759,11 @@ sub help {
      -g <genome.fasta>     fasta file with the genome sequences (mandatory)
      -a <genome.gff>       gff file with the genome annotations (mandatory)
      -p <promoter_region>  region to get from the genes (default D:2000)
-     -c <min_perc_cov>     minimum blast hit coverage percentage (default 70)
+     -c <min_perc_qcov>    minimum blast hit query coverage perc. (default 70)
+     -d <min_perc_scov>    minimum blast hit query coverage perc. (default 70)
      -i <min_perc_ident>   minimum blast hit identity percentage (default 30)
      -G <include_geneseq>  include the gene sequence
+     -S <use_blastcoords>  use blast hit coords instead GFF3 file (default no)
      -o <out_basename>     basename for output files (default gps_out)
      -h <help>             print the help
      
