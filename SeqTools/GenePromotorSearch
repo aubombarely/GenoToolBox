@@ -1,0 +1,720 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GenePromotorSearch
+ Pipeline to get the gene promotor
+
+=cut
+
+=head1 SYPNOSIS
+
+ GenePromotorSearch -q <query.fasta> -s <subject.fasta> -t <search_type>
+                    [-b <blast_line>] -g <genome.fasta> -a <genome.gff>
+                    [-p <promoter_region>] 
+                    [-c <min_perc_coverage>] [-i <min_perc_identity>] 
+
+=head2 I<Flags:>
+
+=over
+
+=item -q
+
+B<query.fasta>            fasta file with the query sequences (mandatory)
+
+=item -s
+
+B<subject.fasta>          fasta file with the subject sequences (mandatory)
+
+=item -t
+
+B<search_type>            type of blast search (default blastp)
+
+=item -b
+
+B<blast_line>             line to past to blast search (e.g. '-num_threads 8') 
+
+=item -g
+
+B<genome.fasta>           fasta file with the genome sequences (mandatory)
+
+=item -a
+
+B<genome.gff>             gff file with the genome annotations (mandatory)
+
+=item -p
+
+B<promoter_region>        region to get from the genes (default D:2000)
+
+=item -c
+
+B<min_perc_coverage>      minimum blast hit coverage percentage (default 70)
+
+=item -i
+
+B<min_perc_identity>      minimum blast hit identity percentage (default 30)
+
+=item -o
+
+B<out_basename>           basename for output files (default gps_out)
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script is designed to retrieve the putative promoter regions from a gene
+ (o list of genes) using a Blast sequence homology search. It uses blast and 
+ bedtools so they should be available in the path.
+
+ Steps:
+ ------
+ 1- Blast homology search from query file (-q) with a subject file (-s). 
+    
+    * Different blast tools can be used depending of the type of the query and 
+      subject sequences (e.g. protein query - protein subject => blastp).
+
+    * Blast will be run always as -outfmt '6 std qlen slen'
+
+    * Once it gets the result. It will filter them based in two parameters:
+        a- min. percentage of coverage for the hit (-c)
+        b- min. percentage of identity for the hit (-i)
+
+    * It will produce a list of ID to search in the GFF3
+
+ 2- SubjectID search in the genome annotation GFF3 file. SubjectID should be 
+    present if the GFF3 file. Once the script gets the gene/mRNA coordinates
+    it will produce a bed file with the region to get in the next step. The 
+    script will get the start/end of gene/mRNA and add/substract according the 
+    -p paramer (U/D:XXXX where XXXX is an integer)
+
+    + Gene/mRNA + strand, D will get from [Start - XXXX] to [Start]
+    + Gene/mRNA + strand, U will get from [End] to [End + XXXX]
+    + Gene/mRNA - strand, D will get from [End] to [End + XXXX]
+    + Gene/mRNA - strand, U will get from [Start - XXXX] to [Start]
+    
+ 3- With the bed file, it will use bedtools getfasta. For the - strand it will 
+    return the reverse complementary
+ 
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aurebg@vt.edu).
+
+=cut
+
+=head1 METHODS
+
+ GenePromotorSearch
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Math::BigFloat;
+use List::Util qw(sum max min);
+use Bio::SeqIO;
+
+our ($opt_q, $opt_s, $opt_t, $opt_b, $opt_g, $opt_a, $opt_p, $opt_c, $opt_i, 
+     $opt_o, $opt_h);
+getopts("q:s:t:b:g:a:p:c:i:o:h");
+if (!$opt_q && !$opt_s && !$opt_t && !$opt_b && !$opt_g && !$opt_a && !$opt_p
+    && !$opt_c && !$opt_i && !$opt_o && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GenePromotorSearch Starts ($date)  ##\n";
+print STDERR "############################################################\n\n";
+
+print_header("0) Checking arguments");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+## Get the arguments and check them
+
+my $query = $opt_q || 
+    die("\nERROR: -q <query.fasta> argument was not supplied.\n");
+
+print STDERR "\n\tQUERY_FILE=$query\n"; 
+my $nseq_query = `grep -c $query`; 
+chomp($nseq_query); 
+print STDERR "\tQUERY_SEQCOUNT=$nseq_query\n";
+
+my $subject = $opt_s ||
+    die("\nERROR: -s <subject.fasta> argument was not supplied.\n");
+
+print STDERR "\tSUBJECT_FILE=$subject\n";
+my $nseq_subject = `grep -c $subject`; 
+chomp($nseq_subject); 
+print STDERR "\tSUBJECT_SEQCOUNT=$nseq_subject\n";
+
+my %allowed_types = (
+    blastn  => 'query_nt-subject_nt',
+    blastp  => 'query_pep-subject_pep',
+    blastx  => 'query_translated_nt-subject_pep',
+    tblastn => 'query_pep-subject_translated_nt',
+    tblastx => 'query_trasnlated_nt-subject_translated_nt'
+    ); 
+
+my $blast_exe = 'blastp';
+if ($opt_t) {
+
+    unless (exists $allowed_types{$opt_t}) {
+
+	my $atypes = join(",", sort keys %allowed_types); 
+	die("\nERROR: -t $opt_t is not an allowed type ($atypes).\n"); 
+    }
+    else {
+
+	$blast_exe = $opt_t;
+    }
+}
+
+print STDERR "\tBLAST_TYPE=$blast_exe\n";
+
+my $blast_args = "-outfmt '6 std qlen slen'";
+if ($opt_b) {
+
+    if ($opt_b =~ m/-outfmt/) {
+    
+	die("ERROR:-b '-outfmt' blast argument is reserved for the script.\n");
+    }
+    elsif ($opt_b =~ m/-query/) {
+
+	die("ERROR:-b '-query' blast argument is reserved for the script.\n");
+    }
+    elsif ($opt_b =~ m/-subject/) {
+
+	die("ERROR:-b '-subject' blast argument is reserved for the script.\n");
+    }
+    elsif ($opt_b =~ m/-out/) {
+
+	die("ERROR:-b '-out' blast argument is reserved for the script.\n");
+    }
+    else {
+    
+	$blast_args .= " " . $opt_b;
+    }
+}
+print STDERR "\tBLAST_ARGS=$blast_args\n";
+
+my $genome_fas = $opt_g ||
+    die("\nERROR: -g <genome.fasta> argument was not supplied.\n");
+
+print STDERR "\tGENOME_FASTA_FILE=$genome_fas\n";
+
+my $genome_gff = $opt_a ||
+    die("\nERROR: -a <genome.gff> argument was not supplied.\n");
+
+print STDERR "\tGENOME_GFF_FILE=$genome_gff\n";
+
+my %prom_args = (region => "D", size => 2000); 
+my %regions2words = (D => "Downstream", U => "Upstream");
+
+if ($opt_p) {
+
+    if ($opt_p =~ m/(^[D|U]):(\d+)$/) {
+    
+	$prom_args{region} = $1;
+	$prom_args{size} = $2;
+    }
+    else {
+	die("ERROR: -p <promotor_region> doesnt have the format D|U:Number.\n");
+    }
+} 
+
+print STDERR "\tPROMOTER_REGION=$regions2words{$prom_args{region}}\n"; 
+print STDERR "\tPROMOTOR_SIZE=$prom_args{size}\n";
+
+my $mincov = 70;
+if ($opt_c) {
+    
+    if ($opt_c !~ m/^\d+$/) {
+	
+	die("ERROR: -c <min_blasthit_seqcov> is not numeric.\n"); 
+    }
+    else {
+    
+	$mincov = $opt_c;
+    }
+}
+print STDERR "\tMIN_BLASTHIT_SEQCOV=$mincov\n";
+
+my $minident = 30;
+if ($opt_i) {
+    
+    if ($opt_i !~ m/^\d+$/) {
+	
+	die("ERROR: -i <min_blasthit_identity> is not numeric.\n"); 
+    }
+    else {
+    
+	$minident = $opt_i;
+    }
+}
+print STDERR "\tMIN_BLASTHIT_IDENTITY=$minident\n\n";
+
+my $outb = 'gps_out';
+if ($opt_o) {
+
+    $outb = $opt_o;
+}
+print STDERR "\tOUTPUT_BASENAME=$outb\n\n";
+
+## Check that the blast_executable and the bedtools executable are available
+
+my $check_blast_exe = `whereis $blast_exe`;
+if ($check_blast_exe =~ m/$blast_exe:\s+\/.+/) {
+
+    print STDERR "\tEXECUTABLE for $blast_exe=OK\n";
+}
+else {
+
+    die("ERROR: $blast_exe executable is not available in the PATH.\n")
+}
+
+my $check_bedtools_exe = `whereis bedtools`;
+if ($check_bedtools_exe =~ m/bedtools:\s+\/.+/) {
+
+    print STDERR "\tEXECUTABLE for bedtools=OK\n\n";
+}
+else {
+
+    die("ERROR: bedtools executable is not available in the PATH.\n")
+} 
+
+##############################################################################
+## Step 1: Run Blast
+##############################################################################
+
+print_header("1) Running $blast_exe");
+
+## First, create the blast command
+
+my $outblast = $outb . "_$blast_exe.o6.txt";
+my $blast_cmd = "$blast_exe -query $query -subject $subject -out $outblast";
+$blast_cmd .= " $blast_args";
+print STDERR "\n\tRunning $blast_cmd\n\n";
+system($blast_cmd);
+
+print_header("2) Parsing Blast output $outblast");
+
+my %selected_ids = ();
+my %uniq_sids = ();
+my $n_hits = 0;
+my ($low_qcov, $low_scov, $low_ident) = (0, 0, 0);
+my @qcovs = ();
+my @scovs = (); 
+my @ident = (); 
+
+## It also will store the ID equivalences to latter on replace them back
+my %id_equiv = ();
+
+open my $blast_fh, '<', $outblast;
+while(<$blast_fh>) {
+
+    chomp($_);
+    $n_hits++;
+    my ($qid, $sid, $pident, $length, $mismatch, $gapopen, $qstart, $qend, 
+	$sstart, $send, $evalue, $bitscore, $qlen, $slen) = split(/\t/, $_);  
+
+    if (exists $uniq_sids{$sid}) {
+    
+	$uniq_sids{$sid}++;
+    }
+    else {
+	
+	$uniq_sids{$sid} = 1;
+    }
+    
+    my $p_qcov = $length * 100 / $qlen;
+    my $p_scov = $length * 100 / $slen;
+    my $qcov = Math::BigFloat->new($p_qcov)->bfround(1);
+    my $scov = Math::BigFloat->new($p_scov)->bfround(1);
+   
+    ## Add coverages and identity to the arrays to calculate some stats
+    push @qcovs, $qcov;
+    push @scovs, $scov;
+    push @ident, $pident;
+
+    ## Check if it meets all the requirements
+    my $select = 1;
+    if ($qcov < $mincov) {
+    
+	$select = 0;
+	$low_qcov++;
+    }
+    if ($scov < $mincov) {
+    
+	$select = 0;
+	$low_scov++;
+    }
+    if ($pident < $minident) {
+    
+	$select = 0;
+	$low_ident++;
+    }
+
+    if ($select == 1) {
+    
+	my ($strand, $pst, $pen) = ("+", $sstart, $send);
+	if ($send <= $sstart) {
+	    
+	    $strand = "-";
+	    $pst = $send;
+	    $pen = $sstart;
+	}
+
+	$selected_ids{$sid} = { 
+	    start  => $sstart, 
+	    end    => $send, 
+	    strand => $strand 
+	};
+
+	$id_equiv{$sid} = $qid;
+    }
+}
+
+## Calculate some stats from the blast file
+
+my $n_selected = scalar(keys %selected_ids);
+my $n_uniqids = scalar(keys %uniq_sids); 
+my $pav_qcov = sum(@qcovs)/scalar(@qcovs);
+my $av_qcov = Math::BigFloat->new($pav_qcov)->bfround(1);
+my $pav_scov = sum(@scovs)/scalar(@scovs);
+my $av_scov = Math::BigFloat->new($pav_scov)->bfround(1);
+my $pav_ident = sum(@ident)/scalar(@ident);
+my $av_ident = Math::BigFloat->new($pav_ident)->bfround(1);
+my $pass_qcov = $n_hits - $low_qcov;
+my $pass_scov = $n_hits - $low_scov;
+my $pass_ident = $n_hits - $low_ident;
+
+print STDERR "\tNUM_HITS\t\t$n_hits\n";
+print STDERR "\tNUM_UNIQ_HITS\t\t$n_uniqids\n";
+print STDERR "\tQUERY_COV_AVERAGE\t$av_qcov [$pass_qcov pass]\n";
+print STDERR "\tSUBJECT_COV_AVERAGE\t$av_scov [$pass_scov pass]\n";
+print STDERR "\t\%IDENTITY_AVERAGE\t$av_ident [$pass_ident pass]\n";
+print STDERR "\tSELECTED_SUBJECT_IDS\t$n_selected\n\n";
+
+
+###############################################################################
+## Get the GFF data
+###############################################################################
+
+print_header("3) Searching the coords in the GFF file");
+
+my %selected_found = (); 
+open my $gff_fh, '<', $genome_gff;
+while(<$gff_fh>) {
+
+    chomp($_); 
+    unless ($_ =~ m/#/) {
+    
+	my ($seqid, $src, $type, $st, $en, $score, $strand, $phase, $attline) =
+	    split(/\t/, $_);
+
+	my %attr = ();
+	foreach my $item (split(/;/, $attline)) {
+	
+	    if ($item =~ m/^(.+)=(.+)$/) {
+	    
+		$attr{$1} = $2;
+	    }
+	}
+
+	if (exists $attr{ID}) {
+
+	    if (exists $selected_ids{$attr{ID}}) {
+	
+		$selected_found{$attr{ID}} = { 
+		    seqid  => $seqid,
+		    start  => $st, 
+		    end    => $en, 
+		    strand => $strand
+		};
+	    }    
+	}
+    }
+}
+
+my $n_found = scalar(keys %selected_found); 
+print STDERR "\t$n_found ID hits found at the GFF file.\n\n";
+
+print_header("4) Producing the bed file");
+
+print STDERR "\tGetting the sequence lengths.\n";
+
+my %seqlength = ();
+my $seqio = Bio::SeqIO->new( -file => $genome_fas, -format => 'fasta');
+while( my $seqobj = $seqio->next_seq() ) {
+
+    my $seqid = $seqobj->id();
+    $seqlength{$seqid} = $seqobj->length();
+}
+
+my $nseq = scalar( keys %seqlength ); 
+print STDERR "\t\t$nseq sequences have been processed\n";
+
+print STDERR "\n\tProducing the Bed file\n";
+my $outbed = $outb . "_selectedregions.bed";
+open my $bed_fh, '>', $outbed;
+my $blines = 0;
+
+my %sid_equiv = ();
+
+foreach my $sid (sort keys %selected_found) {
+
+    my $seqid = $selected_found{$sid}->{seqid};
+    my $strand = $selected_found{$sid}->{strand};
+    my ($start, $end);
+
+    if ($strand eq "+") {
+    
+	if ($prom_args{region} eq "D") {
+		
+	    $start = $selected_found{$sid}->{start} - $prom_args{size} - 1;
+	    $end = $selected_found{$sid}->{start} - 1;	    
+	}
+	else {
+	
+	    $start = $selected_found{$sid}->{end} + 1;
+	    $end = $selected_found{$sid}->{end} + 1 + $prom_args{size};
+	}
+    }
+    else {
+
+	if ($prom_args{region} eq "U") {
+		
+	    $start = $selected_found{$sid}->{start} - $prom_args{size} - 1;
+	    $end = $selected_found{$sid}->{start} - 1;	    
+	}
+	else {
+	
+	    $start = $selected_found{$sid}->{end} + 1;
+	    $end = $selected_found{$sid}->{end} + 1 + $prom_args{size};
+	}
+    }
+
+    ## Now it will correct the coordinates just un case that end > length
+
+    if (exists $seqlength{$seqid}) {
+ 
+	if ($start <= 0) {
+	    
+	    $start = 1;
+	}
+	if ($end >= $seqlength{$seqid}) {
+	
+	    $end = $seqlength{$seqid};
+	}
+
+	## Check that the size is still > 10 bp
+
+	my $regsize = $end - $start;
+	my $alt_id = $seqid . ":" . $start . "-" . $end . "()";
+
+	if ($regsize >= 10) {
+	
+	    $blines++;
+	    print $bed_fh "$seqid\t$start\t$end\t$strand\n";
+
+	    ## Add the predicted ID for the bed file
+	    
+	    $sid_equiv{$alt_id} = $sid;
+	}
+	else {
+	
+	    print STDERR "\tWARNING: Region promotor ($alt_id) < 10 bp.";
+	    print STDERR "Skipping.\n";
+	}
+    }
+    else {
+    
+	print STDERR "\tWARNING: $seqid is not present in $genome_fas\n";
+    }
+}
+
+print STDERR "\t\t$blines have been written into the Bed file\n\n";
+
+###############################################################################
+## Run bedtools
+###############################################################################
+
+print_header("5) Running bedtools ");
+
+## prepare the command
+
+my $outfa = $outb . "_selectedregions.fa";
+my $bedts_cmd = "bedtools getfasta -s -fi $genome_fas -bed $outbed -fo $outfa";
+print STDERR "\tRunning $bedts_cmd\n";
+system($bedts_cmd);
+
+## Finally it will add the old IDs as descriptors
+
+my $tag = $opt_p;
+$tag =~ s/://;
+my $finalfasta = $outb . "_putative_promotors_" . $tag . ".fa";
+
+my $inseqio = Bio::SeqIO->new( -type => 'fasta', -file => $outfa);
+my $outseqio = Bio::SeqIO->new( -type => 'fasta', -file => ">$finalfasta");  
+
+my $ns = 0;
+while( my $seqobj2 = $inseqio->next_seq() ) {
+
+    $ns++;
+    my $seqid = $seqobj2->id(); 
+    my ($s_seqid, $q_seqid) = ('', ''); 
+    if (exists $sid_equiv{$seqid}) {
+    
+	$s_seqid = $sid_equiv{$seqid};
+	if (exists $id_equiv{$s_seqid}) {
+	
+	    $q_seqid = $id_equiv{$s_seqid};
+	}
+    }
+
+    my $desc = "SubjID=$s_seqid QueryID=$q_seqid";
+    $seqobj2->desc($desc);
+    $outseqio->write_seq($seqobj2); 
+}
+
+print STDERR "\n\t$ns sequences have been written to $finalfasta\n\n";
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GenePromotorSearch Ends ($date)   ##\n";
+print STDERR "############################################################\n\n";
+exit;
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+      This script is designed to retrieve the putative promoter regions from a 
+      gene (or list of genes) using a Blast sequence homology search. It uses 
+      blast and bedtools so they should be available in the path.
+
+      Steps
+      -----
+      1- Blast homology search from query file (-q) with a subject file (-s). 
+    
+        * Different blast tools can be used depending of the type of the query 
+          and subject sequences (e.g. protein query - protein subject => 
+          blastp).
+
+        * Blast will be run always as -outfmt '6 std qlen slen'
+
+        * Once it gets the result. It will filter them based in two parameters:
+            a- min. percentage of coverage for the hit (-c)
+            b- min. percentage of identity for the hit (-i)
+
+        * It will produce a list of ID to search in the GFF3
+
+      2- SubjectID search in the genome annotation GFF3 file. SubjectID should 
+         be present if the GFF3 file. Once the script gets the gene/mRNA 
+         coordinates it will produce a bed file with the region to get in the 
+         next step. The script will get the start/end of gene/mRNA and 
+         add/substract according the -p paramer (U/D:XXXX where XXXX is an 
+         integer)
+
+         + Gene/mRNA + strand, D will get from [Start - XXXX] to [Start]
+         + Gene/mRNA + strand, U will get from [End] to [End + XXXX]
+         + Gene/mRNA - strand, D will get from [End] to [End + XXXX]
+         + Gene/mRNA - strand, U will get from [Start - XXXX] to [Start]
+    
+      3- With the bed file, it will use bedtools getfasta. For the - strand it
+         will return the reverse complementary
+
+    Usage:
+    
+       GenePromotorSearch -q <query.fasta> -s <subject.fasta> -t <search_type>
+                    [-b <blast_line>] -g <genome.fasta> -a <genome.gff>
+                    [-p <promoter_region>] 
+                    [-c <min_perc_coverage>] [-i <min_perc_identity>] 
+
+    Flags:
+
+     -q <query.fasta>      fasta file with the query sequences (mandatory)
+     -s <subject.fasta>    fasta file with the subject sequences (mandatory)
+     -t <search_type>      type of blast search (default blastp)
+     -b <blast_line>       line to past to blast search (e.g. '-evalue 1e-10') 
+     -g <genome.fasta>     fasta file with the genome sequences (mandatory)
+     -a <genome.gff>       gff file with the genome annotations (mandatory)
+     -p <promoter_region>  region to get from the genes (default D:2000)
+     -c <min_perc_cov>     minimum blast hit coverage percentage (default 70)
+     -i <min_perc_ident>   minimum blast hit identity percentage (default 30)
+     -o <out_basename>     basename for output files (default gps_out)
+     -h <help>             print the help
+     
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
