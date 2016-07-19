@@ -1,0 +1,237 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ DomainSearch
+ Simple tool to search protein domains
+
+=cut
+
+=head1 SYPNOSIS
+
+ DomainSearch -p <protein_file> -d <primary_domain> [-l <location>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -p
+
+B<protein_file>           input protein fasta file (mandatory)
+
+=item -d
+
+B<primary_domain>         primary protein domain (mandatory)
+
+=item -l
+
+B<location>               location for primary protein domain (see description)
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ Simple script to find protein domains based in a simple pattern (e.g. LXCXE).
+ 
+ Also can filter the search based in the location of the domain.
+ Location can have three values: 
+  * "N-terminal", first 25% of the polypeptide. 
+  * "C-terminal", last 25% of the polypeptide.
+  * "Central", central 25% of the polypeptide.
+
+ 1...5....10...15...20...25...30...35...40...45...50
+ XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+ |N-terminal|       |  central  |       |C-terminal|
+
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aurebg@vt.edu).
+
+=cut
+
+=head1 METHODS
+
+ DomainSearch
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::SeqIO;
+use Bio::Tools::SeqPattern;
+
+our ($opt_p, $opt_d, $opt_l, $opt_h);
+getopts("p:d:l:h");
+if (!$opt_p && !$opt_d && !$opt_l && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Get the arguments and check them
+
+my $pepfile = $opt_p || 
+    die("\nERROR: -p <protein_fastafile> argument was not supplied.\n");
+
+my $domain = $opt_d ||
+    die("\nERROR: -d <domain> argument was not supplied.\n");
+
+my %allowloc = (
+    'N-terminal' => 1,
+    'C-terminal' => 1, 
+    'Central'    => 1,    
+    );
+
+if ($opt_l) {
+
+    unless (exists $allowloc{$opt_l}) {
+	
+	die("\nERROR: -l $opt_l is not an allowed location. Check manual.\n");
+    }
+}
+
+
+my $date = `date`;
+chomp($date);
+
+print STDERR "\n\n#########################################################\n";
+print STDERR "## DomainSearch starts, $date ##\n";
+print STDERR "#########################################################\n";
+
+## Use uppercase and replace X by .
+$domain = uc($domain);
+my $domobj = Bio::Tools::SeqPattern->new(-SEQ =>$domain, -TYPE =>'Amino');
+
+my $pattern = $domobj->expand(); 
+
+print STDERR "\n\t0) Domain has been formated domain to $pattern\n";
+
+
+## Open the file
+
+my $c = 0;
+my $inseqio = Bio::SeqIO->new( -file => $pepfile, -format => 'fasta');
+
+while (my $seqobj = $inseqio->next_seq()) {
+
+    my $id = $seqobj->id();
+    my $seq = $seqobj->seq();
+    my $len = $seqobj->length();
+    my $ope1 = $len * 25 / 100;
+    my $ope2 = $len * 37.5 / 100;
+
+    my $p25obj = Math::BigFloat->new($ope1);
+    my $p25 = $p25obj->bfround(0);
+    my $p37obj = Math::BigFloat->new($ope2);
+    my $p37 = $p37obj->bfround(0);
+
+    my $select = 0;
+    my $ndom = 0;
+    if ($seq =~ m/$pattern/) {
+    
+	## Count the number of domains
+	my @frags = split(/$pattern/, $seq);
+	$ndom = scalar(@frags) - 1;
+
+	## Check the position of the domain
+	if ($opt_l) {
+	    if (length($frags[0]) < $p25 && $opt_l eq 'N-terminal') {
+	
+		## This is N-terminal
+		$select = 1;
+	    }
+	    elsif (length($frags[-1]) < $p25 && $opt_l eq 'C-terminal') {
+		
+		## This is C-terminal
+		$select = 1;
+	    }
+	    elsif ($opt_l eq 'Central') {
+	    
+	        if (length($frags[-0]) > $p37 && length($frags[-1]) > $p37) {
+		
+		    $select = 1;
+		}		
+	    }
+	}
+	else {
+	
+	    $select = 1;
+	}
+
+    }
+	
+    if ($select == 1) {
+	print ">$id\t$ndom\n$seq\n";
+	$c++;
+    }
+}
+
+print STDERR "\n$c sequences have been selected.\n";
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+      Simple script to find protein domains based in a simple pattern 
+      (e.g. LXCXE).
+ 
+      Also can filter the search based in the location of the domain.
+      Location can have three values: 
+        * "N-terminal", first 25% of the polypeptide. 
+        * "C-terminal", last 25% of the polypeptide.
+        * "Central", central 25% of the polypeptide.
+
+      1...5....10...15...20...25...30...35...40...45...50
+      XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      |N-terminal|       |  central  |       |C-terminal|
+
+    Usage:
+     
+     DomainSearch -p <protein_file> -d <primary_domain> [-l <location>]      
+
+    Flags:
+
+     -p <protein_file>           input protein fasta file (mandatory)
+     -d <primary_domain>         primary protein domain (mandatory)
+     -l <location>               location for primary protein domain 
+                                 (see description)
+     -h <help>                   print the help
+     
+
+EOF
+exit (1);
+}
+
