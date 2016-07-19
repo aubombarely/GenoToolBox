@@ -11,7 +11,7 @@
 
  GenePromotorSearch -q <query.fasta> -s <subject.fasta> -t <search_type>
                     [-b <blast_line>] -g <genome.fasta> -a <genome.gff>
-                    [-p <promoter_region>] 
+                    [-p <promoter_region>] [-G]
                     [-c <min_perc_coverage>] [-i <min_perc_identity>] 
 
 =head2 I<Flags:>
@@ -54,6 +54,10 @@ B<min_perc_coverage>      minimum blast hit coverage percentage (default 70)
 
 B<min_perc_identity>      minimum blast hit identity percentage (default 30)
 
+=item -G
+
+B<include_geneseq>        include the gene sequence (default no)
+
 =item -o
 
 B<out_basename>           basename for output files (default gps_out)
@@ -91,13 +95,17 @@ B<help>                   print the help
     present if the GFF3 file. Once the script gets the gene/mRNA coordinates
     it will produce a bed file with the region to get in the next step. The 
     script will get the start/end of gene/mRNA and add/substract according the 
-    -p paramer (U/D:XXXX where XXXX is an integer)
+    -p paramer (U/D/B:XXXX where XXXX is an integer)
 
     + Gene/mRNA + strand, D will get from [Start - XXXX] to [Start]
     + Gene/mRNA + strand, U will get from [End] to [End + XXXX]
+    + Gene/mRNA + strand, B will get from [Start - XXXX] to [End + XXXX]
     + Gene/mRNA - strand, D will get from [End] to [End + XXXX]
     + Gene/mRNA - strand, U will get from [Start - XXXX] to [Start]
+    + Gene/mRNA - starnd, B will get from [Start - XXXX] to [End + XXXX]
     
+    (B will include the gene sequence by default)
+
  3- With the bed file, it will use bedtools getfasta. For the - strand it will 
     return the reverse complementary
  
@@ -128,10 +136,10 @@ use List::Util qw(sum max min);
 use Bio::SeqIO;
 
 our ($opt_q, $opt_s, $opt_t, $opt_b, $opt_g, $opt_a, $opt_p, $opt_c, $opt_i, 
-     $opt_o, $opt_h);
-getopts("q:s:t:b:g:a:p:c:i:o:h");
+     $opt_o, $opt_G, $opt_h);
+getopts("q:s:t:b:g:a:p:c:i:o:Gh");
 if (!$opt_q && !$opt_s && !$opt_t && !$opt_b && !$opt_g && !$opt_a && !$opt_p
-    && !$opt_c && !$opt_i && !$opt_o && !$opt_h) {
+    && !$opt_c && !$opt_i && !$opt_o && !$opt_G && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -234,13 +242,13 @@ my %regions2words = (D => "Downstream", U => "Upstream");
 
 if ($opt_p) {
 
-    if ($opt_p =~ m/(^[D|U]):(\d+)$/) {
+    if ($opt_p =~ m/(^[D|U|B]):(\d+)$/) {
     
 	$prom_args{region} = $1;
 	$prom_args{size} = $2;
     }
     else {
-	die("ERROR: -p <promotor_region> doesnt have the format D|U:Number.\n");
+	die("ERROR:-p <promotor_region> doesnt have the format D|U|B:Number\n");
     }
 } 
 
@@ -494,12 +502,25 @@ foreach my $sid (sort keys %selected_found) {
 	if ($prom_args{region} eq "D") {
 		
 	    $start = $selected_found{$sid}->{start} - $prom_args{size} - 1;
-	    $end = $selected_found{$sid}->{start} - 1;	    
+	    $end = $selected_found{$sid}->{start} - 1;
+	    if ($opt_G) {
+	    
+		$end = $selected_found{$sid}->{end};
+	    }
+	}
+	elsif ($prom_args{region} eq "B") {
+	
+	    $start = $selected_found{$sid}->{start} - $prom_args{size} - 1;
+	    $end = $selected_found{$sid}->{end} + 1 + $prom_args{size};
 	}
 	else {
 	
 	    $start = $selected_found{$sid}->{end} + 1;
 	    $end = $selected_found{$sid}->{end} + 1 + $prom_args{size};
+	    if ($opt_G) {
+	    
+		$start = $selected_found{$sid}->{start};
+	    }
 	}
     }
     else {
@@ -507,12 +528,25 @@ foreach my $sid (sort keys %selected_found) {
 	if ($prom_args{region} eq "U") {
 		
 	    $start = $selected_found{$sid}->{start} - $prom_args{size} - 1;
-	    $end = $selected_found{$sid}->{start} - 1;	    
+	    $end = $selected_found{$sid}->{start} - 1;
+	    if ($opt_G) {
+	    
+		$end = $selected_found{$sid}->{end};
+	    }
+	}
+	elsif ($prom_args{region} eq "B") {
+	
+	    $start = $selected_found{$sid}->{start} - $prom_args{size} - 1;
+	    $end = $selected_found{$sid}->{end} + 1 + $prom_args{size};
 	}
 	else {
 	
 	    $start = $selected_found{$sid}->{end} + 1;
 	    $end = $selected_found{$sid}->{end} + 1 + $prom_args{size};
+	    if ($opt_G) {
+	    
+		$start = $selected_found{$sid}->{start};
+	    }
 	}
     }
 
@@ -658,9 +692,13 @@ sub help {
 
          + Gene/mRNA + strand, D will get from [Start - XXXX] to [Start]
          + Gene/mRNA + strand, U will get from [End] to [End + XXXX]
+	 + Gene/mRNA + starnd, B will get from [Start - XXXX] to [End + XXXX]
          + Gene/mRNA - strand, D will get from [End] to [End + XXXX]
          + Gene/mRNA - strand, U will get from [Start - XXXX] to [Start]
-    
+         + Gene/mRNA + starnd, B will get from [Start - XXXX] to [End + XXXX]
+
+         B will get also the sequence of the gene
+
       3- With the bed file, it will use bedtools getfasta. For the - strand it
          will return the reverse complementary
 
@@ -668,7 +706,7 @@ sub help {
     
        GenePromotorSearch -q <query.fasta> -s <subject.fasta> -t <search_type>
                     [-b <blast_line>] -g <genome.fasta> -a <genome.gff>
-                    [-p <promoter_region>] 
+                    [-p <promoter_region>] [-G]
                     [-c <min_perc_coverage>] [-i <min_perc_identity>] 
 
     Flags:
@@ -682,6 +720,7 @@ sub help {
      -p <promoter_region>  region to get from the genes (default D:2000)
      -c <min_perc_cov>     minimum blast hit coverage percentage (default 70)
      -i <min_perc_ident>   minimum blast hit identity percentage (default 30)
+     -G <include_geneseq>  include the gene sequence
      -o <out_basename>     basename for output files (default gps_out)
      -h <help>             print the help
      
