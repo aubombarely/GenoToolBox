@@ -158,6 +158,7 @@ print STDERR "\tScript threads: $threads\n";
 print_header("1) Parsing bamfile input file file");
 
 my @bamfiles = (); 
+
 open my $bl_fh, '<', $bamlist;
 while(<$bl_fh>) {
 
@@ -306,7 +307,10 @@ foreach my $second (@outfiles2) {
     $i++;
     my $i_out = $outbase . "_bedtools_intersect_" . $i . ".bed.txt";
 
-    if (-s $i_out > 0) {
+    my $f1size = -s $first || 0;
+    my $f2size = -s $second || 0;
+
+    if ($f1size > 0 && $f2size > 0) {
 
 	my $cmd3 = "bedtools intersect -a $first -b $second > $i_out";
 	system($cmd3);
