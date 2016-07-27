@@ -1,0 +1,478 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ DomainAnalysis
+ Simple tool to get some domain stats
+
+=cut
+
+=head1 SYPNOSIS
+
+ DomainAnalysis -p <protein_file> -d <domains_list> -o <outbase> 
+                [-s <adjacent_size>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -p
+
+B<protein_file>           input protein fasta file (mandatory)
+
+=item -d
+
+B<domains_list>           primary protein domain (mandatory)
+
+=item -o
+
+B<outbase>                outbase filename (mandatory)
+
+=item -s
+
+B<adjacent_size>          polypeptide size to get close to the domain (def. 6)
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ Simple script to find protein domains and analyze several parameters:
+ 1- Number of domains (DomN)
+ 2- Distance of the domains to C- and N- terminal (DistN, DistC)
+ 3- Distance between domains (DistDom).
+ 4- Relative position of the domain (normalized from 1-100 with intervals of 
+    10, e.g. P00 will be N-terminal, and P40 in the middle).
+ 5- Adjacent protein sequence N- and C- using the -s option. 
+    It will look for similar Aa based it their chemical properties such as
+    general chemical properties (+ = + charged, - = - charged, P = polar no 
+    charged, t = no polar tiny volume, n = no polar small, N = no polar big, 
+    S = disulphure bonds, I = special interactor for proline), volume and
+    hydrophobicity (Hyte and Doolittle scale).
+ 6- It will produce two matrices (N and C) with the Aa count.   
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aurebg@vt.edu).
+
+=cut
+
+=head1 METHODS
+
+ DomainAnalysis
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::SeqIO;
+use Bio::Tools::SeqPattern;
+
+our ($opt_p, $opt_d, $opt_s, $opt_o, $opt_h);
+getopts("p:d:s:o:h");
+if (!$opt_p && !$opt_d && !$opt_s && !$opt_o && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Get the arguments and check them
+
+my $pepfile = $opt_p || 
+    die("\nERROR: -p <protein_fastafile> argument was not supplied.\n");
+
+my $domain = $opt_d ||
+    die("\nERROR: -d <domains_list> argument was not supplied.\n");
+
+my $outbase = $opt_o ||
+    die("\nERROR: -o <outbase> argument was not supplied.\n");
+
+my $adjsize = 6;
+if ($opt_s) {
+
+    if ($opt_s =~ m/^\d+$/) {
+    
+	$adjsize = $opt_s;
+    }
+    else {
+    
+	die("ERROR: -s <adjacent_size> is not an integer.\n"); 
+    }    
+}
+
+
+
+## Define the Aa chemical properties hash
+my %aachem = (
+    R => { gch => "+", vol => 173.4, hyd => -4.5},
+    H => { gch => "+", vol => 153.2, hyd => -3.2},
+    K => { gch => "+", vol => 168.6, hyd => -3.9},
+    D => { gch => "-", vol => 111.1, hyd => -3.5},
+    E => { gch => "-", vol => 138.4, hyd => -3.5},      
+    S => { gch => "P", vol =>  89.0, hyd => -0.8},
+    T => { gch => "P", vol => 116.1, hyd => -0.7},
+    N => { gch => "P", vol => 114.1, hyd => -3.5},
+    Q => { gch => "P", vol => 143.8, hyd => -3.5},  
+    G => { gch => "t", vol =>  60.1, hyd => -0.4},
+    A => { gch => "t", vol =>  88.6, hyd =>  1.8},
+    V => { gch => "n", vol => 140.0, hyd =>  4.2},
+    I => { gch => "n", vol => 166.7, hyd =>  4.5},
+    L => { gch => "n", vol => 166.7, hyd =>  3.8},
+    M => { gch => "n", vol => 162.9, hyd =>  1.9},
+    F => { gch => "N", vol => 189.9, hyd =>  2.8},
+    Y => { gch => "N", vol => 193.6, hyd => -1.3},
+    W => { gch => "N", vol => 227.8, hyd => -0.9},
+    C => { gch => "S", vol => 108.5, hyd =>  2.5},
+    P => { gch => "I", vol => 112.7, hyd => -1.6}
+    );
+
+my %aacnt = (
+    R => 0, H => 0, K => 0, D => 0, E => 0, S => 0, T => 0, N => 0, Q => 0,
+    G => 0, A => 0, V => 0, I => 0, L => 0, M => 0, F => 0, Y => 0, W => 0,
+    C => 0, P => 0
+    );
+
+
+my $date = `date`;
+chomp($date);
+
+print STDERR "\n\n#########################################################\n";
+print STDERR "## DomainAnalysis starts, $date ##\n";
+print STDERR "#########################################################\n";
+
+## Use uppercase and replace X by .
+$domain = uc($domain);
+my $domobj = Bio::Tools::SeqPattern->new(-SEQ =>$domain, -TYPE =>'Amino');
+
+my $pattern = $domobj->expand(); 
+
+print STDERR "\n\t0) Domain has been formated to domain=$pattern\n";
+
+
+## Preparing the consensus hash
+
+## It will build a consensus count matrix
+my @Naa_count = ();
+my @Caa_count = ();
+my $n = 0;
+while($n < $adjsize) {
+    
+    $n++;
+    my %n_aa_count = %aacnt;
+    my %c_aa_count = %aacnt;
+    push @Naa_count, \%n_aa_count;
+    push @Caa_count, \%c_aa_count;
+}
+
+## Open the file
+
+print STDERR "\n\t1) Processing the FASTA file $pepfile\n";
+
+my $c = 0;
+my $inseqio = Bio::SeqIO->new( -file => $pepfile, -format => 'fasta');
+
+my $out_matrixall = $outbase . "_globalmatrix.txt";
+open my $om_fh, '>', $out_matrixall;
+
+## Print the header
+my @ghead = ('#SequenceID', 'Ndom', 'AbsP', 'RelP', 'Dist', 'DSeq', 'NSeq', 
+	     'CSeq', 'NChe', 'CChe', 'NVol', 'CVol', 'NHyd', 'CHyd');
+my $gheadline = join("\t", @ghead);
+print $om_fh "$gheadline\n"; 
+
+## Get also an alignment based in the domain
+my %seqalign = ();
+
+while (my $seqobj = $inseqio->next_seq()) {
+
+    my $id = $seqobj->id();
+    my $seq = $seqobj->seq();
+    my $len = $seqobj->length();
+    my $plength = length($pattern);
+    my $corr = 0;
+    my $nvar = 0;
+    while ($pattern =~ m/\[(.+?)\]/g) {
+    
+	$nvar++;
+	$corr += length($1);
+    }
+    
+    ## Correct the plength
+    $plength = $plength - (2 * $nvar) - ($corr - $nvar);
+
+    my $ndom = 0;
+    my @pattern_pos = (); 
+
+    ## Get the position
+
+    while($seq =~ /($pattern)/g) {
+	
+	push @pattern_pos, pos($seq) - $plength;  
+    }
+
+    ## Get the relative position
+
+    my @relat_pos = ();
+    foreach my $pos (@pattern_pos) {
+    
+	my $calc = $pos*100/$len;
+	my $relp = Math::BigFloat->new($calc)->bround(1);
+	if ($relp <= 5) {
+	    $relp = 0;
+	}
+	elsif ($relp <= 10) {
+	    $relp = 10;
+	}
+	push @relat_pos, $relp;
+    }
+    
+    ## Get the distances between patterns
+
+    my @poscopy = @pattern_pos;
+    my @distances = (); 
+    if (scalar(@pattern_pos) > 1) {
+    
+	my $f1 = shift(@poscopy);
+	foreach my $f2 (@poscopy) {
+	
+	    push @distances, $f2 - $f1;
+	    $f1 = $f2;
+	}
+    }
+    else {
+    
+	push @distances, "NA";
+    }
+
+    ## Get the upstream and downstream sequences and its chemical properties
+    my @Nseqs = ();
+    my @Cseqs = ();
+    my @Dseqs = ();
+    my @Nchem = ();
+    my @Cchem = ();
+    my @Navol = ();
+    my @Cavol = ();
+    my @Nahyd = ();
+    my @Cahyd = ();
+
+    foreach my $pos (@pattern_pos) {
+
+	my $n_st = $pos - $adjsize;  
+	my $n_en = $pos;
+	my $c_st = $pos + $plength;
+	my $c_en = $pos + $plength + $adjsize;
+	
+	## It will need to correct when the sequence length < $c_end
+	
+	my $adjsizeC = $adjsize;
+	my $adjsizeN = $adjsize;
+	if ($n_st <= 0) {
+		
+	    $n_st = 0;
+	    $adjsizeN = $pos;
+	}
+
+	if ($c_en >= $len) {
+	
+	    $adjsizeC = $len - $c_st; 
+	}
+	if ($c_st >= $len) {
+	
+	    $adjsizeC = 0;
+	    $c_st = $len;
+	}
+
+	my $subseqN = substr($seq, $n_st, $adjsizeN);
+	my $subseqC = substr($seq, $c_st, $adjsizeC);
+	my $subseqD = substr($seq, $pos, $plength);	
+	push @Nseqs, $subseqN;
+	push @Cseqs, $subseqC;
+	push @Dseqs, $subseqD;
+
+	my $new_subseqN = $subseqN;
+	while(length($new_subseqN) < $adjsize) {
+	
+	    $new_subseqN = "-" . $new_subseqN;
+	}
+	my $new_subseqC = $subseqC;
+	while(length($new_subseqC) < $adjsize) {
+	
+	    $new_subseqC = $new_subseqC . "-";
+	}
+	my $new_align = $new_subseqN . $subseqD . $new_subseqC;
+	$seqalign{$id."-".$pos} = $new_align;
+	    
+	my @chempN = ();
+	my @chempC = ();
+	my @aavolN = ();
+	my @aavolC = ();
+	my @aahydN = ();
+	my @aahydC = ();
+	my $np = 0;
+	foreach my $aaN (split(//, $subseqN)) {
+	    
+	    if ($aachem{$aaN}) {
+		push @chempN, $aachem{$aaN}->{gch};
+		push @aavolN, $aachem{$aaN}->{vol};
+		push @aahydN, $aachem{$aaN}->{hyd};
+		$Naa_count[$np]->{$aaN}++;
+	    }
+	    $np++;
+	}
+	my $cp = 0;
+	foreach my $aaC (split(//, $subseqC)) {
+	
+	    if ($aachem{$aaC}) {
+		push @chempC, $aachem{$aaC}->{gch};
+		push @aavolC, $aachem{$aaC}->{vol};
+		push @aahydC, $aachem{$aaC}->{hyd};
+		$Caa_count[$cp]->{$aaC}++;
+	    }
+	    $cp++;
+	}
+	push @Nchem, join("", @chempN);
+	push @Cchem, join("", @chempC);
+	push @Navol, join("|", @aavolN);
+	push @Cavol, join("|", @aavolC); 
+	push @Nahyd, join("|", @aahydN);
+	push @Cahyd, join("|", @aahydC); 
+    }
+
+    my $ndoms = scalar(@pattern_pos); 
+    my $pos = join(",", @pattern_pos); 
+    my $relp = join(",", @relat_pos);
+    my $dist = join(",", @distances);
+    my $d_seq = join(",", @Dseqs); 
+    my $n_seq = join(",", @Nseqs);
+    my $c_seq = join(",", @Cseqs);
+    my $n_che = join(",", @Nchem);
+    my $c_che = join(",", @Cchem);
+    my $n_vol = join(",", @Navol);
+    my $c_vol = join(",", @Cavol);
+    my $n_hyd = join(",", @Nahyd);
+    my $c_hyd = join(",", @Cahyd); 
+    my @line = ($id, $ndoms, $pos, $relp, $dist, $d_seq, $n_seq, $c_seq, 
+		$n_che, $c_che, $n_vol, $c_vol, $n_hyd, $c_hyd);
+    my $pline = join("\t", @line); 
+
+    print $om_fh "$pline\n";		
+}
+
+print STDERR "\n\t2) Analyzing frequencies and producing matrices\n";
+
+my $align_file = $outbase . "_DomainAlignments.txt";
+open my $a_fh, '>', $align_file;
+foreach my $sid (sort keys %seqalign) {
+
+    print $a_fh "$sid\t$seqalign{$sid}\n";
+}
+
+
+## At this point also can print a consensus
+
+my @header = ();
+push @header, sort(keys %aacnt);
+my $headline = join("\t", @header); 
+
+my $n_aa_abunmatrix_file = $outbase . "_N_AaAbundanceMatrix.txt";
+open my $naa_fh, '>', $n_aa_abunmatrix_file;
+my $c_aa_abunmatrix_file = $outbase . "_C_AaAbundanceMatrix.txt";
+open my $caa_fh, '>', $c_aa_abunmatrix_file;
+
+print $naa_fh "$headline\n";
+print $caa_fh "$headline\n";
+
+my $pos = 0;
+
+while($pos < $adjsize) {
+    
+    $pos++;
+    my @datalineN = ($pos);
+    my @datalineC = ($pos);
+    foreach my $aa (sort keys %aacnt) {
+    
+	push @datalineN, $Naa_count[$pos-1]->{$aa};
+	push @datalineC, $Caa_count[$pos-1]->{$aa};
+    }
+    my $datalineN = join("\t", @datalineN);
+    my $datalineC = join("\t", @datalineC);
+    print $naa_fh "$datalineN\n";
+    print $caa_fh "$datalineC\n";
+}
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## DomainAnalysis ends ($date)   ##\n";
+print STDERR "###########################################################\n\n";
+exit;
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+     Simple script to find protein domains and analyze several parameters:
+     1- Number of domains (DomN)
+     2- Distance of the domains to C- and N- terminal (DistN, DistC)
+     3- Distance between domains (DistDom).
+     4- Relative position of the domain (normalized from 1-100 with intervals 
+        of  10, e.g. P00 will be N-terminal, and P40 in the middle).
+     5- Adjacent protein sequence N- and C- using the -s option. 
+        It will look for similar Aa based it their chemical properties such as
+        general chemical properties (+ = + charged, - = - charged, P = polar no 
+        charged, t = no polar tiny volume, n = no polar small, N = no polar 
+        big, S = disulphure bonds, I = special interactor for proline), 
+        volume and hydrophobicity (Hyte and Doolittle scale).
+     6- It will produce two matrices (N and C) with the Aa count.  
+
+    Usage:
+     
+     DomainAnalysis -p <protein_file> -d <domains_list> -o <outbase> 
+                   [-s <adjacent_size>]     
+
+    Flags:
+
+     -p <protein_file>    input protein fasta file (mandatory)
+     -d <domains_list>    primary protein domain (mandatory)
+     -o <outbase>         outbase filename (mandatory)
+     -s <adjacent_size>   polypeptide size to get close to the domain (def. 6)
+     -h <help>                   print the help
+     
+
+EOF
+exit (1);
+}
+
