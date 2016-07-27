@@ -1,0 +1,836 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GetMultiplePromotors
+ Pipeline to get multiple gene promotors
+
+=cut
+
+=head1 SYPNOSIS
+
+ GetMultiplePromotors -b <blast_o6_file> -g <gffffile_list> -f <fastafile_list>
+                      [-r <region>] [-l <length>] [-s <synonyms_file>] [-P][-Z]
+                      [-o <outbase>] [-c <min_coverage>] [-i <min_identity>] 
+
+=head2 I<Flags:>
+
+=over
+
+=item -b
+
+B<blast_o6_file>          Blast tab file (-outfmt '6 std qlen slen') (mandatory)
+
+=item -g
+
+B<gfffile_list>           File with two colums: ID, GffFileName (mandatory)
+
+=item -f
+
+B<fastafile_list>         File with two columns: ID, FastaFilename (mandatory)
+
+=item -r
+
+B<region>                 Up- "U", Down-stream, "D" or both "B" (default "D")
+
+=item -l
+
+B<length>                 Length of sequence to get (default 2000)
+
+=item -s
+
+B<synonym_file>           two/three column file with: BlastID, GffFeatID, (PxID)
+
+=item -P
+
+B<use_file_prefix>        use file prefix (PxID) for synonym file (default no)
+
+=item -Z
+
+B<phytozome_set_mod>      modify the ID search for Phytozome proteins (def. no)
+
+=item -o
+
+B<out_basename>           basename for output files (promoter_seqs)
+
+=item -c
+
+B<min_coverage>           min. percentage of coverage to accept a blast hit
+
+=item -i
+
+B<min_identity>           min. percentage of identity to accept a blast hit
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This script is designed to retrieve the promotor regions of several genes
+ in several genomes using the results of a BlastP/BlastX protein homology 
+ search with a proteome sets.
+
+ The input is a BlastP/BlastX result file with a columnar format with two
+ extra columns, qlen and slen (run as -outfmt '6 std qlen slen'). The Blast
+ input could be filtered during the Blast process (e.g. using arguments such
+ as -evalue) or during the file parsing (using options such as -c <min_cov> and
+ -i <min_identity>). 
+
+ Because the Blast files may have a different SubjectIDs than the GFF file, this
+ scripts uses a synomym file (-s) to relate SubjectID with GffFeatID. If the
+ GffFeatID are redundant, it can use -P to target specific files. Also some
+ protein sets such as Phytozome has .p at the end of the protein name. -Z
+ correct this.
+
+ Finally the script can get a sequence of -l length from downstrean (-r D), 
+ upstream (-r U) or both including the gene sequence (-r B) for the GffFeatID. 
+
+ This script is designed to work with different datasets, so fasta and gff 
+ genome files are supplied with the options -f and -g respectively.
+ 
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aurebg@vt.edu).
+
+=cut
+
+=head1 METHODS
+
+ GetMultiplePromotors
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Math::BigFloat;
+use List::Util qw(sum max min);
+use Bio::SeqIO;
+
+our ($opt_b, $opt_g, $opt_f, $opt_r, $opt_l, $opt_s, $opt_o, $opt_c, $opt_i, 
+     $opt_P, $opt_Z, $opt_h);
+getopts("b:g:f:r:l:s:o:c:i:PZh");
+if (!$opt_b && !$opt_g && !$opt_f && !$opt_r && !$opt_l && !$opt_s && !$opt_o
+    && !$opt_c && !$opt_i && !$opt_P && !$opt_Z && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GetMultiplePromotors Starts ($date)  ##\n";
+print STDERR "############################################################\n\n";
+
+print_header("0) Checking arguments");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+## Get the arguments and check them
+
+my $blastin = $opt_b || 
+    die("\nERROR: -b <blast_result_o6file> argument was not supplied.\n");
+
+print STDERR "\n\tBLAST_RESULT_FILE=$blastin\n"; 
+my $nhits = `wc -l $blastin`; 
+chomp($nhits); 
+print STDERR "\tBLAST_RESULT_HITCOUNT=$nhits\n";
+
+## Check GFFs
+
+my $gfflist = $opt_g ||
+    die("\nERROR: -g <gff_list> argument was not supplied.\n");
+
+my %gfflist = ();
+open my $gfflist_fh, '<', $gfflist;
+
+my $gfflist_l = 0;
+while(<$gfflist_fh>) {
+
+    chomp($_); 
+    $gfflist_l++;
+    my @line = split(/\t/, $_);
+    if (scalar(@line) == 2) {
+    
+	$gfflist{$line[0]} = $line[1];
+    }
+    else {
+    
+	die("ERROR: line $gfflist_l at file $gfflist doesnt have 2 columns.\n");
+    }
+}
+my $nitems_gffs = scalar(keys %gfflist); 
+print STDERR "\tGFF_FILE_LIST=$gfflist\n";
+print STDERR "\tGFF_FILE_ITEMCOUNT=$nitems_gffs\n";
+
+## Check FASTAs
+
+my $faslist = $opt_f ||
+    die("\nERROR: -f <fasta_list> argument was not supplied.\n");
+
+my %faslist = ();
+open my $faslist_fh, '<', $faslist;
+
+my $faslist_l = 0;
+while(<$faslist_fh>) {
+
+    chomp($_); 
+    $faslist_l++;
+    my @line = split(/\t/, $_);
+    if (scalar(@line) == 2) {
+    
+	$faslist{$line[0]} = $line[1];
+	unless (exists $gfflist{$line[0]}) {
+	
+	    die("ERROR: $line[0] doesnt exist in the GFF list file.\n");
+	}
+    }
+    else {
+    
+	die("ERROR: line $faslist_l at file $faslist doesnt have 2 columns.\n");
+    }
+}
+my $nitems_fass = scalar(keys %faslist); 
+print STDERR "\tFASTA_FILE_LIST=$faslist\n";
+print STDERR "\tFASTA_FILE_ITEMCOUNT=$nitems_fass\n";
+
+if ($nitems_gffs != $nitems_fass) {
+
+    die("ERROR: $gfflist doesnt have the same number of items that $gfflist\n");
+}
+
+## Check region and length
+
+my %prom_args = (region => "D", size => 2000); 
+my %regions2words = (D => "Downstream", U => "Upstream", B => "Both_Regions");
+
+if ($opt_r) {
+
+    if ($opt_r =~ m/^([D|U|B])$/) {
+    
+	$prom_args{region} = $opt_r;
+    }
+    else {
+	die("ERROR:-r <region> isnt a permited value (D|U|B)\n");
+    }
+} 
+
+if ($opt_l) {
+
+    if ($opt_l =~ m/^\d+$/) {
+    
+	$prom_args{size} = $opt_l;
+    }
+    else {
+	die("ERROR:-l <length> isnt an integer.\n");
+    }
+} 
+
+print STDERR "\tPROMOTER_REGION=$regions2words{$prom_args{region}}\n"; 
+print STDERR "\tPROMOTOR_SIZE=$prom_args{size}\n";
+
+my $outbase = $opt_o || "promoter_seqs";
+print STDERR "\tOUTBASE_NAME=$outbase\n";
+
+
+my $mincov = 10;
+if ($opt_c) {
+    
+    if ($opt_c !~ m/^\d+$/) {
+	
+	die("ERROR: -c <min_seqcov> is not numeric.\n"); 
+    }
+    else {
+    
+	$mincov = $opt_c;
+    }
+}
+print STDERR "\tMIN_BLASTHIT_SEQCOV=$mincov\n";
+
+my $minident = 10;
+if ($opt_i) {
+    
+    if ($opt_i !~ m/^\d+$/) {
+	
+	die("ERROR: -i <min_blasthit_identity> is not numeric.\n"); 
+    }
+    else {
+    
+	$minident = $opt_i;
+    }
+}
+print STDERR "\tMIN_BLASTHIT_IDENTITY=$minident\n\n";
+
+if ($opt_P) {
+
+    print STDERR "\tOPTION_PREFIX_TAXA=Enabled\n";
+}
+else {
+
+     print STDERR "\tOPTION_PREFIX_TAXA=Disabled\n";
+}
+
+if ($opt_Z) {
+
+    print STDERR "\tOPTION_PHYTOZOME_PEPIDs=Enabled\n";
+}
+else {
+
+     print STDERR "\tOPTION_PHYTOZOME_PEPIDs=Disabled\n";
+}
+
+## Finally it will parse the synonym file
+
+my %syns = ();
+my %revsyns = ();
+
+if ($opt_s) {
+
+    open my $sfh, '<', $opt_s;
+    while(<$sfh>) {
+    
+	chomp($_);
+	my @line = split(/\t/, $_);
+	my $equiv_id = shift(@line);
+	
+	unless (exists $syns{$equiv_id}) {
+	    $syns{$equiv_id} = \@line;
+	}
+	else {
+	    print STDERR "\n\tWARNING $equiv_id is duplicated.\n";
+	}
+
+	my $revid = $line[0];
+	if ($opt_P) {
+	
+	    $revid = join("_", reverse(@line)); 
+	}
+
+	unless (exists $revsyns{$revid}) {
+	    $revsyns{$revid} = $equiv_id;
+	}
+	else {
+	    print STDERR "\n\tWARNING $revid is duplicated.\n";
+	}
+    }
+    my $nsyns = scalar(keys %syns); 
+    print STDERR "\tID_SYNONYM_FILE=$opt_s\n";
+    print STDERR "\tID_SYNONYM_COUNT=$nsyns\n";
+}
+else {
+
+    print STDERR "\tNo ID synonym file was supplied\n";
+}
+
+
+
+##############################################################################
+
+
+
+##############################################################################
+## Step 1: Parse Blast
+##############################################################################
+
+
+print_header("1) Parse Blast file $blastin");
+
+my %selected_ids = ();
+my %uniq_sids = ();
+my $n_hits = 0;
+my ($low_qcov, $low_scov, $low_ident) = (0, 0, 0);
+my @qcovs = ();
+my @scovs = (); 
+my @ident = (); 
+
+## If more than one sequence is searched
+
+my %id_equiv = ();
+
+open my $blast_fh, '<', $blastin;
+while(<$blast_fh>) {
+
+    chomp($_);
+    $n_hits++;
+    my ($qid, $sid, $pident, $length, $mismatch, $gapopen, $qstart, $qend, 
+	$sstart, $send, $evalue, $bitscore, $qlen, $slen) = split(/\t/, $_);  
+
+    ## Count uniq IDs
+
+    if (exists $uniq_sids{$sid}) {
+    
+	$uniq_sids{$sid}++;
+    }
+    else {
+	
+	$uniq_sids{$sid} = 1;
+    }
+    
+    ## Calculate coverage
+
+    my $p_qcov = $length * 100 / $qlen;
+    my $p_scov = $length * 100 / $slen;
+    my $qcov = Math::BigFloat->new($p_qcov)->bfround(1);
+    my $scov = Math::BigFloat->new($p_scov)->bfround(1);
+   
+    ## Add coverages and identity to the arrays to calculate some stats
+    push @qcovs, $qcov;
+    push @scovs, $scov;
+    push @ident, $pident;
+
+    ## Check if it meets all the requirements
+    my $select = 1;
+    if ($qcov < $mincov) {
+    
+	$select = 0;
+	$low_qcov++;
+    }
+    if ($scov < $mincov) {
+    
+	$select = 0;
+	$low_scov++;
+    }
+    if ($pident < $minident) {
+    
+	$select = 0;
+	$low_ident++;
+    }
+
+    if ($select == 1) {
+    
+	my ($strand, $pst, $pen) = ("+", $sstart, $send);
+	if ($send <= $sstart) {
+	    
+	    $strand = "-";
+	    $pst = $send;
+	    $pen = $sstart;
+	}
+
+	## Now it will replace the SID 
+
+	my $id = $sid;
+	if ($opt_s) {
+
+	    if ($opt_P) {
+	    
+		$id = $syns{$sid}->[1] . "_" . $syns{$sid}->[0]; 
+	    }
+	    else {
+		if (exists $syns{$sid}) {
+		
+		    $id = $syns{$sid}->[0];
+		}
+	    }
+	}
+
+	$selected_ids{$id} = { 
+	    seqid  => $id,
+	    altid  => $sid,
+	    start  => $sstart, 
+	    end    => $send, 
+	    strand => $strand 
+	};
+
+	$id_equiv{$id} = $qid;
+    }
+}
+
+## Calculate some stats from the blast file
+
+my $n_selected = scalar(keys %selected_ids);
+my $n_uniqids = scalar(keys %uniq_sids); 
+my $pav_qcov = sum(@qcovs)/scalar(@qcovs);
+my $av_qcov = Math::BigFloat->new($pav_qcov)->bfround(1);
+my $pav_scov = sum(@scovs)/scalar(@scovs);
+my $av_scov = Math::BigFloat->new($pav_scov)->bfround(1);
+my $pav_ident = sum(@ident)/scalar(@ident);
+my $av_ident = Math::BigFloat->new($pav_ident)->bfround(1);
+my $pass_qcov = $n_hits - $low_qcov;
+my $pass_scov = $n_hits - $low_scov;
+my $pass_ident = $n_hits - $low_ident;
+
+print STDERR "\tNUM_HITS\t\t$n_hits\n";
+print STDERR "\tNUM_UNIQ_HITS\t\t$n_uniqids\n";
+print STDERR "\tQUERY_COV_AVERAGE\t$av_qcov [$pass_qcov pass]\n";
+print STDERR "\tSUBJECT_COV_AVERAGE\t$av_scov [$pass_scov pass]\n";
+print STDERR "\t\%IDENTITY_AVERAGE\t$av_ident [$pass_ident pass]\n";
+print STDERR "\tSELECTED_SUBJECT_IDS\t$n_selected\n\n";
+
+
+###############################################################################
+## Get the GFF data
+###############################################################################
+
+print_header("2) Searching the coords in the GFF files");
+
+my %selected_found = ();
+my %selected_by_taxa = ();
+
+foreach my $taxa_id (sort keys %gfflist) {
+
+    print STDERR "\tProcessing taxa=$taxa_id\tgff_file=$gfflist{$taxa_id}\n";
+    open my $gff_fh, '<', $gfflist{$taxa_id};
+    my $newadded = 0;
+
+    while(<$gff_fh>) {
+
+	chomp($_); 
+	unless ($_ =~ m/#/) {
+    
+	    my ($seqid, $src, $type, $st, $en, $score, $strand, $phase, 
+		$attline) = split(/\t/, $_);
+
+	    my %attr = ();
+	    foreach my $item (split(/;/, $attline)) {
+	
+		if ($item =~ m/^(.+)=(.+)$/) {
+	    
+		    $attr{$1} = $2;
+		}
+	    }
+
+	    if (exists $attr{ID}) {
+
+		## Phytozome files have ID as ID=AT1G55580.1.TAIR10
+		## so it is necessary to get name instead. It will check
+		## several match types
+
+		my @alt_ids = ($attr{ID});
+		if (exists $attr{Name}) {
+		
+		    unshift(@alt_ids, $attr{Name}); 
+	       
+		    if ($opt_Z) {
+			
+			push(@alt_ids, $attr{Name} . ".p"); 
+		    }
+		}
+
+		foreach my $altid (@alt_ids) {
+
+		    if ($opt_P) {
+		
+			$altid = $taxa_id . "_" . $altid;
+		    }
+		
+		    ## If ID=Name and one of them overwrite the other is
+		    ## okay because it is the same entry
+		    
+		    if (exists $selected_ids{$altid}) {
+	
+			unless (exists $selected_found{$altid}) {
+			    if (exists $selected_by_taxa{$taxa_id}) {
+		    
+				push @{$selected_by_taxa{$taxa_id}}, $altid;
+			    }
+			    else {
+				
+				$selected_by_taxa{$taxa_id} = [$altid]; 
+			    }
+			}
+
+			$newadded++;
+			$selected_found{$altid} = { 
+			    seqid  => $seqid,
+			    start  => $st, 
+			    end    => $en, 
+			    strand => $strand,
+			    taxa   => $taxa_id,
+			    altid  => $selected_ids{$altid}->{altid}
+			};		 			
+		    }    
+		}
+	    }
+	}
+    }
+
+    my $par_n_found = scalar(keys %selected_found); 
+    print STDERR "\t\t$newadded records added to a total of $par_n_found.\n";
+}
+
+my $n_found = scalar(keys %selected_found); 
+print STDERR "\n\t$n_found ID hits found at the GFF file.\n\n";
+
+
+###############################################################################
+## Get the promoter sequences
+###############################################################################
+
+
+print_header("3) Retrieving the promotor sequences");
+
+
+my $outfas = $outbase . "_promotors.fa";
+my $newseqio = Bio::SeqIO->new( -file => ">$outfas", -format => 'fasta'); 
+my $ns = 0;
+
+foreach my $txid (sort keys %selected_by_taxa) {
+
+    my @att_ids = @{$selected_by_taxa{$txid}};
+
+    ## Get a list of the seqids
+    my %seqids = (); 
+    foreach my $att_id (@att_ids) {
+    
+	my $seqid = $selected_found{$att_id}->{seqid};
+	if (exists $seqids{$seqid}) {
+	
+	    push @{$seqids{$seqid}}, $att_id;
+	}
+	else {
+	    
+	    $seqids{$seqid} = [$att_id];
+	}
+    }
+ 
+    
+    ## It will get each of the fasta files
+
+    if (exists $faslist{$txid}) {
+
+	my $idmatch = 0;
+	print STDERR "\tProcessing taxa=$txid\tfasta_file=$faslist{$txid}\n";
+	my $seqio = Bio::SeqIO->new( -file   => $faslist{$txid}, 
+				     -format => 'fasta');
+
+	while( my $seqobj = $seqio->next_seq() ) {
+
+	    my $gseqid = $seqobj->id();
+	    my $gseqle = $seqobj->length();
+	    
+	    ## Get the seq
+	    if (exists $seqids{$gseqid}) {
+	    
+		## Get all the att_ids
+		my @attids = @{$seqids{$gseqid}};
+		foreach my $attid (@attids) {
+		
+		    
+		    my $seqid = $selected_found{$attid}->{seqid};
+		    my $strand = $selected_found{$attid}->{strand};
+		    my $altid = $selected_found{$attid}->{altid};
+		    my $pst = $selected_found{$attid}->{start};
+		    my $pen = $selected_found{$attid}->{end};
+		    my $region = $prom_args{region};
+		    my $length = $prom_args{size};
+		    
+		    my ($start, $end);
+ 
+		    if ($strand eq "+") {
+		       
+			if ($region eq "D") {
+			    
+			    $start = $pst - $length - 1;
+			    $end = $pst - 1;
+			}
+			elsif ($region eq "U") {
+			    
+			    $start = $pen + 1;
+			    $end = $pen + 1 + $length;
+			}
+			else {
+			    
+			    $start = $pst - $length - 1;
+			    $end = $pen + 1 + $length;
+			}		       
+		    }
+		    else {
+			
+			if ($region eq "D") {
+			    
+			    $start = $pen + 1;
+			    $end = $pen + 1 + $length;
+			}
+			elsif ($region eq "U") {
+			    
+			    $start = $pst - $length - 1;
+			    $end = $pst - 1;
+			}
+			else {
+			    
+			    $start = $pst - $length - 1;
+			    $end = $pen + 1 + $length;
+			}		       
+		    }
+		    
+		    ## Correct the coordenates
+		    if ($start <= 0) {
+			
+			$start = 1;
+		    }
+		    if ($end >= $gseqle) {
+			
+			$end = $gseqle;
+		    }
+		    elsif ($end < 1) {
+		    
+			$end = 1;
+		    }
+		    
+		    ## It may happen that the scaffolds is small enough to
+		    ## don't have promotors for the gene described
+		    ## It will report onlt promotors >= 5 bp
+
+		    my $psize = $end - $start;
+		    if ($psize > 4) {
+
+			## At this point it is ready to get the subseq
+			my $subseq = $seqobj->subseq($start, $end); 
+			my $nid = $attid . "_" . $region . $length;
+			my $des = $seqid . ":" . $start . ".." . $end;
+			$des .= " AltID=" . $altid;
+		    
+			my $nseqobj = Bio::Seq->new( 
+			    -seq  => $subseq,
+			    -id   => $nid,
+			    -desc => $des
+			    );
+			
+			if ($strand eq '-') {
+			    
+			    $nseqobj = $nseqobj->revcom();
+			}
+
+			$newseqio->write_seq($nseqobj); 
+			$ns++;
+			$idmatch++;
+		    }
+		    else {
+		    
+			print STDERR "WARNING: $attid promotor size < 5 bp.";
+			print STDERR "Ignoring hit.\n";
+		    }
+		}
+	    }
+	}
+	print STDERR "\t\t$idmatch promotors have been retrieved.\n";
+    }
+}
+
+
+
+
+print STDERR "\n\t$ns sequences have been written to $outfas\n\n";
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GenePromotorSearch Ends ($date)   ##\n";
+print STDERR "############################################################\n\n";
+exit;
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+       This script is designed to retrieve the promotor regions of several genes
+     in several genomes using the results of a BlastP/BlastX protein homology 
+     search with a proteome sets.
+
+       The input is a BlastP/BlastX result file with a columnar format with two
+     extra columns, qlen and slen (run as -outfmt '6 std qlen slen'). The Blast
+     input could be filtered during the Blast process (e.g. using arguments such
+     as -evalue) or during the file parsing (using options such as -c <min_cov>
+     and -i <min_identity>). 
+
+        Because the Blast files may have a different SubjectIDs than the GFF 
+     file, this scripts uses a synomym file (-s) to relate SubjectID with 
+     GffFeatID. If the GffFeatID are redundant, it can use -P to target 
+     specific files. Also some protein sets such as Phytozome has .p at the end
+     of the protein name. -Z correct this.
+
+        Finally the script can get a sequence of -l length from downstrean 
+     (-r D), upstream (-r U) or both including the gene sequence (-r B) for the
+     GffFeatID. 
+
+        This script is designed to work with different datasets, so fasta and 
+     gff genome files are supplied with the options -f and -g respectively.
+
+    Usage:
+    
+      GetMultiplePromotors -b <blast_o6_file> -g <gffffile_list> 
+                           -f <fastafile_list> [-r <region>] [-l <length>] 
+                           [-s <synonyms_file>] [-o <outbase>][-P] [-Z] 
+                           [-c <min_coverage>] [-i <min_identity>] 
+
+    Flags:
+     -b <blast_o6_file>    Blast file (-outfmt '6 std qlen slen') (mandatory)
+     -g <gfffile_list>     File with two colums: ID, GffFileName (mandatory)
+     -f <fastafile_list>   File with two columns: ID, FastaFilename (mandatory)
+     -r <region>           Up- "U", Down-stream, "D" or both "B" (default "D")
+     -l <length>           Length of sequence to get (default 2000)
+     -s <synonym_file>     two column file with: BlastID, GffFeatID
+     -o <out_basename>     basename for output files (promoter_seqs)
+     -c <min_coverage>     min. percentage of coverage to accept a blast hit
+     -i <min_identity>     min. percentage of identity to accept a blast hit
+     -P <taxa_prefix_id>   use taxa prefix to add to the ID with -s (def. no)
+     -Z <phytozome_idmod>  modify the ID match for phytozome pep ids (def. no)
+     -h <help>             print the help
+     
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
