@@ -498,13 +498,15 @@ foreach my $taxa_id (sort keys %gfflist) {
 		$attline) = split(/\t/, $_);
 
 	    my %attr = ();
-	    foreach my $item (split(/;/, $attline)) {
+	    if (defined $attline) { 	
+	    	foreach my $item (split(/;/, $attline)) {
 	
-		if ($item =~ m/^(.+)=(.+)$/) {
+			if ($item =~ m/^(.+)=(.+)$/) {
 	    
-		    $attr{$1} = $2;
-		}
-	    }
+		    		$attr{$1} = $2;
+			}
+	    	}
+	    }	
 
 	    if (exists $attr{ID}) {
 

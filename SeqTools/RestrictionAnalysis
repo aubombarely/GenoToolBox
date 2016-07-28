@@ -178,16 +178,18 @@ if ($opt_f) {
 }
 
 my $outfassp_io;
-my $outnonre_io;
+
+my $outnonre_name = $output . '.seqwwithout_re.txt';
+open my $outnonre_io, '>', $outnonre_name;
+
 if ($opt_S) {
 
     my $outfassp_name = $output . '.splittedseq.fasta';
     $outfassp_io = Bio::SeqIO->new( -file   => ">$outfassp_name", 
 				    -format => 'fasta'         );
 
-    my $outnonre_name = $output . '.seqwwithout_re.txt';
-    open $outnonre_io, '>', $outnonre_name;
 }
+
 
 
 ## open the input file and process
