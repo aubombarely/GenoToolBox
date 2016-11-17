@@ -1,0 +1,677 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ Vcf2CountingBins
+ Script to count variants per bin
+
+=cut
+
+=head1 SYPNOSIS
+
+ Vcf2CountingBins -v <vcf> -o <output> [-b <bin_size>] [-c <min_coverage>] 
+                  [-t <type>] [-m <min_seqlength>] [-g <genotype_filter>] 
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -v
+
+B<vcf_file>               VCF file (mandatory)
+
+=item -o
+
+B<output>                 Filename for the output (mandatory)
+
+=item -i
+
+B<reference_size_index>   File with reference SeqID\tSeqLength (optional)
+
+=item -b
+
+B<bin_size>               bin size (default 10,000 bp)
+
+=item -c
+
+B<min_coverage>           minimum coverage to take into account the variant (0)
+
+=item -t
+
+B<variant_type>           count only the variant type -t <type> (e.g. snp)
+
+=item -g
+
+B<select_form>            select specific genotype forms (e.g. 0/1)
+
+=item -m
+
+B<filter_min_seqlength>   min. sequence length to create a bin (default 0)
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This is a script put variant in bins and count them, so for example for 
+ a file test.vcf
+ 
+ ##fileformat=VCFv4.1
+ ##fileDate=20161013
+ ##source=freeBayes v1.0.2-58-g054b257-dirty
+ ##reference=test
+ ##contig=<ID=SeqID1,length=45000>
+ ##contig=<ID=SeqID2,length=12000>
+ #CHROM  POS   ID REF ALT QUAL FILTER  INFO           FORMAT A1    A2    A3
+ SeqID1    101 .  T   C   0.25 .       DP=14;TYPE=snp GT:DP  0/1:5 1/1:5 0/0:4
+ SeqID1  11101 .  A   T   0.25 .       DP=18;TYPE=snp GT:DP  0/1:9 1/1:5 0/0:4
+ SeqID1  13101 .  T   G   0.25 .       DP=12;TYPE=snp GT:DP  0/1:8 .     0/0:4
+ SeqID1  16101 .  TA  C   0.25 .       DP=18;TYPE=del GT:DP  0/1:9 1/1:9 .
+ SeqID1  21101 .  T   C   0.25 .       DP=10;TYPE=snp GT:DP  0/1:5 1/1:2 0/0:3
+ SeqID1  24101 .  T   A   0.25 .       DP=19;TYPE=snp GT:DP  0/1:5 1/1:5 0/0:9
+ SeqID1  31101 .  T   C   0.25 .       DP=14;TYPE=snp GT:DP  0/1:5 1/1:5 0/0:4
+ SeqID2  10106 .  G   A   0.25 .       DP=16;TYPE=snp GT:DP  0/1:8 .     0/0:6
+
+ Note: If the VCF files doesn't have contig=<ID=,length=> lines, a size index
+       file (-i) with SeqID\tSeqLength will need to be supplied.
+
+ Additionally specific genotypes (GT) can be choosen with -g option
+
+ With a running command: "Vcf2CountingBins -v test.vcf" will produce
+ #SeqID  Box   A1 A2 A3
+ SeqID1      1  1  1  1  
+ SeqID1  10001  3  2  2
+ SeqID1  20001  2  2  2
+ SeqID1  30001  1  1  1
+ SeqID1  40001  0  0  0
+ SeqID2      1  0  0  0
+ SeqID2  10001  1  0  1
+
+ The script can be run filtering variants by type (-t)
+ "Vcf2CountingBins -v test.vcf -t snp"
+ #SeqID  Box   A1 A2 A3
+ SeqID1      1  1  1  1  
+ SeqID1  10001  2  1  2
+ SeqID1  20001  2  2  2
+ SeqID1  30001  1  1  1
+ SeqID1  40001  0  0  0
+ SeqID2      1  0  0  0
+ SeqID2  10001  1  0  1
+ 
+ Note1: Multiple types can be used separated by comma.
+ Note2: Valid types are: snp, del, ins, mnp and complex.
+
+ And by general coverage (DP tag in FORMAT) (-c) 
+ "Vcf2CountingBins -v test.vcf -c 15"
+ #SeqID  Box   A1 A2 A3
+ SeqID1      1  0  0  0  
+ SeqID1  10001  2  2  1
+ SeqID1  20001  1  1  1
+ SeqID1  30001  0  0  0
+ SeqID1  40001  0  0  0
+ SeqID2      1  0  0  0
+ SeqID2  10001  1  0  1
+
+
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely
+  (aurebg@vt.edu).
+
+=cut
+
+=head1 METHODS
+
+ Vcf2CountingBins
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use POSIX 'strftime';
+
+our ($opt_v, $opt_o, $opt_i, $opt_b, $opt_c, $opt_g, $opt_t, $opt_m, $opt_h);
+getopts("v:o:i:b:c:g:t:m:h");
+if (!$opt_v && !$opt_o && !$opt_i && !$opt_b && !$opt_c && !$opt_g && !$opt_t 
+    && !$opt_m && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+###############################################################################
+## 0 - Argument Checking
+###############################################################################
+
+my $vcffile = $opt_v || 
+    die("\nERROR: -v <input_vcf> argument was not supplied.\n");
+
+my $outfile = $opt_o ||
+    die("\nERROR: -o <outfile> argument was not supplied.\n");
+
+my $binsize = 10000;
+if ($opt_b) {
+
+    if ($opt_b !~ m/^\d+$/) {
+    
+	die("ERROR: -b <bin_size> argument is not an integer.\n"); 
+    }
+    else {
+    
+	$binsize = $opt_b;
+    }
+}
+
+my $minseqlength = 0;
+if ($opt_m) {
+    
+    if ($opt_m !~ m/^\d+$/) {
+    
+	die("ERROR: -m <min_seqlength> argument is not an integer.\n"); 
+    }
+    else {
+    
+	$minseqlength = $opt_m;
+    }
+}
+
+
+my $cov = 0;
+if ($opt_c) {
+
+    if ($opt_c !~ m/^\d+$/) {
+    
+	die("ERROR: -c <min_coverage> argument is not an integer.\n"); 
+    }
+    else {
+    
+	$cov = $opt_c;
+    }
+}
+
+my %types = ();
+my %permtypes = (
+    snp     => 1,
+    del     => 1,
+    ins     => 1,
+    complex => 1,
+    mnp     => 1
+    );
+
+if ($opt_t) {
+
+    my @types = split(/,/, $opt_t);;
+
+    foreach my $intype (@types) {
+	unless (exists $permtypes{$intype}) {
+    
+	    die("ERROR: TYPE=$intype is not an valid variant type.\n"); 
+	}
+	else {
+	    $types{$intype} = 1;
+	}
+    }
+}
+else {
+
+    %types = %permtypes;
+}
+
+
+
+###############################################################################
+## Script starts
+###############################################################################
+
+my $date = `date`;
+chomp($date);
+
+print STDERR "\n\n#########################################################\n";
+print STDERR "## Vcf2CountingBins starts, $date ##\n";
+print STDERR "#########################################################\n";
+
+print STDERR "\n\tInput VCF file: $vcffile\n";
+print STDERR "\tBin size: $binsize\n";
+print STDERR "\tMinimun sequence length: $minseqlength\n";
+my $vartypes = join(",", %types);
+print STDERR "\tVariant types selected: $vartypes\n"; 
+if ($opt_g) {
+
+    print STDERR "\tGenotype type selection: $opt_g\n\n";
+}
+else {
+
+    print STDERR "\tGenotype type selection: Any\n\n";
+}
+
+###############################################################################
+## 1- VCF Parsing
+###############################################################################
+
+
+
+## Define the hash to store the variants
+my %samples = ();
+my %smp = ();
+
+## Define a hash to store the sequence size
+my %seqsize = ();
+
+## Define vartypes
+my %vartypes = ();
+
+## Define the hash to store the bins as
+## %bins = ( $seqid => { $bin => { $sampleid => $count } } );
+my %bins = ();
+
+## Define a list of banned seqids based in the minseqlength
+my %banseqids = ();
+
+## Process a index file if it has been supplied
+if ($opt_i) {
+
+    print STDERR "\n\tReference sequence size file provided:\n\t$opt_i\n";
+    print_header("0) Processing the SEQSIZE file");
+
+    my ($seqn, $binn) = (0, 0);
+
+    open my $refidx_fh, '<', $opt_i;
+    while(<$refidx_fh>) {
+    
+	chomp($_);
+	my ($seqid, $length) = split(/\t/, $_); 
+	$seqsize{$seqid} = $length;
+	$seqn++;
+
+	if ($length >= $minseqlength) {
+
+	    ## Create the bins
+	    $bins{$seqid} = {};
+	    my $bin = 1;
+	    while( $bin <= $length) {
+		
+		$bins{$seqid}->{$bin} = {};
+		$bin += $binsize;
+		$binn++;
+		#print "Producing BINS: $seqid\t$bin\t$length\n";
+	    }
+	}
+	else {
+	
+	    $banseqids{$seqid} = 1;
+	}
+    }
+    print STDERR "\n\t$binn bins have been created for $seqn sequences\n\n";
+
+} 
+
+print_header("1) Processing the VCF file");
+my $var2bins_c = 0;
+my $sample_n = 0;
+
+my $tln = `wc -l $vcffile`;
+chomp($tln);
+my $lnc = 0;
+
+open my $vcfio, '<', $vcffile;
+while(<$vcfio>) {
+
+    chomp($_); 
+    $lnc++;
+    print STDERR "\tProcessing line $lnc of $tln              \r";
+
+    ## Ignore all the lines with comments except for #CHROM that contains
+    ## the samples names
+
+    if ($_ =~ m/#contigs=<ID=(.+),length=(\d+)>/) {
+
+	my $seqid = $1;
+	my $length = $2;
+	$seqsize{$seqid} = $length;
+
+	## Create the bins
+	if ($length >= $minseqlength) {
+
+	    ## Create the bins
+	    $bins{$seqid} = {};
+	    my $bin = 1;
+	    while( $bin <= $length) {
+		
+		$bins{$seqid}->{$bin} = {};
+		$bin += $binsize;
+		#print "Producing BINS: $seqid\t$bin\t$length\n";
+	    }
+	}
+	else {
+	
+	    $banseqids{$seqid} = 1;
+	}
+    }
+    elsif ($_ =~ m/#CHROM/) {
+    
+	## Check if the Bins have been created by:
+	## 1- Reading the VCF header (#contigs=<ID=(.+),length=(\d+)>)
+	## 2- Reading a index file
+
+	if (scalar(keys(%bins)) == 0) {
+		    
+	    my $mssg = "\n\nERROR: No bins were build. ";
+	    $mssg .= "VCF file may does not have sequence size ";
+	    $mssg .= "(#contigs=<ID=something,length=something>)\n";
+	    $mssg .= "Use -i <reference_size_index>.\n\n";
+	    die($mssg);
+	}
+
+
+	my @ln = split(/\t/, $_);
+	my $n = 0;
+	
+	## Remove the first 8 columns
+	while( $n < 9 ) {
+	    
+	    shift(@ln);
+	    $n++;
+	}
+
+	## Now it will add the sample names and the positions to the hashes
+	## %samples and %smp
+
+	my $p = 0; 
+	foreach my $sname (@ln) {
+	
+	    $samples{$sname} = {};
+	    $smp{$p} = $sname;
+	    $p++;
+	}
+	$sample_n = scalar(keys %samples);
+	my $sample_list = join(",", keys %samples);
+
+	## Now it will add the sample name to the bins 
+	
+	my $cbin = 0;
+	foreach my $seqid (keys %bins) {
+	
+	    foreach my $bin (keys %{$bins{$seqid}}) {
+	    
+		$cbin++;
+		foreach my $sname (keys %samples) {
+		
+		    $bins{$seqid}->{$bin}->{$sname} = 0;
+		}
+	    }	    
+	}
+ 
+	print STDERR "\n\t$sample_n samples has been added to $cbin bins.\n";
+	print STDERR "\tSampleList: $sample_list\n\n";
+
+    }
+    elsif ($_ !~ m/#/) {
+	
+	my @ln = split(/\t/, $_);
+	my $seqid = $ln[0];
+	my $pos = $ln[1];
+
+	unless (exists $banseqids{$seqid}) {
+
+	    ## Get the bin assignment
+	    ## E.g. 25400 for a 10000 bin should be bin 20001
+	    ## 25400/10000 = 2.54 => 2 * $bin + 1
+
+	    my $rat = $pos/$binsize;
+	    $rat =~ s/\..+//;
+	    my $mbin = ($rat * $binsize) + 1;
+	
+	    unless (exists $bins{$seqid}->{$mbin}) {
+	
+		die("ERROR: Seqid:$pos can not be assigned to a bin.\n");
+	    }
+
+	    ## Get the type
+	    my @cdata = split(/;/, $ln[7]);
+	    my %common = ();
+	    foreach my $cdt (@cdata) {
+	    
+		if ($cdt =~ m/^(.+)=(.+)$/) {
+		
+		    $common{$1} = $2;
+		}
+	    }
+	    
+	    ## Get also the format position
+	    my @fmttags = split(/\:/, $ln[8]);
+	    my %fmttags = ();
+	    my $pt = 0;
+	    foreach my $tag (@fmttags) {
+	    
+		$fmttags{$pt} = $tag;
+		$pt++;
+	    }
+	    
+	    ## Now is read to get the sample data
+	    my $n = 0;	
+	    ## Remove the first 8 columns
+	    while( $n < 9 ) {
+		
+		shift(@ln);
+		$n++;
+	    }
+	    
+	    ## Before process the sample, check if the TYPE is selected
+
+	    if (exists $types{$common{TYPE}}) {
+	    
+		my $pp = 0;
+		foreach my $sdata (@ln) {
+	    
+		    my $sname = $smp{$pp};
+		    ## Assign to each data sample a tag
+		    my %sdata = ();
+		    my $sdp = 0;
+		    if ($sdata !~ m/^\.$/) {
+			foreach my $ditem (split(/:/, $sdata)) {
+			    
+			    $sdata{$fmttags{$sdp}} = $ditem;
+			    $sdp++;
+			}		
+		    }
+		    
+		    my $select = 1;
+		    ## Now it can filter the variant
+		    
+		    if ($sdata{DP} < $cov) {
+			
+			$select = 0;		
+		    }
+		    if ($opt_g) {
+			
+			if ($sdata{GT} ne $opt_g) {
+			    
+			    $select = 0;
+			}
+		    }
+		    
+		    if ($select == 1) {
+		       
+			$bins{$seqid}->{$mbin}->{$sname}++;
+			$var2bins_c++;
+		    }
+		    
+		    $pp++;
+		}
+	    }
+	}
+    }
+}
+
+print STDERR "\n\n\t$var2bins_c variants for $sample_n has been assigned.\n";
+
+print_header("2) Generating the output");
+
+## Produce the header 
+## #SeqID  Box   A1 A2 A3
+
+my @header = ("#SeqID", "Box"); 
+foreach my $spos (sort keys %smp) {
+
+    push @header, $smp{$spos};
+}
+
+my $head = join("\t", @header);
+print STDOUT "$head\n";
+
+foreach my $seqid (sort keys %bins) {
+
+    foreach my $bin (sort {$a <=> $b} keys %{$bins{$seqid}}) {
+
+	my @pline = ($seqid, $bin);
+
+	foreach my $spos (sort keys %smp) {
+	
+	    my $sname = $smp{$spos};
+	    push @pline, $bins{$seqid}->{$bin}->{$sname};
+	}
+	my $pline = join("\t", @pline); 
+	print STDOUT "$pline\n";
+    }
+}
+
+
+
+$date = `date`;
+chomp($date);
+
+print STDERR "\n\n#########################################################\n";
+print STDERR "## Vcf2CountingBins ends, $date ##\n";
+print STDERR "#########################################################\n";
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+     This is a script put variant in bins and count them, so for example for 
+     a file test.vcf
+ 
+     ##fileformat=VCFv4.1
+     ##fileDate=20161013
+     ##source=freeBayes v1.0.2-58-g054b257-dirty
+     ##reference=test
+     ##contig=<ID=SeqID1,length=45000>
+     ##contig=<ID=SeqID2,length=12000>
+     #CHROM POS   ID REF ALT QUAL FILTER INFO           FORMAT A1    A2    A3
+     SeqID1   101 .  T   C   0.25 .      DP=14;TYPE=snp GT:DP  0/1:5 1/1:5 0/0:4
+     SeqID1 11101 .  A   T   0.25 .      DP=18;TYPE=snp GT:DP  0/1:9 1/1:5 0/0:4
+     SeqID1 13101 .  T   G   0.25 .      DP=12;TYPE=snp GT:DP  0/1:8 .     0/0:4
+     SeqID1 16101 .  TA  C   0.25 .      DP=18;TYPE=del GT:DP  0/1:9 1/1:9 .
+     SeqID1 21101 .  T   C   0.25 .      DP=10;TYPE=snp GT:DP  0/1:5 1/1:2 0/0:3
+     SeqID1 24101 .  T   A   0.25 .      DP=19;TYPE=snp GT:DP  0/1:5 1/1:5 0/0:9
+     SeqID1 31101 .  T   C   0.25 .      DP=14;TYPE=snp GT:DP  0/1:5 1/1:5 0/0:4
+     SeqID2 10106 .  G   A   0.25 .      DP=16;TYPE=snp GT:DP  0/1:8 .     0/0:6
+
+     Note: If the VCF files does not have contig=<ID=,length=> lines, 
+           a size index file (-i) with SeqID\tSeqLength will need to be 
+           supplied.
+
+     Additionally specific genotypes (GT) can be choosen with -g option
+
+     With a running command: "Vcf2CountingBins -v test.vcf" will produce
+     #SeqID  Box   A1 A2 A3
+     SeqID1      1  1  1  1  
+     SeqID1  10001  3  2  2
+     SeqID1  20001  2  2  2
+     SeqID1  30001  1  1  1
+     SeqID1  40001  0  0  0
+     SeqID2      1  0  0  0
+     SeqID2  10001  1  0  1
+
+     The script can be run filtering variants by type (-t)
+     "Vcf2CountingBins -v test.vcf -t snp"
+     #SeqID  Box   A1 A2 A3
+     SeqID1      1  1  1  1  
+     SeqID1  10001  2  1  2
+     SeqID1  20001  2  2  2
+     SeqID1  30001  1  1  1
+     SeqID1  40001  0  0  0
+     SeqID2      1  0  0  0
+     SeqID2  10001  1  0  1
+ 
+     Note1: Multiple types can be used separated by comma.
+     Note2: Valid types are: snp, del, ins, mnp and complex.
+
+     And by general coverage (DP tag in FORMAT) (-c) 
+     "Vcf2CountingBins -v test.vcf -c 15"
+     #SeqID  Box   A1 A2 A3
+     SeqID1      1  0  0  0  
+     SeqID1  10001  2  2  1
+     SeqID1  20001  1  1  1
+     SeqID1  30001  0  0  0
+     SeqID1  40001  0  0  0
+     SeqID2      1  0  0  0
+     SeqID2  10001  1  0  1
+
+
+    Usage:
+
+      Vcf2CountingBins -v <vcf> -o <output> [-b <bin_size>] [-c <min_coverage>] 
+                  [-t <type>] [-m <min_seqlength>] [-g <genotype_filter>] 
+  
+    Flags:
+
+      -v <vcf_file>               VCF file (mandatory)
+      -o <output>                 Filename for the output (mandatory)
+      -i <reference_size_index>   File with reference SeqID\tSeqLen (optional)
+      -b <bin_size>               bin size (default 10,000 bp)
+      -c <min_coverage>           minimum coverage to count a the variant (0)
+      -t <variant_type>           count only the variant type -t <type> (e. snp)
+      -g <select_form>            select specific genotype forms (e.g. 0/1)
+      -m <filter_min_seqlength>   min. sequence length to create a bin (def. 0)
+      -h <help>                   print the help
+
+EOF
+exit (1);
+}
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = strftime("%a %b %e %H:%M:%S %Y", localtime);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
