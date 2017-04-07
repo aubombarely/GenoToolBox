@@ -199,7 +199,7 @@ print STDERR "\tOutput basename:\t$outbase\n";
 
 my $repnovo_conf = $opt_r ||
     die("\nINPUT ARG. ERROR: -r <REPdenovo_config> arg. was not supplied.\n\n");
-print STDERR "\tREPdenovo configuration file:\t$repdenovo_conf\n";
+print STDERR "\tREPdenovo configuration file:\t$repnovo_conf\n";
 
 ## Define the fields from the REPdenovo configuration file, it will later on
 my @repnovo_fields = (
@@ -244,7 +244,7 @@ my %repmask_permarg = (
 my @repmask_args = ();
 if ($opt_m) {
     
-    foreach my $repmask_arg (split(\,\, $opt_m)) {
+    foreach my $repmask_arg (split(/,/, $opt_m)) {
 
 	my @pairs = split(/=/, $repmask_arg); 
 	unless ($repmask_permarg{$pairs[0]}) {
@@ -252,15 +252,15 @@ if ($opt_m) {
 	    print STDERR "\n\tWARNING: $pairs[0] is not a RepeatMasker ";
 	    print STDERR "argument. Ignoring argument.\n";
 	}
-	else () {
+	else {
 	
 	    push(@repmask_args, join(" ", @pairs));
 	}
     } 
 }
-my $count_repmask_args = scalar(@remask_args); 
+my $count_repmask_args = scalar(@repmask_args); 
 print STDERR "\tInput RepeatMasker arguments:\n";
-foreach my $repmk_arg (@remask_args) {
+foreach my $repmk_arg (@repmask_args) {
     print STDERR "\t\tArgument:\t$repmk_arg\n";
 }
 
@@ -361,15 +361,15 @@ sub help {
       The following programs have to be in the PATH or be set up with 
      enviromental variables.
 
-      - REPdenovo ($REPDENOVO_PATH) (https://github.com/Reedwarbler/REPdenovo).
-      - Repeatmasker ($REPMASKER_PATH) (http://www.repeatmasker.org/).
-      - BWA ($BWA_PATH) (http://bio-bwa.sourceforge.net/).
-      - Samtools ($SAMTOOLS_PATH) (http://samtools.sourceforge.net/).
-      - Jellyfish ($JELLYFISH_PATH) (http://www.cbcb.umd.edu/software).
-      - Velvet ($VELVET_PATH) (https://www.ebi.ac.uk/~zerbino/velvet/).
-      - TERefiner_1 ($REFINER_PATH) (included REPdenovo package).
-      - ContigsMerger ($CONTIGS_MERGER_PATH) (included REPdenovo package).  
-      - Fastq-stats ($FASTQSTATS_PATH) (https://github.com/ExpressionAnalysis/).
+      - REPdenovo (\$REPDENOVO_PATH) (https://github.com/Reedwarbler/REPdenovo).
+      - Repeatmasker (\$REPMASKER_PATH) (http://www.repeatmasker.org/).
+      - BWA (\$BWA_PATH) (http://bio-bwa.sourceforge.net/).
+      - Samtools (\$SAMTOOLS_PATH) (http://samtools.sourceforge.net/).
+      - Jellyfish (\$JELLYFISH_PATH) (http://www.cbcb.umd.edu/software).
+      - Velvet (\$VELVET_PATH) (https://www.ebi.ac.uk/~zerbino/velvet/).
+      - TERefiner_1 (\$REFINER_PATH) (included REPdenovo package).
+      - ContigsMerger (\$CONTIGS_MERGER_PATH) (included REPdenovo package).  
+      - Fastq-stats (\$FASTQSTATS_PATH) (https://github.com/ExpressionAnalysis).
 
      Additionally the program will need BioPerl and the requeriments of the
      mentioned programs (e.g. RMBlast for Repeatmasker).
