@@ -1,0 +1,2447 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GenomeRepProfiler
+ A pipeline to analyze repeats
+
+=cut
+
+our $version = '0.1.0';
+
+=head1 SYPNOSIS
+
+ OrganelleRef_PBA [-h]  -i <input_pacbio> -r <fasta_reference> -o <output_dir> 
+                  [-t <input_type>] [-b <blasr_arguments>] 
+                  [-s <sprai_ec_options>] [-c <sprai_pbsm_options>] 
+                  [-x <fraction_for_scaffolding>] [-l <sspace_long_options>]
+                  [-n <repeat_block_size>] [-m <coverage_ratio4repeats>]
+                  [-z <breaks_overlap>]
+                  [-C] [-V] [-v]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<input_pacbio>           input PacBio subreads (mandatory)
+
+=item -t
+
+B<input_type>             input type (fasta or fastq; default=fastq)
+
+=item -r
+
+B<fasta_reference>        organelle reference genome, fasta format (mandatory)
+
+=item -o
+
+B<output_dir>             output directory (mandatory)
+
+=item -b
+
+B<blasr_arguments>        pass the blasr arguments as '-arg1=val1,-arg2=val2'
+
+=item -s
+
+B<sprai_ec_options>       passing sprai ec options as 'opt1=val1,opt2=val2' 
+
+=item -c
+
+B<sprai_pbasm_options>    passing sprai pbasm options as 'opt1=val1,opt2=val2' 
+
+=item -x
+
+B<complete_fraction>      fraction that decide for a new scaffolding (def. 1.0)
+
+=item -l
+
+B<sspace_long_options>    passing the SSPACE-Long options as 'opt1=val1...'
+
+=item -n
+
+B<repeat_block_size>      size of the block to detect repeats by cov (def. 1000)
+
+=item -m
+
+B<coverage_ratio4repeats> coverage ratio to define repetitive region (def. 1.6)
+
+=item -z
+
+B<breaks_overlap>         overlap produced during repeats breaks (default 0)
+
+=item -C
+
+B<check_completeness>     check completeness after the circularation check
+
+=item -V
+
+B<be_verbose>             be verbose and print the parsing status.
+
+=item -v
+
+B<version>                print version
+
+=item -h
+
+B<help>                   print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+ This program assembles the PacBio reads into a organelle fasta sequence. 
+
+ Fasta (-t fasta) and Fastq (-t fastq, default) input can be used.
+
+ It works in several steps:
+ 1- First mapping round of the PacBio reads with the organelle reference.
+
+ 2- First assembly round of the mapped reads using Sprai.
+    + Evaluate the assembly, if longest contig size >= reference size 
+      it will move to resolve the repeat (4). Otherwise, it will try to
+      improve the assembly using SSPACE-Long and the whole dataset (3).
+    + The completeness will be controled by -x <completeness_fraction> 
+      By default 1.0 is used.  
+ 
+ 3- Rescaffolding of the contigs produced by Sprai with SSPACE-Long.
+
+ 4- Check circularity and origin, if both are positive it will evaluate
+    completeness (-C), and finish the script if it is complete (>98% coverage)
+
+ 5- First mapping round with the assembly to find repetitive regions.
+
+ 6- Repetitive region break based in the coverage and a self blast
+
+ 7- Second assembly round with the repetitive region.
+
+ This program uses three different external programs:
+ a- BlasR (for mapping).
+ b- samtools (to manipulate sam).
+ c- Blast, Sprai and WGS-Assembler (for assembly).
+ d- SSPACE-Long for rescaffolding.
+ e- Bedtools to calculate coverage    
+
+ Optionally it can use seqtk to speed up the Fastq to Fasta conversion
+ and the Fastq read selection.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (aurebg@vt.edu).
+
+=cut
+
+=head1 METHODS
+
+ OrganelleRef_PBA
+
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use File::Spec;
+use File::Basename;
+use File::Copy;
+use File::Path qw(make_path remove_tree);
+use IPC::Cmd qw[can_run run];
+
+use Bio::SeqIO;
+use Bio::Tools::Run::StandAloneBlastPlus;
+
+use Math::BigFloat;
+
+our ($opt_i, $opt_t, $opt_o, $opt_r, $opt_b, $opt_s, $opt_c, $opt_x, $opt_l, 
+     $opt_n, $opt_m, $opt_z, $opt_C, $opt_V, $opt_v, $opt_h);
+getopts("i:t:o:r:b:s:c:x:l:n:m:z:CVvh");
+if (!$opt_i && !$opt_t && !$opt_o && !$opt_r && !$opt_b && !$opt_s && !$opt_x
+    && !$opt_l && !$opt_c && !$opt_n && !$opt_m && !$opt_z && !$opt_C && 
+    !$opt_V && !$opt_v && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+elsif ($opt_v) {
+    print STDERR "\nOrganelleRef_PBA version:$version\n";
+    print STDERR "Developed at the Bombarely Laboratory (2015-10-01)\n\n";
+    exit(1);
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## OrganelleRef_PBA Starts ($date) ##\n";
+print STDERR "############################################################\n\n";
+
+## Define a variable to keep the stats;
+
+my %gstats = ();
+
+print_header("0) Checking arguments");
+
+##############################################################################
+## CHECK ARGUMENTS
+##############################################################################
+
+## Get the arguments and check them
+
+my $pbin = $opt_i || 
+    die("\nINPUT ARG. ERROR: -i <pacbio_input> argument was not supplied.\n\n");
+
+print STDERR "\tInput PacBio reads file: $pbin\n";
+
+## The script should be able to use Fasta and Fastq
+## If Fasta is used, we'll need to create a cheat Fastq file for Sprai
+## If Fastq is used, we'll need to get the Fasta for BlasR
+## By default it will use the Fastq option, but it should be able also
+## to use Fasta. This will be controled by -t <input_type> default 'fastq'
+
+my $intype = 'fastq';
+my %perm_intypes = (
+    'fastq' => 1,
+    'fasta' => 1
+    );
+if ($opt_t) {
+
+    unless (exists $perm_intypes{$opt_t}) {
+    
+	die("\nERROR: -t <input_type> permited values are fasta or fasta.\n");
+    }
+    else {
+    
+	$intype = $opt_t;
+    }
+}
+print STDERR "\tInput type: $intype\n";
+
+unless (-s $pbin) {
+
+    die("\nERROR: Input PacBio reads does not exist.\n\n");
+}
+
+my $outdir = $opt_o ||
+    die("\nINPUT ARG. ERROR: -o <output_dir> argument was not supplied.\n\n");
+
+print STDERR "\tOutput directory: $outdir\n";
+
+unless (-d $outdir) {
+
+    die("\nERROR: Out directory does not exist. Please create it.\n\n");
+}
+    
+my $orgref = $opt_r ||
+    die("\nINPUT ARG. ERROR: -r <fasta_ref> argument was not supplied.\n\n"); 
+
+print STDERR "\tOrganelle reference fasta file: $orgref\n";
+
+my $refsize;
+unless (-s $orgref) {
+
+    die("ERROR: Organelle reference fasta files does not exist.\n\n");
+}
+else {
+
+    ## It will get the size and use for est_size
+    ## Also, produce a warning if more than one sequence is in the ref file
+
+    my $refc = 0;
+
+    my $ref_seqio = Bio::SeqIO->new( -file => $orgref, -type => 'fasta' );
+    while( my $refseq = $ref_seqio->next_seq() ) {
+    
+	my $refid = $refseq->id();
+	my $ref_l = $refseq->length();
+	$refsize = $ref_l;
+	$refc++;
+    }
+
+    if ($refc > 1) {
+    
+	warn("\nWARNING: Reference file has more than one sequence\n");
+    }
+
+    print STDERR "\t\tOrganelle reference size: $refsize bp\n";
+    $gstats{'00_reference_size'} = $refsize;
+}
+
+my $repeat_blocksize = 1000;
+if ($opt_n) {
+
+    if ($opt_n !~ m/^\d+$/) {
+    
+	die("ERROR: -n <repeatblock_size> is a non-numeric argument.\n");
+    }
+    else {
+	
+	$repeat_blocksize = $opt_n;
+    }
+}
+
+print STDERR "\t\tRepeat block size coverage detection: $repeat_blocksize\n";
+
+my $hlratio = 1.6;
+if ($opt_m) {
+
+    if ($opt_m !~ m/^d+\.?\d*$/) {
+    
+	die("ERROR: -m <coverage_ratio_for_repeats> is not number.\n");
+    } 
+    else {
+    
+	$hlratio = $opt_m;
+    }
+}
+
+print STDERR "\t\tCoverage ratio to define repeatitive region: $hlratio\n";
+
+## Check completeness fraction 
+
+my $asmfrc = "1.0";
+if ($opt_x) {
+
+    unless ($opt_x =~ m/\d+\.?\d?/) {
+    
+	die("ERROR: -x <assembly_completeness_fraction> isnt numeric.\n");
+    }
+    else {
+    
+	$asmfrc = $opt_x;
+    }
+}
+
+print STDERR "\tCompleteness fraction: $asmfrc\n";
+
+my $break_ovl = 0;
+if ($opt_z) {
+
+    unless ($opt_z =~ m/\d+\.?\d?/) {
+    
+	die("ERROR: -z <breaks_overlap> isnt numeric.\n");
+    }
+    else {
+    
+	$break_ovl = $opt_z;
+    }
+}
+
+print STDERR "\tBreaks overlap: $break_ovl\n";
+
+## Process the passing options
+
+## It will process the BlasR options below
+if ($opt_b) {
+
+    print STDERR "\tPassing BlasR args:\n\t\t$opt_b\n";
+}
+
+my %sprai_ec = ();
+if ($opt_s) {
+
+    print STDERR "\tPassing Sprai ec options:\n\t\t$opt_s\n";
+    
+    ## Options is a -s and then add extra options
+
+    my @ec_list = split(/,/, $opt_s);
+    foreach my $ec (@ec_list) {
+    
+	if ($ec =~ m/^(.+)=(.+)$/) {
+	    $sprai_ec{$1} = $2;
+	}
+    }
+}
+
+my %sprai_pbasm = ();
+if ($opt_c) {
+
+    print STDERR "\tPassing Sprai (CA) pbasm options:\n\t\t$opt_c\n";
+    
+    my @pbasm_list = split(/,/, $opt_c);
+    foreach my $pbasm (@pbasm_list) {
+	
+	if ($pbasm =~ m/^(.+)=(.+)$/) {
+	    $sprai_pbasm{$1} = $2;
+	}
+    }
+}
+
+if ($opt_l) {
+
+    print STDERR "\tPassing SSPACE-Long options:\n\t\t$opt_l\n";
+}
+
+print STDERR "\n";
+
+## Check the executables
+
+my %exec_list = (
+    BLASR_PATH      => ['blasr'],
+    SAMTOOLS_PATH   => ['samtools'],
+    SPRAI_PATH      => ['ezez_vx1.pl', 'ezez4qsub_vx1.pl', 'bfmt72s', 
+			'm52bfmt7', 'myrealigner', 'nss2v_v3', 'fa2fq.pl',
+                        'check_circularity.pl'],
+    BLAST_PATH      => ['blastn', 'makeblastdb'],
+    CA_PATH         => ['runCA', 'pacBioToCA', 'PBcR'],
+    SSPACELONG_PATH => ['SSPACE-LongRead.pl'],
+    BEDTOOLS_PATH   => ['bedtools']
+    ); 
+
+## Note: When you install SSPACE-LongRead.pl has the wrong interpreter
+##       it is used with perl.
+
+my %exepath = ();
+
+foreach my $exec_key (sort keys %exec_list) {
+
+    my @execitems = @{$exec_list{$exec_key}};
+    foreach my $e_item (@execitems) {
+
+	if (exists $ENV{$exec_key}) {
+    
+	    print STDERR "\t$exec_key PATH defined for $e_item executable\n";
+	    $exepath{$e_item} = File::Spec->catfile($ENV{$exec_key}, $e_item);
+	}
+	else {
+    
+	    my $exe_path = can_run($e_item);
+	    if ($exe_path) {
+		
+		$exepath{$e_item} = $exe_path;
+		print STDERR "\t$e_item is available in the PATH ($exe_path)\n";
+	    }
+	    else {
+		
+		print STDERR "\nERROR: $e_item executable ($exec_key package)";
+		die(" is not accessible.\n");
+	    }	   
+	}	
+    }
+}
+
+
+## Get the permited options
+
+my $blasr_argsline = $opt_b;
+my %blasr_args = ();
+
+## There are some options that should not be used because it will 
+## produce problems downstream to process the output
+
+my %blasr_ban = (
+    '-sam'    => 1,
+    '-m'      => 1,
+    '-header' => 1,
+    );
+
+if ($blasr_argsline) {
+
+    my $blasr_h = "$exepath{blasr} -h ";
+    $blasr_h .= "| sed -r 's/^\\s+//' | grep '^-' | sed -r 's/\\s+.+//'";
+    my @blasr_h_run = run( command => $blasr_h );
+
+    my %perm_blasr = ();
+    foreach my $blasr_arg (split(/\n/, $blasr_h_run[3]->[0])) {
+		       
+	$perm_blasr{$blasr_arg} = 1;
+    }
+
+    foreach my $b_argline (split(/,/, $blasr_argsline)) {
+    
+	if ($b_argline =~ m/^(-\w+)=?(\w*)$/) {
+	
+	    my $b_arg = $1;
+	    my $b_val = $2;
+	    unless (exists $perm_blasr{$b_arg}) {
+	    
+		die("\nBLASR OPTION ERROR: $b_arg is not BlasR option.\n");
+	    }
+	    else {
+	    
+		if (exists $blasr_ban{$b_arg}) {
+	
+		    warn("\nWARNING: BlasR argument $b_arg can not be used.\n");
+		}
+		else {
+
+		    $blasr_args{$b_arg} = $b_val;
+		}
+	    }
+	}
+    }
+}
+
+## Get the permitted options for $opt_l
+
+my $sspace_argsline = $opt_l;
+my %sspace_args = ();
+
+## There are some options that should not be used because it will 
+## produce problems downstream to process the output
+
+my %sspace_ban = (
+    '-c' => 1,
+    '-p' => 1,
+    '-b' => 1,
+    '-s' => 1
+    );
+
+if ($sspace_argsline) {
+
+    my $sspace_h = "perl $exepath{'SSPACE-LongRead.pl'} 2>&1 "; 
+    ## Printed as STDERR
+    
+    $sspace_h .= "| grep '^-' | sed -r 's/\\s+.+//'";
+    my @sspace_h_run = run( command => $sspace_h );
+
+    my %perm_sspace = ();
+    foreach my $sspace_arg (split(/\n/, $sspace_h_run[3]->[0])) {
+		       
+	$perm_sspace{$sspace_arg} = 1;
+    }
+
+    foreach my $l_argline (split(/,/, $sspace_argsline)) {
+    
+	if ($l_argline =~ m/^(-\w+)=?(\w*)$/) {
+	
+	    my $l_arg = $1;
+	    my $l_val = $2;
+	    unless (exists $perm_sspace{$l_arg}) {
+	    
+		die("\nSSPACE OPTION ERROR: $l_arg isnt SSPACE-Long option.\n");
+	    }
+	    else {
+	    
+		if (exists $sspace_ban{$l_arg}) {
+	
+		    warn("\nWARNING: SSPACE arg. $l_arg can not be used.\n");
+		}
+		else {
+
+		    $sspace_args{$l_arg} = $l_val;
+		}
+	    }
+	}
+    }
+}
+
+
+
+##############################################################################
+## Reduce the complexity by mapping
+##############################################################################
+
+
+## First run the mapping
+
+print_header("1) Running BlasR");
+
+print STDERR "\t1.1- Converting Fastq to Fasta.\n";
+
+my $blasr_in;
+my $seqcounter = 0;
+
+## Check if seqtk is installed to run some steps faster
+
+my $fastool_path = can_run('seqtk');
+
+if ($intype eq 'fastq') {
+
+    $blasr_in = File::Spec->catfile($outdir, "01_1_BlasR_in.fasta");    
+    
+    if ($fastool_path) {
+
+	print STDERR "\t      Using Seqtk to convert Fastq to Fasta.\n";
+	my $fastool_cmd = "$fastool_path seq -A $pbin > $blasr_in";
+	my @fastool01run = run( command => $fastool_cmd, verbose => $opt_V );
+    }
+    else {
+
+	print STDERR "\t     Using Bioperl to convert Fastq to Fasta.\n";
+	print STDERR "\t     (Note: it can take a while)\n";
+	my $seqio1_in = Bio::SeqIO->new(-file => $pbin, -format => 'fastq');
+	
+	my $seqio1_out = Bio::SeqIO->new(
+	    -file   => ">$blasr_in", 
+	    -format => 'fasta'
+	    );
+
+	while( my $seqobj1 = $seqio1_in->next_seq() ) {
+
+	    $seqio1_out->write_seq($seqobj1);
+	    $seqcounter++;
+	}
+    }
+}
+else {
+
+    $blasr_in = $pbin;
+    print STDERR "\t      Input type is fasta. Skipping step.\n";
+}
+
+## It will still count the sequences
+
+my $count_cmd = "grep -c '>' $blasr_in";
+my @count01run = run( command => $count_cmd, verbose => $opt_V );
+my $seqcount = $count01run[3]->[0];
+chomp($seqcount);
+
+my $seqsize_cmd = "grep -v '>' $blasr_in | wc -m";
+my @seqsize01run = run( command => $seqsize_cmd, verbose => $opt_V );
+my $seqsize = $seqsize01run[3]->[0];
+chomp($seqsize);
+
+$seqcounter = $seqcount;
+
+## It will overwrite the out
+
+my $blasr_out = File::Spec->catfile($outdir, "01_2_BlasR_out.txt"); 
+if (exists $blasr_args{-out}) {
+
+    warn("WARNING: BlasR out will be rewrite to $blasr_out\n");
+}
+else {
+
+    $blasr_args{'-out'} = $blasr_out;
+}
+
+## Build the $cmd line
+
+print STDERR "\t     Input PacBio read file contains $seqcounter reads\n\n";
+$gstats{'00_input_reads_count'} = $seqcounter;
+$gstats{'00_input_reads_size'} = $seqsize;
+
+my @blasr_cmd = ($exepath{'blasr'}, $blasr_in, $orgref);
+foreach my $blasr_k (sort keys %blasr_args) {
+
+    push @blasr_cmd, $blasr_k;
+    if (defined $blasr_args{$blasr_k}) {
+    
+	push @blasr_cmd, $blasr_args{$blasr_k};
+    }
+}
+
+print STDERR "\t1.2- Running BlasR mapping.\n\n";
+
+my @blasr01run = run( command => \@blasr_cmd, verbose => $opt_V );
+
+## BlasR has produced the output, so the program will get them
+## One simplier option could be to get a sam file and convert it
+## into a fasta (it will be faster because it won't need to re-read
+## the file again), but Sprai uses fastq files, so it will parse the
+## regular BlasR output and use it to get the sequences from the
+## fastq file.
+
+## Check that there is a BlasR out
+
+unless (-s $blasr_out) {
+
+    my $msg = "No BlasR output was created.";
+    $msg .= "Please check the input and the running parameters.\n";
+    die($msg);
+}
+
+print STDERR "\t1.3- Processing the BlasR output.\n";
+
+my $selids_file = File::Spec->catfile($outdir, "01_3_BlasR_hit_ids.txt");
+
+my $l = 0;
+my %selected_ids = ();
+open(my $blasrout_fh, '<', $blasr_out);
+open(my $blasrhit_fh, '>', $selids_file);
+
+my $total_len = 0;
+while(<$blasrout_fh>) {
+
+    chomp($_);
+    my @line = split(/\s+/, $_);
+
+    ## BlasR output add an extra /0_\d+ at the end of the line
+   
+    my @id = split(/\//, $line[0]);
+    my $len = $line[11];
+    
+    if (scalar(@id) > 1) {
+	pop(@id);
+    }
+    my $id = join("/", @id); 
+
+    $selected_ids{$id} = $len;
+    $l++;
+    $total_len += $len;
+    print $blasrhit_fh "$id\n";
+} 
+
+print STDERR "\t      $l reads ($total_len bp) will be selected\n";
+$gstats{'01_mapped_reads'} = $l;
+$gstats{'01_mapped_size'} = $total_len;
+
+## It will also produce the estimated size
+my $est_size = $sprai_ec{estimated_genome_size} || $refsize; 
+## Chloroplast by default
+my $est_depth_obj = Math::BigFloat->new($total_len/$est_size);
+my $est_depth = $est_depth_obj->bfround(0);
+print STDERR "\t      Estimated depth (reference based): $est_depth X.\n\n";
+$gstats{'01_estimated_depth'} = $est_depth;
+
+print STDERR "\t1.4- Selecting reads from the $intype file\n";
+
+## For sequence selection: 
+##  + seqtk doesn't care about input type
+##  + Bioperl will use type=$intype
+
+my $sprai_in = File::Spec->catfile($outdir, "02_0_Sprai_in.fastq"); 
+
+if ($intype eq 'fasta') {
+
+    $sprai_in = File::Spec->catfile($outdir, "02_0_Sprai_in.fasta"); 
+} 
+
+if ($fastool_path) {
+
+    print STDERR "\t      Using Seqtk to select reads from $intype.\n";
+    my $fastool_cmd = "$fastool_path subseq $pbin $selids_file > $sprai_in";
+    my @fastool01run = run( command => $fastool_cmd, verbose => $opt_V );
+    
+}
+else {
+
+    print STDERR "\t     Using Bioperl to select reads from $intype.\n";
+    print STDERR "\t     (Note: it can take a while)\n";
+
+    my $seqio2_in = Bio::SeqIO->new(-file => $pbin, -format => $intype);
+    my $seqio2_out = Bio::SeqIO->new(-file => ">$sprai_in", -format => $intype);
+
+    while( my $seqobj2 = $seqio2_in->next_seq() ) {
+
+	my $seqid = $seqobj2->id();
+	my $seqlen = $seqobj2->length();
+	if (exists $selected_ids{$seqid}) {
+
+	    $seqio2_out->write_seq($seqobj2);
+	}
+    }
+}
+
+## Now at this point it will check the intype. Sprai needs fastq files
+## so, if the infile is fasta it will need to check the quality
+## for that it will use the sprai script fa2fq.pl from Sprai.
+
+if ($intype eq 'fasta') {
+
+    print STDERR "\t1.5- Changing format from fasta to fastq for Sprai\n";
+
+    my $sprai_alt = File::Spec->catfile($outdir, "02_0_Sprai_in.fastq"); 
+    my $fa2fq_cmd = "$exepath{'fa2fq.pl'} $sprai_in > $sprai_alt";
+
+    my @fa2fq01run = run( command => $fa2fq_cmd, verbose => $opt_V );
+
+    ## Overwrite the $sprai_in with the new name
+    $sprai_in = $sprai_alt;
+}
+
+
+##############################################################################
+## Assembly
+##############################################################################
+
+
+print_header("2) Running assembly (Sprai)");
+
+## Sprai will create a file with result_ date +%Y%m%d_%H%M%S
+## to store the run.
+
+my @date01run = run( command => "date +%Y%m%d_%H%M%S", verbose => $opt_V );
+my $dateline = $date01run[3]->[0];
+chomp($dateline);
+
+my $sprai_outdir = "result_$dateline"; 
+mkdir($sprai_outdir);
+
+## It will need two files
+##  + pbasm.spec
+##  + ec.spec
+## and then it will run the program as ezez_vx1.pl ec.spec pbasm.ec
+
+print STDERR "\t2.1- Creating the ec.spec file for Sprai.\n";
+
+## First, build the ec.spec file
+my $sprai_ec =  File::Spec->catfile($outdir, "02_1_Sprai_ec.spec"); 
+
+## Overwrite the following options
+$sprai_ec{estimated_depth} = $est_depth;
+$sprai_ec{input_for_database} = $sprai_in;
+$sprai_ec{estimated_genome_size} = $est_size * 2; 
+
+create_sprai_ec_file($sprai_ec, \%exepath, \%sprai_ec);
+
+## Second, build the pbasm.spec file
+
+print STDERR "\n\t2.2- Creating the pbasm.spec file for Sprai.\n";
+
+my $sprai_pb =  File::Spec->catfile($outdir, "02_1_Sprai_pbasm.spec"); 
+
+create_ca_pbasm_file($sprai_pb, \%sprai_pbasm);
+
+my $sprai_log =  File::Spec->catfile($outdir, "02_1_Sprai_log.txt");
+
+## Build the command
+
+print STDERR "\n\t2.3- Running Sprai.\n";
+
+my $spraicmd = "$exepath{'ezez_vx1.pl'} $sprai_ec $sprai_pb -now $dateline ";
+$spraicmd .= "> $sprai_log 2>&1";
+my @sprai01run = run( command => $spraicmd, verbose => $opt_V );
+
+## Once the program is done, it will move the outdir
+
+my $sprai_outdir2 = File::Spec->catfile($outdir, "02_1_".$sprai_outdir);
+move($sprai_outdir, $sprai_outdir2);
+
+print STDERR "\n\t2.3- Analyzing the results\n";
+
+my $sprai_finaldir = File::Spec->catfile($sprai_outdir2, "CA", "9-terminator");
+
+## Die if doesn't produce an output
+unless (-d $sprai_finaldir) {
+
+    die("ERROR: Sprai/CA didnt produced an output 9-terminator. Check log.\n");
+}
+
+
+opendir(my $sprai_dh, $sprai_finaldir); 
+
+my $sprai_scf;
+while( my $file = readdir($sprai_dh)) {
+
+    if ($file =~ m/.scf.fasta$/) {
+    
+	$sprai_scf = $file;
+    }
+}
+
+my $sprai_scf_fp = File::Spec->catfile($sprai_finaldir, $sprai_scf);
+print STDERR "\tScaffold output file: $sprai_scf_fp\n";
+
+my $assembly01 = File::Spec->catfile($outdir,"02_3_organelle_assembly01.fasta");
+
+copy($sprai_scf_fp, $assembly01);
+
+## Get the stats
+
+my @seqstats01 = get_seqstats($assembly01, $refsize);
+print_seqstats("Assembly Step 1 Results", \@seqstats01);
+$gstats{'02_seqtotal_count'} = $seqstats01[0];
+$gstats{'02_seqtotal_length'} = $seqstats01[1];
+$gstats{'02_seqtotal_gaplength'} = $seqstats01[6];
+$gstats{'02_seqtotal_refratio'} = $seqstats01[4];
+$gstats{'02_seqlongest_length'} = $seqstats01[2];
+$gstats{'02_seqlongest_gaplength'} = $seqstats01[7];
+$gstats{'02_seqlongest_refratio'} = $seqstats01[5];
+$gstats{'02_seqtotal_refdif'} = $seqstats01[8];
+
+## Check that it has an output
+
+if ($seqstats01[0] == 0) {
+
+    die("\n\nNo contigs was produced during the assembly. Stop program.\n\n");
+}
+
+
+###############################################################################
+## Post-Assembly
+###############################################################################
+##
+## At this point we have some options:
+## 1- $est_asm02 >= $refsize; Probably the assembly is complete, one sequence.
+##    Potential problems: Repeat missassembly.
+##    Action: Repeat resolving
+##
+## 2- $est_asm02 <= $refsize but $est_asm01 >= $refsize
+##    Probably the assembly is complete, but fragmented in different sequences
+##    Action: Rescaffold using SSPACE-Long
+##    Then goes to option 1
+##
+## 3- Check circularity to close the genome
+##
+## The fraction that decide if it goes to 2 or 1 should be changeable by the
+## user
+
+print_header("3) Running scaffolding (SSPACE)");
+
+## For the rescaffolding with be faster to run a separate step of mapping
+## with BlasR
+
+my $assembly02;
+if ($seqstats01[5] <= $asmfrc) {
+
+    ## It goes through SSPACE-Long
+    ## The SSPACE-Long options will be 
+
+    print STDERR "\t3.1- Running SSPACE-Long\n";
+
+    my $sspace_out = File::Spec->catfile($outdir, "03_1_sspacelong_out");
+
+    run_sspace_long(\%exepath, \%blasr_args, \%sspace_args, 
+		    $blasr_in, $assembly01, $sspace_out);
+
+    ## Get the results
+    my $preassembly02 = File::Spec->catfile($sspace_out, "scaffolds.fasta");
+    $assembly02 = File::Spec->catfile($outdir,"03_1_organelle_assembly.fasta");
+
+    ## Copy to outside dir
+    copy($preassembly02, $assembly02);
+}
+else {
+
+    print STDERR "\t3.1- Skipping rescaffolding\n";
+    print STDERR "\t     Estimated assembly size fraction ";
+    print STDERR "($seqstats01[5] > $asmfrc)\n";
+    $assembly02 = $assembly01;
+}
+
+my @seqstats02 = get_seqstats($assembly02, $refsize);
+print_seqstats("Assembly Step 2 Results", \@seqstats02);
+$gstats{'03_seqtotal_count'} = $seqstats02[0];
+$gstats{'03_seqtotal_length'} = $seqstats02[1];
+$gstats{'03_seqtotal_gaplength'} = $seqstats02[6];
+$gstats{'03_seqtotal_refratio'} = $seqstats02[4];
+$gstats{'03_seqlongest_length'} = $seqstats02[2];
+$gstats{'03_seqlongest_gaplength'} = $seqstats02[7];
+$gstats{'03_seqlongest_refratio'} = $seqstats02[5];
+$gstats{'03_seqtotal_refdif'} = $seqstats02[8];
+
+## At this point will take the longest sequence
+
+print STDERR "\t3.2- Selecting the longest sequence ($seqstats02[3])\n";
+
+my $asb02io = Bio::SeqIO->new( -file => $assembly02, -type => 'fasta' );
+my $assembly03 = File::Spec->catfile($outdir,"03_2_organelle_assembly.fasta");
+my $asb03io = Bio::SeqIO->new( -file => ">$assembly03", -type => 'fasta' );
+
+while( my $seqobj02 = $asb02io->next_seq() ) {
+
+    my $seqid02 = $seqobj02->id();
+    if ($seqid02 eq $seqstats02[3]) {
+    
+	$asb03io->write_seq($seqobj02);
+    }
+}
+
+##################################################################
+## Parameters to decide if the assembly is done
+## 1- Size of the longest contig compared with the reference 
+## 2- Circularity
+## 3- For chloroplast it should have LSR-IRa-SSR-IRb
+## Sometimes IR could be fragmented and the assembly will be:
+##  /IRb-LSR-IRa-SSR-IRb/
+##################################################################
+
+
+##################################################################
+## Check for circularity
+##################################################################
+## It will also orientate the genome based in the reference
+## 
+
+print_header("4) Evaluating repetitive regions");
+
+print STDERR "\t4.1- Searching an origin based in the reference\n";
+
+## To do it, it will blast the sequence to find a match 
+
+my $oblastout = File::Spec->catfile($outdir,"04_1_origin_blast.txt");
+my ($origin, $str) = find_origin($assembly03, $orgref, \%exepath, $oblastout); 
+
+my $it_has_origin = 0;
+
+if ($origin && $origin =~ m/^\d+$/) {
+
+    print STDERR "\t\tOrigin found at $origin\n\n";
+    $it_has_origin = 1;
+}
+else {
+    
+    print STDERR "\t\tNo Origin was found using reference.\n\n";
+}
+
+
+print STDERR "\t4.2- Checking circularity\n";
+
+## It will use the check circularity script;
+## It will produce the output as stdout, so it will redirect the
+## the output into a file
+
+my $temp_cc = File::Spec->catfile($outdir, "04_2_checkcirc_tempdir");
+my $checkcirc_out = File::Spec->catfile($outdir, "04_2_checkcirc_out.txt");
+my $checkcirc_cmd = "check_circularity.pl $assembly03 $temp_cc";
+$checkcirc_cmd .= " --min_overlap_len 100 --force > $checkcirc_out";
+my @checkcirc01run = run( command => $checkcirc_cmd, verbose => $opt_V );
+
+
+## By default define the assembly 04 as 03
+my $assembly04 = $assembly03;
+
+my $it_is_circular = 0;
+my $it_doesnt_have_Ns = 0;
+
+open my $checkcirc_fh, '<', $checkcirc_out;
+while(<$checkcirc_fh>) {
+
+    chomp($_);
+    ## It will break the line based in spaces
+    ## Two options
+    ## A- ID<space>linear
+    ## B- ID<space>circular<space>[i_start-i_end]<space>matches<space>
+    ##    [f_start-f_end]<space>with<space>Percentage%<space>identity
+    
+    my @circout = split(/\s+/, $_); 
+    
+    if ($circout[1] =~ m/circular/) {
+
+        my ($p_st, $p_en, $e_st, $e_en, $perc);
+	if ($circout[2] =~ m/^\[(\d+)\-(\d+)\]$/) {
+	
+	    $p_st = $1;
+	    $p_en = $2; 
+	}
+	if ($circout[4] =~ m/^\[(\d+)\-(\d+)\]$/) {
+	
+	    $e_st = $1;
+	    $e_en = $2; 
+	}
+	if ($circout[6] =~ m/^(.+)%$/) {
+	
+	    $perc = $1;
+	}
+
+	$it_is_circular = 1;
+
+        print STDERR "\tCircularity found: $p_st-$p_en matches ";
+	print STDERR "$e_st-$e_en ($perc %)\n";
+
+        ## With the circularity found, it will break the sequence and redo it
+	## based in the circularity and the origin
+	## 1    2                 3                          4   5
+	## XXXXXX-----------------O--------------------------XXXXX
+	
+        my $asb04io = Bio::SeqIO->new(-file => "$assembly03", -type => 'fasta');
+        $assembly04 = File::Spec->catfile($outdir,"04_2_assembly_nocirc.fasta");
+        my $asb05io = Bio::SeqIO->new(-file => ">$assembly04",-type => 'fasta');
+	
+	print STDERR "\tRemoving redundancy from circularity\n\n";
+
+        while (my $wseqobj = $asb04io->next_seq()) {
+
+	    ## First get the truncated sequence without the overlap
+	    ##
+	    ## 1    2                 3                         4   
+	    ## XXXXXX-----------------O--------------------------
+
+	    my $c_end = $e_st - 1;
+            my $subseq01 = $wseqobj->trunc(1, $c_end);
+            my $newid = $subseq01->id()."_1_".$c_end;
+            $subseq01->id($newid);
+
+	    ## Second, if it has an origin, set up
+
+	    if ($origin =~ m/^\d+$/) {
+	    
+		my $subseq02obj = $subseq01->trunc(1, $origin - 1);
+		my $end = $subseq01->length();
+		my $subseq03obj = $subseq01->trunc($origin, $end);
+		my $mergeseq = $subseq03obj->seq() . $subseq02obj->seq();
+
+		$newid =  $subseq01->id()."_NewOri_1_".$c_end;
+		my $newseqobj = Bio::PrimarySeq->new( 
+		    -seq => $mergeseq, -id => $newid );
+		
+		if ($str eq '-') {
+		    $newseqobj = $newseqobj->revcom();
+		}
+
+		## Before write it check if it has Ns
+
+		my $checkseq = $newseqobj->seq();
+		if ($checkseq !~ m/N/i) {
+		
+		    $it_doesnt_have_Ns = 1;
+		}
+
+		$asb05io->write_seq($newseqobj);
+	    }
+	    else {
+		
+		$asb05io->write_seq($subseq01);
+	    }
+	}
+    }
+    elsif ($checkcirc_out =~ m/linear/) {
+
+	print STDERR "\tNo circularity detected.\n\n";
+    }
+}
+
+my @seqstats03 = get_seqstats($assembly04, $refsize);
+print_seqstats("Assembly Step 3 Results", \@seqstats03);
+$gstats{'04_seqtotal_count'} = $seqstats03[0];
+$gstats{'04_seqtotal_length'} = $seqstats03[1];
+$gstats{'04_seqtotal_gaplength'} = $seqstats03[6];
+$gstats{'04_seqtotal_refratio'} = $seqstats03[4];
+$gstats{'04_seqlongest_length'} = $seqstats03[2];
+$gstats{'04_seqlongest_gaplength'} = $seqstats03[7];
+$gstats{'04_seqlongest_refratio'} = $seqstats03[5];
+$gstats{'04_seqtotal_refdif'} = $seqstats03[8];
+
+
+####################################################################
+## Evaluate completeness after circularity evaluation
+####################################################################
+##
+## It can happens that the reference is not complete so it will a 
+## option to evaluate the completeness of the assembly after the
+## removal of the circularity
+
+## Define a final assembly variable
+## This variable will be used with copy if the program detects that it is
+## the best assembly
+
+my $finalfile = File::Spec->catfile($outdir, "Organelle_final_assembly.fasta");
+
+my $endscript = 0;
+if ($opt_C) {
+
+    print STDERR "\n\tOption -C Enabled. Checking completeness.\n";
+
+    ## Requirements:
+    ## 1- Circularity was found
+    ## 2- Origin was found
+    ## 3- It doesnt has Ns
+
+    if ($it_is_circular == 1 && $it_has_origin == 1 && $it_doesnt_have_Ns == 1){
+
+	## 4- Coverage reference >= 98%
+	## Probably it is difficult to find a full match with far
+	## species if they are used as reference, but with close
+	## species (e.g. mus vs rattus) is possible to reach >97%
+	## so let's keep.
+
+	## Run a new Blast with the final assembly
+
+	my $fblastout = File::Spec->catfile($outdir,"04_3_checkfinalblast.txt");
+	my $mkblastdbcmd = "$exepath{'makeblastdb'} -in $orgref -dbtype nucl";
+	my @mkblastdb02run = run( command => $mkblastdbcmd, verbose => $opt_V );
+	
+	my $bl02cmd = "$exepath{'blastn'} -query $assembly04 -db $orgref ";
+	$bl02cmd .= "-out $fblastout ";
+	$bl02cmd .= "-outfmt '6 std qlen slen' ";
+	my @bl02run = run( command => $bl02cmd, verbose => $opt_V );
+
+	## More than one hit can be present, it will get the longest alignment
+
+	my ($qcov, $scov, $best_align_len) = (0, 0, 0); 
+
+	open my $oblast_fh, '<', $fblastout;
+	while(<$oblast_fh>) {
+		
+	    chomp($_);
+	    my @bl_fields = split(/\t/, $_);
+	    my $align_len = $bl_fields[3];
+	    my $qlen = $bl_fields[12];
+	    my $slen = $bl_fields[13];
+	    
+	    if ($align_len >= $best_align_len) {
+		$best_align_len = $align_len; 
+		$qcov = $align_len * 100 / $qlen;
+		$scov = $align_len * 100 / $slen;
+	    }
+	}
+	
+	if ($qcov >= 98 && $scov >= 98) {
+	    
+	    ## Accept that it is finished
+	    
+	    print STDERR "\n\tAssembly meets the requirements to be";
+	    print STDERR " considered finished (-C Enabled).\n\n";
+	    
+	    copy($assembly04, $finalfile);	   
+	    $endscript = 1;	    
+	}
+	else {
+	
+	    print STDERR "\tReference coverage criteria doesnt meet.\n";
+	}
+    }
+    else {
+    
+	print STDERR "\tCircularity/Origin/Ns criteria doesnt meet.\n";
+    }
+}
+
+
+####################################################################
+## Evaluate repetitive regions through mapping
+####################################################################
+
+if ($endscript == 0) {
+
+    print_header("5) Evaluating repetitive regions");
+
+    ## To evaluate the repetitive region it will map back the
+    ## reads and check the coverage.
+
+    my $blasr2out = File::Spec->catfile($outdir, "05_1_BlasR_out.sam"); 
+    $blasr_args{'-out'} = $blasr2out;
+
+
+    my @blasr2cmd = ($exepath{'blasr'}, $blasr_in, $assembly04);
+    foreach my $blasr_k (sort keys %blasr_args) {
+
+	push @blasr2cmd, $blasr_k;
+	if (defined $blasr_args{$blasr_k}) {
+	    
+	    push @blasr2cmd, $blasr_args{$blasr_k};
+	}
+    }
+
+    ## Additionally it will add --sam and the output
+
+    push @blasr2cmd, "-sam";
+
+    print STDERR "\t5.1- Running BlasR re-mapping.\n\n";
+
+    my @blasr02run = run( command => \@blasr2cmd, verbose => $opt_V );
+
+    ## Once the blast is done, it will process the file
+    ## 1- Sam to Bam
+    ## 2- Bam sort
+
+    my $bamout = File::Spec->catfile($outdir, "05_1_BlasR_out.bam");
+    my $samtools01cmd = "$exepath{samtools} view -F4 -Sb -o $bamout $blasr2out";
+
+    print STDERR "\t5.2- Running samtools view (Sam to Bam).\n\n";
+
+    my @sam01run = run( command => $samtools01cmd, verbose => $opt_V );
+
+    my $bamout_s = File::Spec->catfile($outdir, "05_2_BlasR_out");
+    my $samtools02cmd = "$exepath{samtools} sort $bamout $bamout_s";
+
+    print STDERR "\t5.3- Sorting bam file.\n\n";
+
+    my @sam02run = run( command => $samtools02cmd, verbose => $opt_V );
+
+    ## It will calculate the mapped reads
+    my $getmap01cmd = "$exepath{samtools} view -F4 -Sb -c $blasr2out";
+    my @getmap01run = run( command => $getmap01cmd, verbose => $opt_V );
+    my $getmap01count = $getmap01run[3]->[0];
+    chomp($getmap01count);
+    $gstats{'05_mapped_reads'} = $getmap01count;
+
+    ## Now it will calculate the coverage per position
+    ## This needs genome file such as <chromName><TAB><chromSize>
+
+    my $gemsize = File::Spec->catfile($outdir, "05_3_assembly_size.txt");
+    open my $gemfh, '>', $gemsize;
+    print $gemfh "$seqstats02[3]\t$seqstats02[2]\n";
+
+    ## The chloroplast repeat usually appears like
+    ## 1- They have twice the coverage of the single region
+    ## 2- They present an usually incomplete hit with a selfblast
+
+    ## First, check coverage
+
+    ## And then, run bedtools genome cov
+
+    print STDERR "\t5.4- Calculating coverage.\n\n";
+
+    my $bedexe = $exepath{bedtools};
+    my $bedgc01cmd = "$bedexe genomecov -d -ibam $bamout -g $gemsize";
+
+    ## It will redirect this into a file
+    my $gcfile01 = File::Spec->catfile($outdir, "05_4_assembly_coverage.bed");
+    $bedgc01cmd .= " > $gcfile01";
+
+    my @bedtools01run = run( command => $bedgc01cmd, verbose => $opt_V );
+
+    ## If everything is right the mapping will give two types of coverage
+    ## for a chloroplast 1x and 2x for the repeat
+    ##
+    ## --+     +----+                             +--
+    ##   |     |    |                             |
+    ##   | 1X  | 2x |          1X                 | 
+    ##   +-----+    +-----------------------------+
+    ##
+    ## For 1X and 2X will be an oscillation so to analyze this we will define
+    ## the region 1X as 1X +/- 0.5X (e.g: 10, 13, 7, 9, 12 ... will de defined
+    ## as 1X and 20, 18, 25 ... as 2X).
+
+
+    my $covstats_href = calculate_covblocks($gcfile01, $repeat_blocksize, 
+					    $hlratio);
+    my %covstats = %{$covstats_href};
+
+    ## It will print cov stats
+    print STDERR "\n\tMax. coverage:\t$covstats{c_max}\n";
+    print STDERR "\tMax. coverage position:\t$covstats{p_max}\n";
+    print STDERR "\tMin. coverage:\t$covstats{c_min}\n";
+    print STDERR "\tMin. coverage position:\t$covstats{p_min}\n";
+    print STDERR "\tTotal coverage sum:\t$covstats{total_cov}\n";
+    print STDERR "\tTotal length analyzed:\t$covstats{total_len}\n\n";
+    print STDERR "\tAverage coverage:\t$covstats{c_average}\n";
+    print STDERR "\tLower limit coverage:\t$covstats{lower_limit}\n";
+    print STDERR "\tUpper limit coverage:\t$covstats{upper_limit}\n\n";
+    $gstats{'05_coverage_max'} = $covstats{c_max};
+    $gstats{'05_coverage_min'} = $covstats{c_min};
+    $gstats{'05_coverage_mean'} = $covstats{c_average};
+    $gstats{'05_coverage_total'} = $covstats{total_cov};
+
+    print STDERR "\t5.5- Getting the breaking points\n";
+
+    ## Now it will get the sequence break points based in the blocks 
+    my $breakpoints_href = get_breakpoints($covstats{covdata});
+
+    ## If there is not breaking point (e.g. mitochondrial genome)
+    ## it doesn't need to go through this
+
+    my %breaks = %{$breakpoints_href};
+    my $n_breaks = scalar(keys %breaks) - 1;
+
+    print STDERR "\t$n_breaks breaking points have been detected\n\n";
+
+    if (scalar(keys %breaks) == 1) {
+
+	print STDERR "\n\tNo repeats breaking points detected.\n";
+
+	## Copy to final name
+	copy($assembly04, $finalfile);
+    }
+    else {
+
+        ## It will divide the reads in the different sections
+	## do a self blast to check the repeat
+	## remove the smaller repetitive fragment
+	## do the revcom
+	## and rescaffold the four fragments.
+
+	print STDERR "\t5.6.1- Breaking the assembly.\n";
+    
+	my $asb04io = Bio::SeqIO->new(-file => "$assembly04", -type => 'fasta');
+	my $assembly05 = File::Spec->catfile($outdir,
+					     "05_6_assembly03breaks.fasta");
+	my $asb05io = Bio::SeqIO->new(-file => ">$assembly05",-type => 'fasta');
+
+	## Additionally it will store the seqobjects into an array for
+	## further comparisons
+	my @subseqs = ();
+
+	## It should have just one sequence
+	my $c = 0;
+
+	while (my $wseqobj = $asb04io->next_seq()) {
+
+	    my $pid = $wseqobj->id();
+	    my $len = $wseqobj->length();
+	    foreach my $break (sort {$a <=> $b} keys %breaks) {
+    
+		my $st = $breaks{$break}->{start};
+		my $en = $breaks{$break}->{end};
+		my $minlim = $st - $break_ovl;
+		my $maxlim = $en + $break_ovl;
+
+		## Modify the coordinate based in break_ovl
+		if ($minlim < 1) {
+		
+		    $st = 1;
+		}
+		else {
+		
+		    $st = $st - $break_ovl;
+		}
+
+		if ($maxlim > $len) {
+		
+		    $en = $len;
+		}
+		else {
+		
+		    $en = $en + $break_ovl;
+		}
+		
+		print STDERR "\tGetting the subsequence $pid:$st..$en\n";
+		my $subseq = $wseqobj->trunc($st, $en);
+		my $newid = $subseq->id()."_".$st."_".$en;
+		$subseq->id($newid);
+		push @subseqs, $subseq;
+		
+		$asb05io->write_seq($subseq);
+		$c++;
+	    }
+	}
+
+	print STDERR "\t$assembly04 has been broken in $c subsequences.\n\n";
+	print STDERR "\t5.6.2- Comparing fragments.\n";
+
+	## It will compare the fragments using a self blast
+	## 1- Create the DB with makeblastdb
+	
+	my $mkbdb_exe = $exepath{'makeblastdb'};
+	my $mkblastdbcmd = "$mkbdb_exe -in $assembly05 -dbtype nucl";
+	my @mkblastdb01run = run( command => $mkblastdbcmd, verbose => $opt_V );
+
+	## 2- Now it will do the selfblast BlastN
+	my $blastexe = $exepath{'blastn'};
+	my $selfbl01cmd = "$blastexe -query $assembly05 -db $assembly05 ";
+	
+	## Create the outputname 
+	my $selfblastout = File::Spec->catfile($outdir,
+					       "05_6_frag_selfblast.txt");
+	$selfbl01cmd .= "-out $selfblastout ";
+	
+	## Format
+	$selfbl01cmd .= "-outfmt '6 std qlen slen' ";
+	
+	## Run the command
+	my @selfbl01run = run( command => $selfbl01cmd, verbose => $opt_V );
+	
+	## Process the output
+	## A repeat will be defined as a fragment of the sequence that 
+	## match with other sequence with %id > 90% and %seq_l > 90%
+
+	open my $sb_fh, '<', $selfblastout;
+	my %frag_repeat = ();
+
+	while(<$sb_fh>) {
+	    
+	    chomp($_);
+	    my @blast_fds = split(/\t/, $_);
+	    
+	    ## Ignore the selfblast
+	    if ($blast_fds[0] ne $blast_fds[1]) {
+	    
+		my $identity = $blast_fds[2];
+		my $coverage = $blast_fds[3] * 100 / $blast_fds[12];
+		my $strand = "+";
+		if ($blast_fds[9] > $blast_fds[10]) {
+		    
+		    $strand = "-";
+		}
+	    
+		if ($identity >= 90 && $coverage >= 90) {
+		
+		    $frag_repeat{$blast_fds[0]} = {
+			ide => $identity,
+			cov => $coverage,
+			str => $strand,
+			pai => $blast_fds[1]			    
+		    };
+		}	    
+	    }
+	}
+	
+	## Print message and select the reads
+	## Get also the pair
+	
+	my %getrev = ();
+	
+	if (scalar(keys(%frag_repeat)) > 0) {
+	
+	    print STDERR "\tRepeat found:\n";
+	    foreach my $repid (sort keys %frag_repeat) {
+		
+		my %rpstats = %{$frag_repeat{$repid}};
+	    
+		print STDERR "\t\t$repid\n\t\t\t%IDENTITY=$rpstats{ide}\n";
+		print STDERR "\t\t\t%COVERAGE=$rpstats{cov}\n";
+		print STDERR "\t\t\tSTRAND=$rpstats{str}\n";
+		print STDERR "\t\t\tPAIRED_ID=$rpstats{pai}\n\n";
+	 
+		## Only add the revcom if it is fully covered. 
+		if ($rpstats{cov} >= 100 && $rpstats{str} eq '-') {
+		    
+		    $getrev{$rpstats{pai}} = 1;
+		    print STDERR "\t\t$repid will be replaced by ";
+		    print STDERR "revcom $rpstats{pai}\n\n";
+		}
+		else {
+	    
+		    print STDERR "\t\tRepeat $repid will be keeped\n\n";
+		}
+	    }
+	}
+
+        ## If the repeat is broken into two pieces, it can happens that these 
+	## pieces can overlap and be bigger than the smaller repeat in which 
+        ## case it will be more convenient to keep them
+	##
+	##  ---+               +-----+   +---
+	##     |               |     |   |
+	##     |               |     |   |
+	##     +---------------+     +---+
+	##  R1 |R2             |R3   |R4 |R5
+	## 
+	## If it is the case it will keep both (R1-R5) and R3 and it won't
+	## calculate the reverse and it will add just these sequences
+
+
+	## At this point the script it ready to produce the sequences that will
+	## be rescaffolded
+	
+	print STDERR "\n\t5.6.3- Selecting the no-redundant sequence set\n";
+	my $asb06io = Bio::SeqIO->new(-file => "$assembly05", -type => 'fasta');
+	my $assembly06 = File::Spec->catfile($outdir,
+					     "05_6_assembly04breaks.fasta");
+	my $asb07io = Bio::SeqIO->new(-file => ">$assembly06",-type => 'fasta');
+
+	my $cc = 1;
+	while (my $sseqobj = $asb06io->next_seq()) {
+
+	    my $sqid = $sseqobj->id(); 
+	    my $len = $sseqobj->length();
+	    my $new_id = "Ctg" . $cc . "_" . $len ."bp";
+	    my $addregseq = 1;
+	    my $addrevcom = 0;
+
+	    if (exists $frag_repeat{$sqid}) {
+		
+		## The fragment exists, so now it will need to check
+		## if it is fully covered.
+		
+		my $cov = $frag_repeat{$sqid}->{cov};
+		if ($cov >= 100) {
+		
+		    $addregseq = 0;	    
+		}
+	    }
+	    
+	    if (exists $getrev{$sqid}) {
+		
+		$addrevcom = 1;
+	    }
+	    
+	    ## Now print the output
+	    
+	    if ($addregseq == 1) {
+	    
+		$sseqobj->id($new_id);
+		$asb07io->write_seq($sseqobj);
+		$cc++;
+	    }
+	    
+	    if ($addrevcom == 1) {
+	    
+		my $revcomseq = $sseqobj->revcom();
+		$new_id .= "_RC";
+		$revcomseq->id($new_id);
+		$asb07io->write_seq($revcomseq);
+		$cc++;
+	    }	
+	}
+
+	print STDERR "\n\t5.6.4- Rescaffolding the contigs with SSPACE-Long.\n";
+
+	## To accelerate the SSPACE long it will run BlasR separately and then
+	## Copy the file to $sspace2_out/intemediate_files/BLASR_results.txt
+
+	my $sspace2out = File::Spec->catfile($outdir, "05_6_sspacelong_out");
+
+	run_sspace_long(\%exepath, \%blasr_args, \%sspace_args, 
+			$blasr_in, $assembly06, $sspace2out);
+
+	## Get the results
+	my $preassembly07 = File::Spec->catfile($sspace2out, "scaffolds.fasta");
+	my $assembly07 = File::Spec->catfile($outdir, "05_7_assembly.fasta");
+	copy($preassembly07, $assembly07);
+
+	## And the stats
+	my @seqstats04 = get_seqstats($assembly07, $refsize);
+	print_seqstats("Assembly Step 4 Results", \@seqstats04);
+	$gstats{'05_seqtotal_count'} = $seqstats04[0];
+	$gstats{'05_seqtotal_length'} = $seqstats04[1];
+	$gstats{'05_seqtotal_gaplength'} = $seqstats04[6];
+	$gstats{'05_seqtotal_refratio'} = $seqstats04[4];
+	$gstats{'05_seqlongest_length'} = $seqstats04[2];
+	$gstats{'05_seqlongest_gaplength'} = $seqstats04[7];
+	$gstats{'05_seqlongest_refratio'} = $seqstats04[5];
+	$gstats{'05_seqtotal_refdif'} = $seqstats04[8];
+
+	## At this point will check if the output is better than the previous 
+	## step. If it isn't it will copy the last step as the final assembly
+	
+	## Points to check
+	## 1- Size of longest scaffold compared with the reference
+	## 2- Number of Ns
+
+	my $longref_absratio_p = abs(1 - $seqstats03[5]);
+	my $longref_absratio_c = abs(1 - $seqstats04[5]);
+	my $longref_gapsize_p = $seqstats03[7];
+	my $longref_gapsize_c = $seqstats04[7];
+
+	if ($longref_absratio_p <= $longref_absratio_c) {
+	
+	    if ($longref_gapsize_p <= $longref_gapsize_c) {
+	    
+		print STDERR "\t\tNo clear improvement was produced from the ";
+		print STDERR "repeat reassembly.\n";
+		print STDERR "\t\tSelecting $assembly04 as final assembly.\n";
+		copy($assembly04, $finalfile);
+	    }
+	    else {
+		print STDERR "\t\t$assembly07 presents smaller gap size and";
+		print STDERR "$assembly04 presents closest size to reference\n";
+		print STDERR "\t\tSelecting $assembly07 as final assembly";
+		copy($assembly07, $finalfile);
+	    }
+	}
+	else {
+
+	    if ($longref_gapsize_p <= $longref_gapsize_c) {
+	    
+		print STDERR "\t\t$assembly04 presents smaller gap size and";
+		print STDERR "$assembly07 presents closest size to reference\n";
+		print STDERR "\t\tSelecting $assembly07 as final assembly";
+		copy($assembly07, $finalfile);
+	    }
+	    else {
+		
+		print STDERR "\t\t$assembly07 has smaller gap size and a size ";
+		print STDERR "closer to the reference than $assembly04.\n";
+		print STDERR "\t\tSelecting $assembly07 as final assembly\n";
+		copy($assembly07, $finalfile);
+	    }
+	}
+    }	
+}
+
+print STDERR "\n\tFINAL ASSEMBLY FILE: $finalfile\n";
+my @fi_seqstats = get_seqstats($finalfile, $refsize);
+print_seqstats("Final Assembly Results", \@fi_seqstats);
+$gstats{'99_seqtotal_count'} = $fi_seqstats[0];
+$gstats{'99_seqtotal_length'} = $fi_seqstats[1];
+$gstats{'99_seqtotal_gaplength'} = $fi_seqstats[6];
+$gstats{'99_seqtotal_refratio'} = $fi_seqstats[4];
+$gstats{'99_seqlongest_length'} = $fi_seqstats[2];
+$gstats{'99_seqlongest_gaplength'} = $fi_seqstats[7];
+$gstats{'99_seqlongest_refratio'} = $fi_seqstats[5];
+$gstats{'99_seqtotal_refdif'} = $fi_seqstats[8];
+
+## Print the stats in a final file
+my $colstats_file = File::Spec->catfile($outdir, "Collected_stats.txt");
+open my $cs_fh, '>', $colstats_file;
+foreach my $par (sort keys %gstats) {
+
+    print $cs_fh "$par\t$gstats{$par}\n";
+}
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## OrganelleRef_PBA Ends ($date)   ##\n";
+print STDERR "############################################################\n\n";
+exit;
+
+
+##############################################################################
+##############################################################################
+##
+## FUNCTIONS
+##
+###############################################################################
+## function to print the script help
+###############################################################################
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+      OrganelleRef_PBA
+      Pipeline to assemble plastid genomes using PacBio                   
+
+    Usage:
+
+      OrganelleRef_PBA [-h]  -i <input_pacbio> -r <fasta_reference> 
+                             -o <output_dir> 
+                             [-t <input_type>] [-b <blasr_arguments>] 
+                             [-s <sprai_ec_options>] [-c <sprai_pbsm_options>] 
+                             [-x <fraction_for_scaffolding>] 
+			     [-l <sspace_long_options>] 
+                             [-n <repeat_block_size>] 
+			     [-m <coverage_ratio4repeats>] 
+			     [-z <breaks_overlap>]
+		             [-C] [-V] [-v]
+
+    Description:
+      
+     This program assembles the PacBio reads into a organelle fasta sequence. 
+
+     Fasta (-t fasta) and Fastq (-t fastq, default) input can be used.
+
+     It works in several steps:
+     
+      1- First mapping round of the PacBio reads with the organelle reference.
+
+      2- First assembly round of the mapped reads using Sprai.
+     
+       + Evaluate the assembly, if longest contig size >= reference size 
+         it will move to resolve the repeat (4). Otherwise, it will try to
+         improve the assembly using SSPACE-Long and the whole dataset (3).
+     
+       + The completeness will be controled by -x <completeness_fraction> 
+         By default 1.0 is used.  
+     
+      3- Rescaffolding of the contigs produced by Sprai with SSPACE-Long.
+     
+      4- Check circularity and origin, if both are positive it will evaluate
+         completeness (-C), and finish the script if it is complete 
+	 (>98% coverage)
+     
+      5- First mapping round with the assembly to find repetitive regions.
+     
+      6- Repetitive region break based in the coverage and a self blast
+     
+      7- Second assembly round with the repetitive region.
+     
+     This program uses three different external programs:
+     
+      a- BlasR (for mapping).
+      b- samtools (to manipulate sam).
+      c- Blast, Sprai and WGS-Assembler (for assembly).
+      d- SSPACE-Long for rescaffolding.
+      e- Bedtools to calculate coverage    
+ 
+     Optionally it can use seqtk to speed up the Fastq to Fasta conversion
+     and the Fastq read selection.
+ 
+    Flags:
+
+      -i <input_pacbio>     input PacBio subreads (mandatory)
+      -t <input_type>       input type (fasta or fastq; default=fastq)
+      -r <fasta_reference>  organelle reference genome, fasta format (mandatory)
+      -o <output_dir>       output directory (mandatory)
+      -b <blasr_arguments>  pass the blasr arguments as '-arg1=val1,-arg2=val2'
+      -s <sprai_ec_options> passing sprai ec options as 'opt1=val1,opt2=val2'
+      -c <sprai_pbasm_opts> passing sprai pbasm options as 'opt1=val1,opt2=val2'
+      -x <cfraction>        fraction that decide a new scaffolding (def. 1.0)
+      -l <sspace_long_opts> passing the SSPACE-Long options as 'opt1=val1...'
+      -n <repeat_block>     block size to detect repeats by cov (def. 1000)
+      -m <cov_rep_ratio>    cov. ratio to define repetitive region (def. 1.6)
+      -z <breaks_overlap>   overlap for the repeat subseqs (default 0)
+      -C <check_complet>    check completeness after the check_circular
+      -V <be_verbose>       be verbose and print the parsing status.
+      -v <version>          print version
+      -h <help>             print the help
+
+
+EOF
+exit (1);
+}
+
+
+##############################################################################
+## Just a simple function to print a message with some format
+##############################################################################
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+###############################################################################
+## Function to create the EC file used by Sprai
+## It uses three arguments: $file (output file), $exepath_href (the hash 
+## reference with the executable paths) and $option_href (a hash reference
+## with the arguments passed with the -s argument
+###############################################################################
+
+sub create_sprai_ec_file {
+    my $file = shift;
+    my $exepath_href = shift;
+    my $options_href = shift;
+
+    my %perm_ec = (
+	input_for_database    => 'file',
+	min_len_for_query     => 'digit',
+	estimated_genome_size => 'digit',
+	estimated_depth       => 'digit',
+	pre_partition         => 'digit',
+	partition             => 'digit',
+	ca_path               => 'direc',
+	sprai_path            => 'direc',
+	blast_path            => 'direc',
+	word_size             => 'digit',
+	evalue                => 'cient',
+	num_threads           => 'digit',
+	trim                  => 'digit'
+	);
+
+    ## Check if there is any not permited ec_option
+
+    foreach my $check (sort keys %{$options_href}) {
+    
+	unless (exists $perm_ec{$check}) {
+	
+	    warn("WARNING: $check is not a ec sprai option. Ignoring.\n");
+	}
+    }
+
+    ## Check mandatory
+    unless (exists $options_href->{input_for_database}) {
+    
+	die("ERROR: No input_for_database option wasnt supplied to ec_file.\n");
+    }
+
+    ## Have some order
+    my @ec_opt_lst = ('input_for_database', 'min_len_for_query', 
+		      'estimated_genome_size', 'estimated_depth', 
+		      'pre_partition', 'partition', 'ca_path', 'sprai_path', 
+		      'blast_path', 'word_size', 'evalue', 'num_threads', 
+		      'trim'); 
+
+    my $ca_path = dirname($exepath_href->{runCA});
+    my $sprai_path = dirname($exepath_href->{'ezez_vx1.pl'});
+    my $blast_path = dirname($exepath_href->{blastn});
+
+    my %ec_def = (
+	## No default value: input_for_database    => 'NA',
+	min_len_for_query     => 1000,
+	estimated_genome_size => 1600000,  ##  X10 times chl size
+	estimated_depth       => 100,      ##  For now
+	pre_partition         => 2,
+	partition             => 12,
+	ca_path               => $ca_path."/",
+	sprai_path            => $sprai_path."/",
+	blast_path            => $blast_path."/",
+	word_size             => 18,
+	evalue                => 1e-50,
+	num_threads           => 2,
+	trim                  => 42
+	);
+
+    open( my $sprai_ec_fh, '>', $file);
+
+    ## Print a header
+    print $sprai_ec_fh "## Sprai config file created by OrganelleRef_PBA\n\n";
+    
+    foreach my $ec_opt (@ec_opt_lst) {	
+
+	## All the options should be key=value
+
+	if (exists $options_href->{$ec_opt}) {
+	    
+	    my $k = $ec_opt;
+	    my $v = $options_href->{$ec_opt};
+	    my $t = $perm_ec{$ec_opt};
+	    if ($t eq 'digit' && $v !~ m/^\d+$/) {
+		
+		warn("\tWARNING: $v for sprai option $k isnt $t. Ignoring.\n");
+	    }
+	    elsif ($t eq 'cient' && $v !~ m/^\d+e-\d+$/) {
+		
+		warn("\tWARNING: $v for sprai option $k isnt $t. Ignoring.\n");
+	    }
+	    elsif ($t eq 'file' && -s $v eq 0) {
+		
+		die("ERROR: $v PacBio read file doesnt exist.\n");
+	    }
+	    elsif ($t eq 'direc' && -d $v eq 0) {
+		
+		die("ERROR: $v program bin path doesnt exist.\n");
+	    }
+	    
+	    print $sprai_ec_fh "$ec_opt $options_href->{$ec_opt}\n";
+	}
+	else {
+	
+	    ## Get the default
+	    print $sprai_ec_fh "$ec_opt $ec_def{$ec_opt}\n";
+	}
+    }
+}
+
+##############################################################################
+## Function to create a ca_pbasm file
+## It accepts two variables, the output file name and the hash ref. with the
+## option passed from the script arguments (-c 'key1=val1,key2=val2...')
+## It has hard coded the options for CA config. file
+##############################################################################
+
+sub create_ca_pbasm_file {
+    my $file = shift;
+    my $opt_href = shift;
+
+    ## Specify the defaults
+
+    my %def_pbasm = (
+	unitigger             => "bogart",
+	utgErrorRate          => "0.015",
+	utgErrorLimit         => "4.5",
+	cnsErrorRate          => "0.25",
+	cgwErrorRate          => "0.25",
+	ovlErrorRate          => "0.015",
+	frgMinLen             => "1000",
+	ovlMinLen             => "40",  
+	merSize               => "14",
+	merylMemory           => "16384",
+	merylThreads          => "8",
+	ovlStoreMemory        => "16384",
+	useGrid               => "0",
+	scriptOnGrid          => "0",
+	frgCorrOnGrid         => "0",
+	ovlCorrOnGrid         => "0",
+	sge                   => "-S /bin/bash -V -q all.q",
+	sgeScript             => "-pe threads 1",
+	sgeConsensus          => "-pe threads 1",
+	sgeOverlap            => "-pe threads 4",
+	sgeFragmentCorrection => "-pe threads 4",
+	sgeOverlapCorrection  => "-pe threads 1",
+	ovlHashBits           => "22",
+	ovlHashBlockLength    => "46871347",
+	ovlRefBlockSize       => "537",
+	ovlHashBits           => "25",
+	ovlThreads            => "4",
+	ovlHashBlockLength    => "50000000",
+	ovlRefBlockSize       => "100000000",
+	ovlConcurrency        => "6",
+	frgCorrThreads        => "4",
+	frgCorrBatchSize      => "100000",
+	ovlCorrBatchSize      => "100000",
+	cnsMinFrags           => "7500",
+	cnsConcurrency        => "24",
+	sgeName               => "iroha",
+	);
+
+    ## Specify the order
+    
+    my @ordered_pbasm = ( 'unitigger', 'utgErrorRate', 'utgErrorLimit',
+			  'cnsErrorRate', 'cgwErrorRate', 'ovlErrorRate', 
+			  'frgMinLen', 'ovlMinLen', 'merSize', 'merylMemory',
+			  'merylThreads', 'ovlStoreMemory', 'useGrid', 
+			  'scriptOnGrid', 'frgCorrOnGrid', 'ovlCorrOnGrid',
+			  'sge', 'sgeScript', 'sgeConsensus', 'sgeOverlap',
+			  'sgeFragmentCorrection', 'sgeOverlapCorrection',
+			  'ovlHashBits', 'ovlHashBlockLength', 
+			  'ovlRefBlockSize', 'ovlHashBits', 'ovlThreads',
+			  'ovlHashBlockLength', 'ovlRefBlockSize',
+			  'ovlConcurrency', 'frgCorrThreads', 
+			  'frgCorrBatchSize', 'ovlCorrBatchSize',
+			  'cnsMinFrags', 'cnsConcurrency','sgeName');
+    
+    ## Also sprai has a list of banned options
+
+    my %ban_pbasm = (
+	utgErrorRate       => "0.015",
+	utgErrorLimit      => "4.5",
+	ovlHashBits        => "22",
+	ovlHashBlockLength => "46871347",
+	ovlRefBlockSize    => "537"
+	);    
+
+    open( my $sprai_pb_fh, '>', $file);
+    print $sprai_pb_fh "## Sprai config file created by OrganelleRef_PBA\n\n";
+
+    ## Check if exists all the options supplied by $opt_href
+
+    foreach my $check (sort keys %{$opt_href}) {
+    
+	unless (exists $def_pbasm{$check}) {
+	
+	    warn("WARNING: $check isnt a pbasm file option. Ignoring.\n");
+	}
+    }
+
+    foreach my $opt (@ordered_pbasm) {
+    
+	if (exists $opt_href->{$opt}) {
+	
+	    print $sprai_pb_fh "$opt = $opt_href->{$opt}\n";
+	}
+	else {
+	    
+	    unless (exists $ban_pbasm{$opt}) {
+	    
+		print $sprai_pb_fh "$opt = $def_pbasm{$opt}\n";
+	    }
+	    else {
+	    
+		print $sprai_pb_fh "#Sprai_banned# $opt = $ban_pbasm{$opt}\n";
+	    }
+	}
+    }
+}
+
+###############################################################################
+## Function to process a sequence file ($file )and compare with a ref. size
+## ($refsize). It will return an array with the following data:
+##   [0] sequence count; 
+##   [1] total length; 
+##   [2] longest sequence size
+##   [3] longest sequence id
+##   [4] ratio total length / reference size
+##   [5] ratio longest sequence size / reference size
+##   [6] total Ns
+##   [7] Ns for the longest sequence
+##   [8] Difference bp with the reference 
+###############################################################################
+
+sub get_seqstats {
+    my $file = shift;
+    my $refsize = shift;
+
+    my $asmseq_io = Bio::SeqIO->new( -file => $file, -type => 'fasta' );
+
+    my ($seqc, $max_seql, $total_l, $longest_ns, $total_ns) = (0, 0, 0, 0, 0);
+    my $max_seqid = '';
+    my $difref_size = 0;
+
+    while( my $seqobj = $asmseq_io->next_seq() ) {
+
+	my $seqid = $seqobj->id();
+	my $seq_l = $seqobj->length();
+	my $seq = $seqobj->seq();
+	$seq =~ s/N//i;
+	my $nonlen = length($seq);
+	my $ns = $seq_l - $nonlen;
+
+	$seqc++;
+	$total_l += $seq_l;
+	$total_ns += $ns;
+
+	if ($seq_l >= $max_seql) {
+	    
+	    $max_seql = $seq_l;
+	    $max_seqid = $seqid;
+	    $longest_ns = $ns;
+	    $difref_size = abs($refsize - $max_seql);
+	}
+    }
+    
+    ## It will calculate also how much of the estimated size has been assembled
+    my $est_asm01_obj = Math::BigFloat->new($total_l/$refsize);
+    my $est_asm01 = $est_asm01_obj->bfround(-2);
+
+    my $est_asm02_obj = Math::BigFloat->new($max_seql/$refsize);
+    my $est_asm02 = $est_asm02_obj->bfround(-2);
+
+    my @data = ($seqc, $total_l, $max_seql, $max_seqid, $est_asm01, $est_asm02,
+	$total_ns, $longest_ns, $difref_size);
+    return @data;
+}
+
+##############################################################################
+## Function to format the stats and print them
+##############################################################################
+
+sub print_seqstats {
+    my $message = shift;
+    my $stats = shift;
+    
+    my ($seqc,$total_l,$max_seql,$max_seqid,$est_asm01,$est_asm02, $total_ns,
+	$longest_ns, $difref_size) = @{$stats};
+
+    print STDERR "\n\t$message\n";
+    print STDERR "\t-----------------------\n";
+    print STDERR "\t * Total scaffolds: $seqc\n";
+    print STDERR "\t * Total size (bp): $total_l\n";
+    print STDERR "\t * Total gaps size (Ns): $total_ns\n\n";
+    print STDERR "\t * Longest scaffold size (bp): $max_seql\n";
+    print STDERR "\t * Longest scaffold gap size (Ns): $longest_ns\n";
+    print STDERR "\t * Longest scaffold id: $max_seqid\n\n";
+    print STDERR "\t * Total assembly ref. fraction: $est_asm01\n";
+    print STDERR "\t * Longest assembly ref. fraction: $est_asm02\n";
+    print STDERR "\t * Different in size with ref. (bp): $difref_size\n\n";
+}
+
+##############################################################################
+## calculate covblocks is a function to asign an average coverage to a 
+## block of x size.
+##############################################################################
+
+sub calculate_covblocks {
+    my $covfile = shift;
+    my $blocksize = shift;
+    my $high_low_ratio = shift;
+
+    ## Define the hash to pass the data
+    my %data = ();
+
+    ## First is going to open the coverage file to calculate
+    ## basic stats     
+
+    my ($c_min, $c_max, $p_min, $p_max) = (1000000000000, 0, 0, 0);
+    my ($totalcov, $totallen) = (0, 0);
+    
+    ## Additionally it will create blocks of coverage with $blocksize
+    ## Blocks will be stored as an arrays of array refs.
+    my @blocks = ([]);
+    
+    ## Block counters:
+    ## $a define when a new block should be created
+    ## $b define the block number (as index in array)
+    my ($a, $b) = (0, 0);
+
+    ## Now process the file
+
+    open(my $covfh, '<', $covfile);
+
+    while(<$covfh>) {
+
+	chomp($_);
+	my ($sid, $pos, $cov) = split(/\t/, $_); 
+	$a++;
+   
+	## Define blocks
+	if ($a <= $blocksize) {
+    
+	    push @{$blocks[$b]}, $cov; 
+	}
+	else {
+    
+	    $a = 0;
+	    $b++;
+	    push @blocks, [$cov];
+	}
+	
+
+	## Get the other stats
+	if ($cov >= $c_max) {
+    
+	    $c_max = $cov;
+	    $p_max = $pos;
+	}
+	if ($cov <= $c_min) {
+	
+	    $c_min = $cov;
+	    $p_min = $pos;
+	}
+
+	$totalcov += $cov;
+	$totallen++;
+    }
+
+    ## Now store the stats into the hash
+    $data{c_max} = $c_max;
+    $data{p_max} = $p_max;
+    $data{c_min} = $c_min;
+    $data{p_min} = $p_min;
+    $data{total_cov} = $totalcov;
+    $data{total_len} = $totallen;
+
+    my $average = $totalcov / $totallen;
+    $data{c_average} = $average;
+
+    my $countb = scalar(@blocks);
+    $data{block_cnt} = $countb; 
+
+    ## Now it will define two limits, lower limit and upper limit
+    ## It will compare all the coverage to the average
+    ## if $cov > $average => upper limit 
+    ## if $cov < $average => lower limit
+    ## then it will calculate the average for upper and lower limits
+    ## it will calculate this per block
+    
+    
+    my ($low_total, $high_total, $low_count, $high_count) = (0, 0, 0, 0);
+
+    foreach my $bl_aref (@blocks) {
+
+	my $bc = 0;
+	my $bt = 0;
+
+	foreach my $c (@{$bl_aref}) {
+
+	    $bc++;
+	    $bt += $c;
+	}
+
+	## Calculate the average
+	my $l_avg = $bt / $bc;
+    
+	if ($l_avg < $average) {
+    
+	    $low_total += $l_avg;
+	    $low_count++;
+	}
+	elsif ($l_avg > $average) {
+    
+	    $high_total += $l_avg;
+	    $high_count++;
+	}
+    }
+
+    my $low_average = $low_total / $low_count;
+    my $high_average = $high_total / $high_count;
+
+    $data{upper_limit} = $high_average;
+    $data{lower_limit} = $low_average;
+
+    ## Finally it will assign to each of the positions, based in the
+    ## blocks if they are upper limits or lower limits
+
+    ## How we should define the blocks ? 
+    ## There will be some upper and lower
+    ## but if upper and lower are to much different
+    ## it may be the same
+    ## e.g upper 20 lower 10 could be different
+    ## e.g.upper 15 lower 10 may not
+    ## This should be defined by the higher/lower ratio
+    
+    if ($low_average * $high_low_ratio > $high_average) {
+    
+	$low_average = $average;
+	$high_average = $average;
+    }
+
+    my @bcov = ();
+    my $p = 0;
+
+    foreach my $bl_aref (@blocks) {
+	
+	my $bc = 0;
+	my $bt = 0;
+
+	foreach my $c (@{$bl_aref}) {
+
+	    $p++;
+	    $bc++;
+	    $bt += $c;
+	}
+
+	## Calculate the average
+	my $l_avg = $bt / $bc;
+    
+	if ($l_avg < $average) {
+	
+	    foreach my $c (@{$bl_aref}) {
+		push @bcov, $low_average;
+	    }
+	}
+	else {
+
+	    foreach my $c (@{$bl_aref}) {
+		push @bcov, $high_average;
+	    }
+	}
+    }
+    
+    $data{covdata} = \@bcov;
+
+    return \%data;
+}
+
+
+###############################################################################
+## Function to get the break points based in the blocks
+###############################################################################
+
+sub get_breakpoints {
+    my $covdata_aref = shift;
+
+    my %breaks = ();
+
+    ## Define the counters:
+    ## a- will count when it is different
+    ## b- break point number (start of the block)
+    ## p- defines the position (1-based)
+    ## z- when it is the end of the block
+    my ($a, $b, $p, $z) = (0, 0, 0, 0);
+
+    ## Because it need to have a end point
+    my $last = scalar(@{$covdata_aref});
+
+    foreach my $cov_lmt (@{$covdata_aref}) {
+    
+	$p++;
+	if ($cov_lmt != $a) {
+	    
+	    $a = $cov_lmt;
+
+	    if ($z == 0) {
+	    
+		$b++;
+		$breaks{$b} = { start => $p };
+		$z = 1;
+	    }
+	    elsif ($z == 1) {
+	    
+		$breaks{$b}->{end} = $p - 1;
+		$b++;
+		$breaks{$b} = {start => $p};
+	    }
+	}
+	elsif ($p == $last) {
+	
+	    $breaks{$b}->{end} = $p;
+	    $z = 0;
+	}
+    }
+
+    return \%breaks;
+}
+
+
+###############################################################################
+## Function to run SSPACE-Long
+## It will run BlasR and then SSPACE-Long
+## use run_sspace_long($exe_href, $blasr_href, $sspace_href, $blasr_in, 
+##                     $ctg_file, $sspace_out)
+###############################################################################
+
+sub run_sspace_long {
+    my $exe_href = shift;
+    my $blasr_arg_href = shift;
+    my $sspace_arg_href = shift;
+    my $blasr_in = shift;
+    my $ctg_file = shift;
+    my $sspace_out = shift;
+
+    my %exepath = %{$exe_href};
+    my %blasr_args = %{$blasr_arg_href};
+    my %sspace_args = %{$sspace_arg_href};
+
+    my $sspace_int = File::Spec->catfile($sspace_out, "intermediate_files");
+    make_path($sspace_int);
+    
+    ## Because SSPACE uses a specific format such as 
+    ## >contig . $contigN . _size . $length it will format that
+
+    my $seqio_in = Bio::SeqIO->new( -file => $ctg_file, -format => "fasta");
+    my $formctg = File::Spec->catfile($sspace_out, "input_contigs.fa");
+    my $seqio_out = Bio::SeqIO->new( -file => ">$formctg", -format => "fasta");
+
+    my $c = 1;
+    while( my $seqobj = $seqio_in->next_seq() ) {
+    
+	my $len = $seqobj->length();
+	my $newid = "contig" . $c . "_size" . $len;
+	$seqobj->id($newid);
+	$seqio_out->write_seq($seqobj);
+	$c++;
+    }
+
+    ## Prepare to run BlasR
+
+    my @blasrSLcmd = ($exepath{'blasr'}, $blasr_in, $formctg);
+    
+    ## Overwrite the blasr_arg{-out}
+    my $preblasr_out = File::Spec->catfile($sspace_out, "preBLASR_out.txt");
+    $blasr_args{'-out'} = $preblasr_out;
+    
+    foreach my $blasr_k (sort keys %blasr_args) {
+
+	push @blasrSLcmd, $blasr_k;
+	if (defined $blasr_args{$blasr_k}) {
+	    
+	    push @blasrSLcmd, $blasr_args{$blasr_k};
+	}
+    }
+    
+    my @blasrSLrun = run( command => \@blasrSLcmd, verbose => $opt_V );
+
+    ## Filter the results for BLASR to get only the sense reads
+    ## to avoid multiple hits in the repeat
+
+    my $fblasr = File::Spec->catfile($sspace_int, "BLASR_results.txt");
+    open my $bou_fh, '>', $fblasr;
+    open my $bin_fh, '<', $blasr_args{'-out'};
+    while(<$bin_fh>) {
+    
+	chomp($_);
+	my @fds = split(/\s+/, $_);
+	if ($fds[2] == 0 && $fds[3] == 0) {
+	
+	    print $bou_fh "$_\n";
+	}
+    }
+
+    ## Prepare SSPACE
+
+    my $sspace_cmd = "perl $exepath{'SSPACE-LongRead.pl'} -c $formctg";
+    $sspace_cmd .= " -p $blasr_in";
+
+    ## Add the output
+    $sspace_cmd .= " -b $sspace_out";
+    
+    ## Add the option to use the BlasR alignment by its own
+    $sspace_cmd .= " -s 1";
+
+    foreach my $sspace_opt (sort keys %sspace_args) {
+    
+	$sspace_cmd .= " $sspace_opt $sspace_args{$sspace_opt};";
+    }
+    
+    my @sspace_run = run( command => $sspace_cmd, verbose => $opt_V );
+}
+
+
+###############################################################################
+## Function find_origin
+## It will run a blast with the reference to find the origin
+###############################################################################
+## Remember that makeblastdb and blastn should be in the path
+
+sub find_origin {
+    my $query = shift;
+    my $subject = shift;
+    my $exepath_href = shift;
+    my $outfile = shift;
+
+    my %exepath = %{$exepath_href};
+
+    my $mkblastdbcmd = "$exepath{'makeblastdb'} -in $subject -dbtype nucl";
+    my @mkblastdb01run = run( command => $mkblastdbcmd, verbose => $opt_V );
+
+    ## 2- Now it will do the selfblast BlastN
+    my $bl01cmd = "$exepath{'blastn'} -query $query -db $subject ";
+    $bl01cmd .= "-out $outfile ";
+	
+    ## Format
+    $bl01cmd .= "-outfmt '6 std qlen slen' ";
+	
+    ## Run the command
+    my @bl01run = run( command => $bl01cmd, verbose => $opt_V );
+    
+    ## Process the output to search the lowest position (preferebly 1)
+
+    open my $sb_fh, '<', $outfile;
+    
+    my $origin;
+    my $str;
+    while(<$sb_fh>) {
+	    
+	chomp($_);	    
+	my ($qseqid, $sseqid, $pident, $length, $mismatch, $gapopen, 
+	    $qstart, $qend, $sstart, $send, $evalue, $bitscore, $qlen, 
+	    $slen) = split(/\t/, $_);
+	
+	if ($sstart == 1) { 
+	
+	    $origin = $qstart;
+	    $str = "+";
+	}
+	elsif ($send == 1) {
+	
+	    $origin = $qend;
+	    $str = "-";
+	}
+    }
+
+    return ($origin, $str);
+}
