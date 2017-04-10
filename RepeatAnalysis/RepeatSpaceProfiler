@@ -450,6 +450,7 @@ my %eqtoolname = (
     'VELVET_PATH'            => 'velveth',
     'REFINER_PATH'           => 'TERefiner_1',
     'CONTIGS_MERGER_PATH'    => 'ContigsMerger',
+    'BWA_PATH'               => 'bwa',
     );
 
 my %rp_checks = ();
@@ -482,10 +483,8 @@ if ($opt_W) {
 
     foreach my $repfield (sort(@sortrepfields)) {
     
-	print STDERR "\nTEST: $repfield\t$rp_checks{$repfield}\n";
 	if ($repfield =~ m/PATH/) {
 	
-	    print STDERR "\nTEST2: $eqtoolname{$repfield}\n";
 	    my $new_path = $exepath{$eqtoolname{$repfield}};
 	    print $rp_fh "$repfield\t$new_path\n";
 	}
