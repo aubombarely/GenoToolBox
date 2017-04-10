@@ -359,7 +359,7 @@ foreach my $infile_idx (sort(keys(%infiles))) {
     
     my %statsperfile = ( file => $fullstatsname );
 
-    open my $stats_fh, '<', $$fullstatsname;
+    open my $stats_fh, '<', $fullstatsname;
     while(<$stats_fh>) {
 
 	chomp($_);
