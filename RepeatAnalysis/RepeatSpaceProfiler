@@ -442,7 +442,7 @@ my %eqtoolname = (
     'CONTIGS_MERGER_PATH'    => 'ContigsMerger',
     );
 
-my %rp_checks = 0;
+my %rp_checks = ();
 open my $rdncfg_fh, '<', $repnovo_conf;
 while(<$rdncfg_fh>) {
 
