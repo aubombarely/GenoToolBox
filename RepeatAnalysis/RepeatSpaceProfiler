@@ -433,6 +433,16 @@ my %reqfields = (
     'VERBOSE'                => 1
     );
 
+my @sortrepfields = ('MIN_REPEAT_FREQ', 'RANGE_ASM_FREQ_DEC', 
+		     'RANGE_ASM_FREQ_GAP', 'K_MIN', 'K_MAX', 'K_INC', 'K_DFT', 
+		     'READ_LENGTH', 'GENOME_LENGTH', 'MIN_CONTIG_LENGTH', 
+		     'ASM_NODE_LENGTH_OFFSET', 'IS_DUPLICATE_REPEATS', 
+		     'COV_DIFF_CUTOFF', 'MIN_SUPPORT_PAIRS', 
+		     'MIN_FULLY_MAP_RATIO', 'TR_SIMILARITY', 'TREADS', 
+		     'BWA_PATH', 'SAMTOOLS_PATH', 'JELLYFISH_PATH', 
+		     'VELVET_PATH', 'REFINER_PATH', 'CONTIGS_MERGER_PATH', 
+		     'OUTPUT_FOLDER', 'VERBOSE');
+
 ## Aditionally some of the PATH will look for a tools name
 my %eqtoolname = (
     'SAMTOOLS_PATH'          => 'samtools',
@@ -466,20 +476,22 @@ foreach my $req_repfields (sort(keys(%reqfields))) {
 if ($opt_W) {
 
     my $newrepcfg = File::Spec->catfile($outbase, "02_0_RepDenovo.cfg");
-    print STDERR "\tREWRITING a new RepDenovo configuration file: $newrepcfg\n";
+    print STDERR "\n\tREWRITING a new RepDenovo config. file: $newrepcfg\n";
     
     open my $rp_fh, '>', $newrepcfg;
 
-    foreach my $repfield (sort(keys %rp_checks)) {
+    foreach my $repfield (sort(@sortrepfields)) {
     
+	print STDERR "\nTEST: $repfield\t$rp_checks{$repfield}\n";
 	if ($repfield =~ m/PATH/) {
 	
+	    print STDERR "\nTEST2: $eqtoolname{$repfield}\n";
 	    my $new_path = $exepath{$eqtoolname{$repfield}};
 	    print $rp_fh "$repfield\t$new_path\n";
 	}
 	elsif ($repfield =~ /TREADS/) {
 	
-	    print $rp_fh "$repfield\t$opt_t\n";
+	    print $rp_fh "$repfield\t$threads\n";
 	}
 	elsif ($repfield =~ /READ_LENGTH/) {
 	
