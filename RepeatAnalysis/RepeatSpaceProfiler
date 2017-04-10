@@ -40,7 +40,7 @@ B<gene_space_fastaref>    Fasta file with the gene space (mandatory)
 
 =item -s
 
-B<genome_size_mb>         Estimated genome size (mandatory)
+B<genome_size>            Estimated genome size as kb, mb or gb (mandatory)
 
 =item -m
 
@@ -105,7 +105,8 @@ B<help>                   print the help
  (with option -t) in case that you do not know where are the executables.
  To re-write them use option -W.  
 
- Option -s is used to estimate genome coverage.
+ Option -s is used to estimate genome coverage. It needs the units (e.g. kb,
+ mb or gb).
 
 =cut
 
@@ -227,11 +228,19 @@ print STDERR "\tGene Space fasta:\t$genspa_fasta\n";
 my $gsize = $opt_s ||
     die("\nINPUT ARG. ERROR: -s <genome_size_mb> arg. was not supplied.\n\n");
 
-if ($gsize =~ m/^\d+$/) {
+if ($gsize =~ m/^(\d+)(\w+)$/) {
 
-    die("\nERROR: -s $gsize is not an integer\n");
+    my $int = $1;
+    my $units = lc($2);
+
+    my %perm_units = ( 'kb' => 1000, 'mb' => 1000000, 'gb' => 1000000000); 
+    unless (exists $perm_units{$units}) {
+
+	die("\nERROR: units used with -s $gsize are not kb, mb or gb\n");
+    }
+
+    $gsize = $int * $perm_units{$units};
 }
-
 
 my %repmask_permarg = ( 
     '-engine' => 1, '-pa' => 1, '-s' => 1, '-q' => 1, '-qq' => 1, '-nolow' => 1,
@@ -379,7 +388,7 @@ foreach my $infile_idx (sort(keys(%infiles))) {
 }
 
 my $avg_read_length =  $totalstats{total_bases} / $totalstats{reads};
-my $est_coverage = $totalstats{total_bases} / ($gsize * 1000000);
+my $est_coverage = $totalstats{total_bases} / $gsize;
 print STDERR "\n\t\tTOTAL READS:\t$totalstats{reads}\n";
 print STDERR "\t\tTOTAL BASES:\t$totalstats{total_bases}\n";
 print STDERR "\t\tAVERAGE READ LENGTH:\t$avg_read_length\n";
@@ -514,7 +523,7 @@ sub help {
 
       RepeatSpaceProfiler [-h] -i <input_filelist> -o <output_basedir> 
                           -r <repdenovo_config> -g <gene_space_fastaref>
-                          -g <genome_size_mb>
+                          -g <genome_size>
 			  [-m <repeatmasker_args>]
                           [-t <threads>] [-W]
 
@@ -561,7 +570,7 @@ sub help {
       -o <output_basedir>    name of the output directory (mandatory)
       -r <REPdenovo_config>  REPdenovo configuration file (mandatory)
       -g <gene_space_ref>    Fasta file with the gene space (mandatory)
-      -s <genome_size_mb>    Estimated genome size mb (mandatory)
+      -s <genome_size>       Estimated genome size kb,mb or gb (mandatory)
       -m <Repeatmasker_args> Repeatmasker args separated by comma (optional)
       -t <threads>           Number of threads to run the process (optional)
       -W <rewrite_REPdenovo> Rewrite REPdenovo config file (optional)
