@@ -13,6 +13,7 @@ our $version = '0.1.0';
 
  RepeatSpaceProfiler [-h] -i <input_filelist> -o <output_basedir> 
                           -r <repdenovo_config> -g <gene_space_fastaref>
+                          -s <genome_size_mb>
                           [-m <repeatmasker_args>]
                           [-t <threads>] [-W]
 
@@ -36,6 +37,10 @@ B<REPdenovo_config>       REPdenovo configuration file (mandatory)
 =item -g
 
 B<gene_space_fastaref>    Fasta file with the gene space (mandatory)
+
+=item -s
+
+B<genome_size_mb>         Estimated genome size (mandatory)
 
 =item -m
 
@@ -100,7 +105,7 @@ B<help>                   print the help
  (with option -t) in case that you do not know where are the executables.
  To re-write them use option -W.  
 
- 
+ Option -s is used to estimate genome coverage.
 
 =cut
 
@@ -132,11 +137,11 @@ use IPC::Cmd qw[can_run run];
 use Bio::SeqIO;
 use Math::BigFloat;
 
-our ($opt_i, $opt_o, $opt_r, $opt_g, $opt_m, $opt_t, $opt_W, $opt_V, 
+our ($opt_i, $opt_o, $opt_r, $opt_g, $opt_s, $opt_m, $opt_t, $opt_W, $opt_V, 
      $opt_v, $opt_h);
-getopts("i:o:r:g:m:t:WVvh");
-if (!$opt_i && !$opt_o && !$opt_r && !$opt_g && !$opt_m && !$opt_t && !$opt_W
-    && !$opt_V && !$opt_v && !$opt_h) {
+getopts("i:o:r:g:s:m:t:WVvh");
+if (!$opt_i && !$opt_o && !$opt_r && !$opt_g && !$opt_s && !$opt_m && !$opt_t 
+    && !$opt_W && !$opt_V && !$opt_v && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -201,16 +206,6 @@ my $repnovo_conf = $opt_r ||
     die("\nINPUT ARG. ERROR: -r <REPdenovo_config> arg. was not supplied.\n\n");
 print STDERR "\tREPdenovo configuration file:\t$repnovo_conf\n";
 
-## Define the fields from the REPdenovo configuration file, it will later on
-my @repnovo_fields = (
-    'MIN_REPEAT_FREQ', 'RANGE_ASM_FREQ_DEC', 'RANGE_ASM_FREQ_GAP', 'K_MIN', 
-    'K_MAX', 'K_INC', 'K_DFT', 'READ_LENGTH', 'GENOME_LENGTH', 
-    'MIN_CONTIG_LENGTH', 'ASM_NODE_LENGTH_OFFSET', 'IS_DUPLICATE_REPEATS', 
-    'COV_DIFF_CUTOFF', 'MIN_SUPPORT_PAIRS', 'MIN_FULLY_MAP_RATIO', 
-    'TR_SIMILARITY', 'TREADS', 'BWA_PATH', 'SAMTOOLS_PATH', 'JELLYFISH_PATH', 
-    'VELVET_PATH', 'REFINER_PATH', 'CONTIGS_MERGER_PATH', 'OUTPUT_FOLDER', 
-    'VERBOSE');
-
 my $threads = 4;
 if ($opt_t) {
 
@@ -228,6 +223,15 @@ print STDERR "\tNumber of threads:\t$threads\n";
 my $genspa_fasta = $opt_g ||
     die("\nINPUT ARG. ERROR: -g <gene_space_fasta> arg. was not supplied.\n\n");
 print STDERR "\tGene Space fasta:\t$genspa_fasta\n";
+
+my $gsize = $opt_s ||
+    die("\nINPUT ARG. ERROR: -s <genome_size_mb> arg. was not supplied.\n\n");
+
+if ($gsize =~ m/^\d+$/) {
+
+    die("\nERROR: -s $gsize is not an integer\n");
+}
+
 
 my %repmask_permarg = ( 
     '-engine' => 1, '-pa' => 1, '-s' => 1, '-q' => 1, '-qq' => 1, '-nolow' => 1,
@@ -308,12 +312,181 @@ foreach my $exec_key (sort keys %exec_list) {
 
 
 ##############################################################################
+## Get the stats
+##############################################################################
+
+## Create the output dir
+
+mkdir($outbase);
+
+print_header("1) Getting Stats of the Input Fastq Files");
+
+my $instatsdir = File::Spec->catfile($outbase, "01_0_FastqInputStats");
+mkdir($instatsdir);
+
+my %filestats = ();
+my %totalstats = ( reads => 0, total_bases => 0 ); 
+
+foreach my $infile_idx (sort(keys(%infiles))) {
+
+    my $filename = $infiles{$infile_idx}->{file};
+    
+    ## Remove the extension
+    my $basename = basename($filename);
+    $basename =~ s/\.\w+$//;
+    my $statsname = $basename . ".stats.txt";
+    my $fullstatsname = File::Spec->catfile($instatsdir, $statsname);
+
+    my @stats_cmd = ($exepath{'fastq-stats'}, $filename, '>', $fullstatsname);
+    my $stats_cmd = join(" ", @stats_cmd);
+    if ($opt_V) {
+    
+	print STDERR "\n\tRunning command:\n\t$stats_cmd\n";
+    }
+
+    my @run01stats = run( command => $stats_cmd, verbose => $opt_V );
+
+    ## Now it will parse the files and add the stats to a hash
+    
+    my %statsperfile = ( file => $fullstatsname );
+
+    open my $stats_fh, '<', $$fullstatsname;
+    while(<$stats_fh>) {
+
+	chomp($_);
+	
+	## Replace some line to be able to get a field
+	$_ =~ s/len mean/len_mean/;
+	$_ =~ s/len stdev/len_stdev/;
+	$_ =~ s/len min/len_min/;
+	$_ =~ s/unique-dup deq/unique-dup_seq/;
+	$_ =~ s/min dup count/min_dup_count/;
+	$_ =~ s/^dup seq\s+/dup_seq_/;
+	$_ =~ s/^dup /dup_/;
+	$_ =~ s/^qual /qual_/;
+	$_ =~ s/total bases/total_bases/;
+
+	my @line = split(/\t/, $_);
+	my $id = shift(@line);
+	my $datarest = join(",", @line);
+	$statsperfile{$id} = $datarest;	
+    }
+
+    $totalstats{reads} += $statsperfile{reads};
+    $totalstats{total_bases} += $statsperfile{total_bases};
+
+    $filestats{$infile_idx} = \%statsperfile;
+}
+
+my $avg_read_length =  $totalstats{total_bases} / $totalstats{reads};
+my $est_coverage = $totalstats{total_bases} / ($gsize * 1000000);
+print STDERR "\n\t\tTOTAL READS:\t$totalstats{reads}\n";
+print STDERR "\t\tTOTAL BASES:\t$totalstats{total_bases}\n";
+print STDERR "\t\tAVERAGE READ LENGTH:\t$avg_read_length\n";
+print STDERR "\t\tESTIMATED_COVERAGE:\t$est_coverage\n";
+
+
+##############################################################################
 ## Run REPdenovo
 ##############################################################################
 
-print_header("1) Run REPdenovo");
+print_header("2) Running REPdenovo");
 
-print STDERR "\t1.1- Checking the configuration file.\n";
+print STDERR "\t2.1- Checking the configuration file.\n";
+
+## Required fields will have default variables
+
+my %reqfields = (
+    'MIN_REPEAT_FREQ'        => 10,
+    'RANGE_ASM_FREQ_DEC'     => 2,
+    'RANGE_ASM_FREQ_GAP'     => 0.8,
+    'K_MIN'                  => 30,
+    'K_MAX'                  => 50,
+    'K_INC'                  => 10,
+    'K_DFT'                  => 30,
+    'READ_LENGTH'            => 100,
+    'GENOME_LENGTH'          => '',
+    'MIN_CONTIG_LENGTH'      => '',
+    'ASM_NODE_LENGTH_OFFSET' => -1,
+    'IS_DUPLICATE_REPEATS'   => 0.85,
+    'COV_DIFF_CUTOFF'        => 0.5,
+    'MIN_SUPPORT_PAIRS'      => 20,
+    'MIN_FULLY_MAP_RATIO'    => 0.2,
+    'TR_SIMILARITY'          => 0.85,
+    'TREADS'                 => 50,
+    'BWA_PATH'               => 'GLOBAL',
+    'SAMTOOLS_PATH'          => 'GLOBAL',
+    'JELLYFISH_PATH'         => 'GLOBAL',
+    'VELVET_PATH'            => 'GLOBAL',
+    'REFINER_PATH'           => 'GLOBAL',
+    'CONTIGS_MERGER_PATH'    => 'GLOBAL',
+    'OUTPUT_FOLDER'          => '',
+    'VERBOSE'                => 1
+    );
+
+## Aditionally some of the PATH will look for a tools name
+my %eqtoolname = (
+    'SAMTOOLS_PATH'          => 'samtools',
+    'JELLYFISH_PATH'         => 'jellyfish',
+    'VELVET_PATH'            => 'velveth',
+    'REFINER_PATH'           => 'TERefiner_1',
+    'CONTIGS_MERGER_PATH'    => 'ContigsMerger',
+    );
+
+my %rp_checks = 0;
+open my $rdncfg_fh, '<', $repnovo_conf;
+while(<$rdncfg_fh>) {
+
+    chomp($_);
+    my @line = split(/\s+/, $_);
+    $rp_checks{$line[0]} = $line[1];
+}
+
+## Now will check that all the required fields are there
+
+foreach my $req_repfields (sort(keys(%reqfields))) {
+
+    unless (exists $rp_checks{$req_repfields}) {
+    
+	die("ERROR: $req_repfields do not exists in the file: $repnovo_conf\n");
+    }
+}
+
+## If option -W is enabled, will overwrite the file with new data
+
+if ($opt_W) {
+
+    my $newrepcfg = File::Spec->catfile($outbase, "02_0_RepDenovo.cfg");
+    print STDERR "\tREWRITING a new RepDenovo configuration file: $newrepcfg\n";
+    
+    open my $rp_fh, '>', $newrepcfg;
+
+    foreach my $repfield (sort(keys %rp_checks)) {
+    
+	if ($repfield =~ m/PATH/) {
+	
+	    my $new_path = $exepath{$eqtoolname{$repfield}};
+	    print $rp_fh, "$repfield\t$new_path\n";
+	}
+	elsif ($repfield =~ /TREADS/) {
+	
+	    print $rp_fh, "$repfield\t$opt_t\n";
+	}
+	elsif ($repfield =~ /READ_LENGTH/) {
+	
+	    print $rp_fh, "$repfield\t$avg_read_length\n";
+	}
+	elsif ($repfield =~ /GENOME_LENGTH/) {
+
+	    print $rp_fh, "$repfield\t$gsize\n";
+	}
+	else {
+	
+	    print $rp_fh, "$repfield\t$rp_checks{$repfield}\n";
+	}
+    }
+}
+
 
 
 ##############################################################################
@@ -341,7 +514,8 @@ sub help {
 
       RepeatSpaceProfiler [-h] -i <input_filelist> -o <output_basedir> 
                           -r <repdenovo_config> -g <gene_space_fastaref>
-                          [-m <repeatmasker_args>]
+                          -g <genome_size_mb>
+			  [-m <repeatmasker_args>]
                           [-t <threads>] [-W]
 
     Description:
@@ -378,6 +552,8 @@ sub help {
      by the previous enviromental variables (e.g. VELVET_PATH), including 
      THREADS (with option -t) in case that you do not know where are the 
      executables. To re-write them use option -W.  
+
+     Option -s genome_size_mb is used to estimate coverage
  
     Flags:
 
@@ -385,6 +561,7 @@ sub help {
       -o <output_basedir>    name of the output directory (mandatory)
       -r <REPdenovo_config>  REPdenovo configuration file (mandatory)
       -g <gene_space_ref>    Fasta file with the gene space (mandatory)
+      -s <genome_size_mb>    Estimated genome size mb (mandatory)
       -m <Repeatmasker_args> Repeatmasker args separated by comma (optional)
       -t <threads>           Number of threads to run the process (optional)
       -W <rewrite_REPdenovo> Rewrite REPdenovo config file (optional)
