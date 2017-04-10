@@ -475,23 +475,23 @@ if ($opt_W) {
 	if ($repfield =~ m/PATH/) {
 	
 	    my $new_path = $exepath{$eqtoolname{$repfield}};
-	    print $rp_fh, "$repfield\t$new_path\n";
+	    print $rp_fh "$repfield\t$new_path\n";
 	}
 	elsif ($repfield =~ /TREADS/) {
 	
-	    print $rp_fh, "$repfield\t$opt_t\n";
+	    print $rp_fh "$repfield\t$opt_t\n";
 	}
 	elsif ($repfield =~ /READ_LENGTH/) {
 	
-	    print $rp_fh, "$repfield\t$avg_read_length\n";
+	    print $rp_fh "$repfield\t$avg_read_length\n";
 	}
 	elsif ($repfield =~ /GENOME_LENGTH/) {
 
-	    print $rp_fh, "$repfield\t$gsize\n";
+	    print $rp_fh "$repfield\t$gsize\n";
 	}
 	else {
 	
-	    print $rp_fh, "$repfield\t$rp_checks{$repfield}\n";
+	    print $rp_fh "$repfield\t$rp_checks{$repfield}\n";
 	}
     }
 }
