@@ -483,7 +483,19 @@ if ($opt_W) {
     
 	if ($repfield =~ m/PATH/) {
 	
-	    my $new_path = dirname($exepath{$eqtoolname{$repfield}});
+	    my $new_path = '';
+	    if ($repfield =~ m/REFINER_PATH/) {
+
+		$new_path = $exepath{$eqtoolname{$repfield}};
+	    }
+	    elsif ($repfield =~ m/CONTIGS_MERGER/) {
+
+		$new_path = $exepath{$eqtoolname{$repfield}};
+	    }
+	    else {
+
+		$new_path = dirname($exepath{$eqtoolname{$repfield}});
+	    }
 	    print $rp_fh "$repfield\t$new_path\n";
 	}
 	elsif ($repfield =~ /TREADS/) {
