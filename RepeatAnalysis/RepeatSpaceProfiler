@@ -492,7 +492,11 @@ if ($opt_W) {
 	}
 	elsif ($repfield =~ /READ_LENGTH/) {
 	
-	    print $rp_fh "$repfield\t$avg_read_length\n";
+	    ## Read length has to be multiple of 10
+	    my $int = Math::BigFloat->new($avg_read_length);
+	    my $round_int = $int->bfround(1)->bstr();
+
+	    print $rp_fh "$repfield\t$round_int\n";
 	}
 	elsif ($repfield =~ /GENOME_LENGTH/) {
 
