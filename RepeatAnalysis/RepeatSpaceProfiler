@@ -348,10 +348,6 @@ foreach my $infile_idx (sort(keys(%infiles))) {
 
     my @stats_cmd = ($exepath{'fastq-stats'}, $filename, '>', $fullstatsname);
     my $stats_cmd = join(" ", @stats_cmd);
-    if ($opt_V) {
-    
-	print STDERR "\n\tRunning command:\n\t$stats_cmd\n";
-    }
 
     my @run01stats = run( command => $stats_cmd, verbose => $opt_V );
 
@@ -478,8 +474,8 @@ my $repout_dir = File::Spec->catfile($outbase, "02_1_RepDenovo_out");
 
 if ($opt_W) {
 
-    my $newrepcfg = File::Spec->catfile($outbase, "02_0_RepDenovo.cfg");
-    print STDERR "\n\tREWRITING a new RepDenovo config. file: $newrepcfg\n";
+    $repdenovo_conf = File::Spec->catfile($outbase, "02_0_RepDenovo.cfg");
+    print STDERR "\n\tREWRITING a new RepDenovo cfg. file: $repdenovo_conf\n";
     
     open my $rp_fh, '>', $newrepcfg;
 
@@ -525,17 +521,12 @@ print STDERR "\n\tREPdenovo OUTPUT_FOLDER:\t$repout_dir\n";
 
 ## Now it will run REPdenovo
 
-print STDERR "\t2.2- Running REPdenovo.\n";
+print STDERR "\t2.2- Running REPdenovo.\n\n";
 
 my @repdenovo_cmd = ("python", $exepath{'main.py'}, '-c', 'All');
-push @repdenovo_cmd, ("-g", "$repout_dir");
+push @repdenovo_cmd, ("-g", "$repdenovo_conf");
 push @repdenovo_cmd, ("-r", "$infile");
 my $repdenovo_cmd = join(" ", @repdenovo_cmd);  
-
-if ($opt_V) {
-    
-    print STDERR "\n\tRunning command:\n\t$repdenovo_cmd\n";
-}
 
 my @run02repdenovo = run( command => $repdenovo_cmd, verbose => $opt_V );
 
