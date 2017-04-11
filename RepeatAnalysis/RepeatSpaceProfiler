@@ -479,11 +479,11 @@ if ($opt_W) {
     
     open my $rp_fh, '>', $repnovo_conf;
 
-    foreach my $repfield (sort(@sortrepfields)) {
+    foreach my $repfield (@sortrepfields) {
     
 	if ($repfield =~ m/PATH/) {
 	
-	    my $new_path = $exepath{$eqtoolname{$repfield}};
+	    my $new_path = dirname($exepath{$eqtoolname{$repfield}});
 	    print $rp_fh "$repfield\t$new_path\n";
 	}
 	elsif ($repfield =~ /TREADS/) {
