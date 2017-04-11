@@ -472,6 +472,13 @@ foreach my $req_repfields (sort(keys(%reqfields))) {
 
 my $repout_dir = File::Spec->catfile($outbase, "02_1_RepDenovo_out");
 
+my %fullpathnames = (
+    'REFINER_PATH'        => 1,
+    'CONTIGS_MERGER_PATH' => 1,
+    'SAMTOOLS_PATH'       => 1
+    );
+
+
 if ($opt_W) {
 
     $repnovo_conf = File::Spec->catfile($outbase, "02_0_RepDenovo.cfg");
@@ -484,11 +491,7 @@ if ($opt_W) {
 	if ($repfield =~ m/PATH/) {
 	
 	    my $new_path = '';
-	    if ($repfield =~ m/REFINER_PATH/) {
-
-		$new_path = $exepath{$eqtoolname{$repfield}};
-	    }
-	    elsif ($repfield =~ m/CONTIGS_MERGER/) {
+	    if (exists $fullpathnames{$repfield}) {
 
 		$new_path = $exepath{$eqtoolname{$repfield}};
 	    }
