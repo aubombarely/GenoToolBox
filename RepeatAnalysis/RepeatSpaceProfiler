@@ -474,6 +474,8 @@ foreach my $req_repfields (sort(keys(%reqfields))) {
 
 ## If option -W is enabled, will overwrite the file with new data
 
+my $repout_dir = File::Spec->catfile($outbase, "02_1_RepDenovo_out");
+
 if ($opt_W) {
 
     my $newrepcfg = File::Spec->catfile($outbase, "02_0_RepDenovo.cfg");
@@ -500,13 +502,54 @@ if ($opt_W) {
 
 	    print $rp_fh "$repfield\t$gsize\n";
 	}
+	elsif ($repfield =~ /OUTPUT_FOLDER/) {
+	
+	    print $rp_fh "$repfield\t$repout_dir\n";
+	}
 	else {
 	
 	    print $rp_fh "$repfield\t$rp_checks{$repfield}\n";
 	}
     }
 }
+else {
 
+    ## If the option -W is not active it will overwrite the $repout_dir
+    ## with the parse information from the config file
+
+    $repout_dir = $rp_checks{OUTPUT_FOLDER};
+
+}
+
+print STDERR "\n\tREPdenovo OUTPUT_FOLDER:\t$repout_dir\n";
+
+## Now it will run REPdenovo
+
+print STDERR "\t2.2- Running REPdenovo.\n";
+
+my @repdenovo_cmd = ("python", $exepath{'main.py'}, '-c', 'All');
+push @repdenovo_cmd, ("-g", "$repout_dir");
+push @repdenovo_cmd, ("-r", "$infile");
+my $repdenovo_cmd = join(" ", @repdenovo_cmd);  
+
+if ($opt_V) {
+    
+    print STDERR "\n\tRunning command:\n\t$repdenovo_cmd\n";
+}
+
+my @run02repdenovo = run( command => $repdenovo_cmd, verbose => $opt_V );
+
+
+##############################################################################
+## FINAL MESSAGE
+##############################################################################
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## RepeatSpaceProfiler Ends ($date)   ##\n";
+print STDERR "############################################################\n\n";
+exit;
 
 
 ##############################################################################
