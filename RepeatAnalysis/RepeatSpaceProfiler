@@ -474,10 +474,10 @@ my $repout_dir = File::Spec->catfile($outbase, "02_1_RepDenovo_out");
 
 if ($opt_W) {
 
-    $repdenovo_conf = File::Spec->catfile($outbase, "02_0_RepDenovo.cfg");
-    print STDERR "\n\tREWRITING a new RepDenovo cfg. file: $repdenovo_conf\n";
+    $repnovo_conf = File::Spec->catfile($outbase, "02_0_RepDenovo.cfg");
+    print STDERR "\n\tREWRITING a new RepDenovo config. file: $repnovo_conf\n";
     
-    open my $rp_fh, '>', $newrepcfg;
+    open my $rp_fh, '>', $repnovo_conf;
 
     foreach my $repfield (sort(@sortrepfields)) {
     
@@ -524,7 +524,7 @@ print STDERR "\n\tREPdenovo OUTPUT_FOLDER:\t$repout_dir\n";
 print STDERR "\t2.2- Running REPdenovo.\n\n";
 
 my @repdenovo_cmd = ("python", $exepath{'main.py'}, '-c', 'All');
-push @repdenovo_cmd, ("-g", "$repdenovo_conf");
+push @repdenovo_cmd, ("-g", "$repnovo_conf");
 push @repdenovo_cmd, ("-r", "$infile");
 my $repdenovo_cmd = join(" ", @repdenovo_cmd);  
 
