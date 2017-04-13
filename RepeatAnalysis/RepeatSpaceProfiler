@@ -14,6 +14,7 @@ our $version = '0.1.0';
  RepeatSpaceProfiler [-h] -i <input_filelist> -o <output_basedir> 
                           -r <repdenovo_config> -g <gene_space_fastaref>
                           -s <genome_size_mb>
+                          [-n <sample_names>]
                           [-m <repeatmasker_args>]
                           [-t <threads>] [-W]
 
@@ -41,6 +42,10 @@ B<gene_space_fastaref>    Fasta file with the gene space (mandatory)
 =item -s
 
 B<genome_size>            Estimated genome size as kb, mb or gb (mandatory)
+
+=item -n
+
+B<sample_name>            String with group=sample_name sep. by , (optional)
 
 =item -m
 
@@ -108,6 +113,12 @@ B<help>                   print the help
  Option -s is used to estimate genome coverage. It needs the units (e.g. kb,
  mb or gb).
 
+ Sample names can be used to identify the files supplied in the input file 
+ (-i). Samples will be cluster by group number, so for example if you are using
+ three samples, six files in the input file, with three groups, you can tag 
+ them using -n '1=SampleA,2=SampleB,3=SampleC'.
+
+
 =cut
 
 =head1 AUTHORS
@@ -138,11 +149,11 @@ use IPC::Cmd qw[can_run run];
 use Bio::SeqIO;
 use Math::BigFloat;
 
-our ($opt_i, $opt_o, $opt_r, $opt_g, $opt_s, $opt_m, $opt_t, $opt_W, $opt_V, 
-     $opt_v, $opt_h);
-getopts("i:o:r:g:s:m:t:WVvh");
-if (!$opt_i && !$opt_o && !$opt_r && !$opt_g && !$opt_s && !$opt_m && !$opt_t 
-    && !$opt_W && !$opt_V && !$opt_v && !$opt_h) {
+our ($opt_i, $opt_o, $opt_r, $opt_g, $opt_s, $opt_n, $opt_m, $opt_t, $opt_W, 
+     $opt_V, $opt_v, $opt_h);
+getopts("i:o:r:g:s:n:m:t:WVvh");
+if (!$opt_i && !$opt_o && !$opt_r && !$opt_g && !$opt_s && !$opt_m && !$opt_n 
+    && !$opt_t && !$opt_W && !$opt_V && !$opt_v && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -179,6 +190,8 @@ my $infile = $opt_i ||
 ## Check that the input file has the right number of columns
 
 my %infiles = ();
+my %gpnames = (); 
+
 open my $infh, '<', $infile;
 my $n = 0;
 while(<$infh>) {
@@ -195,7 +208,33 @@ while(<$infh>) {
 	'insert_size'    => $line[2],
 	'sd_insert_size' => $line[3],
     };
+
+    $gpnames{$line[1]} = $line[1];
 }
+
+if ($opt_n) {
+
+    ## Parse the line
+    my @snames = split(/,/, $opt_n);
+    if (scalar(@snames) != scalar(keys(%gpnames))) {
+    
+	die("ERROR: -n <sample> names is not the same than groups at $opt_i\n");
+    }
+    
+    foreach my $sname (@snames) {
+
+	my @sitems = split(/=/, $sname);
+	unless (exists $gpnames{$sitems[0]}) {
+	
+	    die("ERROR: group $sitems[0] from -n dont exist at -i $opt_i\n");
+	}
+	else {
+	
+	    $gpnames{$sitems[0]} = $sitems[1];
+	}
+    }
+} 
+
 
 print STDERR "\tInput file list:\t$infile with $n files\n";
 
@@ -556,7 +595,7 @@ else {
 
 }
 
-print STDERR "\n\tREPdenovo OUTPUT_FOLDER:\t$repout_dir\n";
+print STDERR "\tREPdenovo OUTPUT_FOLDER:\t$repout_dir\n\n";
 
 ## Now it will run REPdenovo
 
@@ -568,6 +607,43 @@ push @repdenovo_cmd, ("-r", "$infile");
 my $repdenovo_cmd = join(" ", @repdenovo_cmd);  
 
 my @run02repdenovo = run( command => $repdenovo_cmd, verbose => $opt_V );
+
+print STDERR "\t2.3- Parsing REPdenovo output\n\n";
+
+## REPdenovo produces basically three important files
+## 1- contigs.fa with all the predicted repeats.
+## 2- X_contig_pairs_info.txt_cov_info_with_cutoff.txt
+## 3- contigs.fa_X.sort.bam with the read remap to the contig.fa
+## X will be GroupN - 1
+
+my $repcontigs_file = File::Spec->catfile($repout_dir, 'contigs.fa');
+my %repcov4smp = ();
+my %repbam4smp = ();
+
+foreach my $gp (sort (keys %gpnames)) {
+
+    my $idx = $gp - 1;
+    my $suffix1 = "_contig_pairs_info.txt_cov_info_with_cutoff.txt"; 
+    my $base_ctg_cov = join("_", ($idx, $suffix1));
+    my $ctg_cov = File::Spec->catfile($repout_dir, $base_ctg_cov);
+
+    my %covdata = ();
+    open my $covfh, '<', $ctg_cov;
+    while(<$covfh>) {
+
+	chomp($_);
+	my @line = split(/\s+/, $_); 
+	my $repID = shift(@line);
+	$covdata{$repID} = { 'RepeatLE' => $line[0], 'RepeatCV' => $line[1] };
+    }
+    $repcov4smp{$gp} = \%covdata;
+    my $bamname = join("_", ('contigs.fa', join(".", ($idx, "sort.bam"))));
+    $repbam4smp{$gp} = File::Spec->catfile($repout_dir, $bamname);
+}
+
+my $rep_number = `grep -c ">" $repcontigs_file`;
+chomp($rep_number); 
+print STDERR "\n\tREPdenovo has produced $rep_number repeats.\n";
 
 
 ##############################################################################
@@ -608,6 +684,7 @@ sub help {
       RepeatSpaceProfiler [-h] -i <input_filelist> -o <output_basedir> 
                           -r <repdenovo_config> -g <gene_space_fastaref>
                           -g <genome_size>
+                          [-s <sample_name>]
 			  [-m <repeatmasker_args>]
                           [-t <threads>] [-W]
 
@@ -646,7 +723,12 @@ sub help {
      THREADS (with option -t) in case that you do not know where are the 
      executables. To re-write them use option -W.  
 
-     Option -s genome_size_mb is used to estimate coverage
+     Option -s genome_size_mb is used to estimate coverage.
+
+      Sample names can be used to identify the files supplied in the input file 
+      (-i). Samples will be cluster by group number, so for example if you are 
+      using three samples, six files in the input file, with three groups, 
+      you can tag them using -n '1=SampleA,2=SampleB,3=SampleC'.
  
     Flags:
 
@@ -655,6 +737,7 @@ sub help {
       -r <REPdenovo_config>  REPdenovo configuration file (mandatory)
       -g <gene_space_ref>    Fasta file with the gene space (mandatory)
       -s <genome_size>       Estimated genome size kb,mb or gb (mandatory)
+      -s <sample_name>       Sample name as group=name sep. by , (optional)
       -m <Repeatmasker_args> Repeatmasker args separated by comma (optional)
       -t <threads>           Number of threads to run the process (optional)
       -W <rewrite_REPdenovo> Rewrite REPdenovo config file (optional)
