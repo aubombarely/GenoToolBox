@@ -223,7 +223,7 @@ if ($opt_n) {
 	die("ERROR: -n <sample> names is not the same than groups at $opt_i\n");
     }
 
-    print STDERR "\tSample Names List:";
+    print STDERR "\tSample Names List:\n";
     
     foreach my $sname (@snames) {
 
@@ -818,14 +818,14 @@ foreach my $gp (sort(keys(%repcov4smp))) {
 	    }
  
 	    my $rep_len = $repcov4smp{$gp}->{$repid}->{"RepeatLE"};	    
-	    $rep_id_line{$repid} = [$class, $rep_len, $rep_cov];
+	    $rep_id_line{$repid} = [$repid, $class, $rep_len, $rep_cov];
 	}
 	else {
 	
 	    push @{$rep_id_line{$repid}}, $rep_cov; 
 	}
-	$s++;
     }
+    $s++;
 }
 
 ## Now it will create a tab file
