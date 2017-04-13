@@ -294,7 +294,7 @@ my %repmask_permarg = (
     '-excln' => 1
 );
 
-my @repmask_args = ();
+my %repmask_args = ();
 if ($opt_m) {
     
     foreach my $repmask_arg (split(/,/, $opt_m)) {
@@ -307,13 +307,14 @@ if ($opt_m) {
 	}
 	else {
 	
-	    push(@repmask_args, join(" ", @pairs));
+	    my $repval = $pairs[1] || '';
+	    $repmask_args{$pairs[0]} = $repval;
 	}
     } 
 }
-my $count_repmask_args = scalar(@repmask_args); 
+my $count_repmask_args = scalar(keys(%repmask_args)); 
 print STDERR "\tInput RepeatMasker arguments:\n";
-foreach my $repmk_arg (@repmask_args) {
+foreach my $repmk_arg (%repmask_args) {
     print STDERR "\t\tArgument:\t$repmk_arg\n";
 }
 
@@ -624,7 +625,7 @@ my %repbam4smp = ();
 foreach my $gp (sort (keys %gpnames)) {
 
     my $idx = $gp - 1;
-    my $suffix1 = "_contig_pairs_info.txt_cov_info_with_cutoff.txt"; 
+    my $suffix1 = "contig_pairs_info.txt_cov_info_with_cutoff.txt"; 
     my $base_ctg_cov = join("_", ($idx, $suffix1));
     my $ctg_cov = File::Spec->catfile($repout_dir, $base_ctg_cov);
 
@@ -645,6 +646,49 @@ foreach my $gp (sort (keys %gpnames)) {
 my $rep_number = `grep -c ">" $repcontigs_file`;
 chomp($rep_number); 
 print STDERR "\n\tREPdenovo has produced $rep_number repeats.\n";
+
+##############################################################################
+## Read identification using RepeatMasker
+##############################################################################
+
+print_header("3) Repeat groups identification");
+
+print STDERR "\t3.1- Running RepeatMasker.\n";
+
+## Create an output dir
+my $repmask_dir = File::Spec->catfile($outbase, "03_1_RepeatMasker_out");
+mkdir($repmask_dir);
+
+## The command will be build as:
+## executable arguments input
+
+## First check if %repmask_args has any argument for process
+
+unless (exists $repmask_args{'-pa'}) {
+
+    $repmask_args{'-pa'} = $threads;
+}
+unless (exists $repmask_args{'-gff'}) {
+
+     $repmask_args{'-gff'} = '';
+}
+
+## Replace the output dir
+
+$repmask_args{'-dir'} = $repmask_dir;
+
+## Build the command
+
+my @repmask_cmd = ($exepath{'RepeatMasker'});
+foreach my $rmsk (sort(keys(%repmask_args))) {
+
+    my $cmd_arg = join(" ", ($rmsk, $repmask_args{$rmsk})); 
+    push @repmask_cmd, $cmd_arg;
+}
+
+push @repmask_cmd, $repcontigs_file;
+my $repmasker_cmd = join(" ", @repmask_cmd); 
+my @run02repmasker = run( command => $repmasker_cmd, verbose => $opt_V );
 
 
 ##############################################################################
