@@ -701,9 +701,9 @@ my $repmk_basepout = basename($repcontigs_file) . ".out";
 my $repmk_fullpout = File::Spec->catfile($repmask_dir, $repmk_basepout);
 
 my @repmk_header = ('SW_score', 'Div%', "Del%", "Ins%", "QueryID", 
-		    "QueryStart", "QueryEnd", "QueryLeft", "MatchRepeat", 
-		    "RepeatClass","RepDBStart", "RepDBEnd", "RepLeft", 
-		    "RM_ID"); 
+		    "QueryStart", "QueryEnd", "QueryLeft", "MatchOrientation", 
+		    "MatchRepeat", "RepeatClass","RepDBStart", "RepDBEnd", 
+		    "RepLeft", "RM_ID"); 
 
 ## The program will classify the repeats in two categories
 ## 1- Simple, with only one repeat class
