@@ -529,7 +529,7 @@ if ($opt_W) {
 	
 	    ## Read length has to be multiple of 10
 	    my $int = Math::BigFloat->new($avg_read_length);
-	    my $round_int = $int->bfround(1)->bstr();
+	    my $round_int = $int->bfround(2)->bstr();
 
 	    print $rp_fh "$repfield\t$round_int\n";
 	}
