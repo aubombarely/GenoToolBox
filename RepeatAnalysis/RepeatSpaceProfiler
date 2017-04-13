@@ -484,22 +484,42 @@ if ($opt_W) {
     $repnovo_conf = File::Spec->catfile($outbase, "02_0_RepDenovo.cfg");
     print STDERR "\n\tREWRITING a new RepDenovo config. file: $repnovo_conf\n";
     
+    ## The PATH for the REPdenovo configuration file could be tricky
+    ## Some of the paths, such as samtools requires the whole path
+    ## meanwhile others such as Velvet does not. Additionally some
+    ## of them work better with GLOBAL. For executables in the PATH
+    ## the program will replace them by GLOBAL
+    
+    my %global_path = ();
+    foreach my $gpath (split(/:/, $ENV{PATH})) {
+	
+	$global_path{$gpath} = 1;
+    }
+
     open my $rp_fh, '>', $repnovo_conf;
 
     foreach my $repfield (@sortrepfields) {
     
 	if ($repfield =~ m/PATH/) {
-	
-	    my $new_path = '';
-	    if (exists $fullpathnames{$repfield}) {
 
-		$new_path = $exepath{$eqtoolname{$repfield}};
+	    my $dirpath = dirname($exepath{$eqtoolname{$repfield}});
+	    
+	    if (exists $global_path{$dirpath}) {
+	    
+		print $rp_fh "$repfield\tGLOBAL\n";
 	    }
 	    else {
 
-		$new_path = dirname($exepath{$eqtoolname{$repfield}});
+		if (exists $fullpathnames{$repfield}) {
+
+		    my $new_path = $exepath{$eqtoolname{$repfield}};
+		    print $rp_fh "$repfield\t$new_path\n";
+		}
+		else {
+
+		    print $rp_fh "$repfield\t$dirpath\n";
+		}
 	    }
-	    print $rp_fh "$repfield\t$new_path\n";
 	}
 	elsif ($repfield =~ /TREADS/) {
 	
