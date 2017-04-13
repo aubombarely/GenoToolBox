@@ -212,6 +212,8 @@ while(<$infh>) {
     $gpnames{$line[1]} = $line[1];
 }
 
+print STDERR "\tInput file list:\t$infile with $n files\n";
+
 if ($opt_n) {
 
     ## Parse the line
@@ -220,6 +222,8 @@ if ($opt_n) {
     
 	die("ERROR: -n <sample> names is not the same than groups at $opt_i\n");
     }
+
+    print STDERR "\tSample Names List:";
     
     foreach my $sname (@snames) {
 
@@ -234,10 +238,9 @@ if ($opt_n) {
 	    $gpnames{$sitems[0]} = $sitems[1];
 	}
     }
+    print STDERR "\n";
 } 
 
-
-print STDERR "\tInput file list:\t$infile with $n files\n";
 
 my $outbase = $opt_o || 
     die("\nINPUT ARG. ERROR: -o <out_basename> argument was not supplied.\n\n");
@@ -689,6 +692,154 @@ foreach my $rmsk (sort(keys(%repmask_args))) {
 push @repmask_cmd, $repcontigs_file;
 my $repmasker_cmd = join(" ", @repmask_cmd); 
 my @run02repmasker = run( command => $repmasker_cmd, verbose => $opt_V );
+
+## Now it will parse the RepeatMasker output
+
+print STDERR "\t3.2- Parsing RepeatMasker output.\n";
+
+my $repmk_basepout = basename($repcontigs_file) . ".out";
+my $repmk_fullpout = File::Spec->catfile($repmask_dir, $repmk_basepout);
+
+my @repmk_header = ('SW_score', 'Div%', "Del%", "Ins%", "QueryID", 
+		    "QueryStart", "QueryEnd", "QueryLeft", "MatchRepeat", 
+		    "RepeatClass","RepDBStart", "RepDBEnd", "RepLeft", 
+		    "RM_ID"); 
+
+## The program will classify the repeats in two categories
+## 1- Simple, with only one repeat class
+## 2- Complex, with two or more repeat classes.
+
+my %rep_accounts = ();
+my %rep_annots = ();
+open my $rmk_fh, '<', $repmk_fullpout;
+while(<$rmk_fh>) {
+
+    chomp($_); 
+    $_ =~ s/^\s+//;
+    if ($_ =~ m/^\d+/) {
+    
+	$_ =~ s/\s+/\t/g;
+	my @line = split(/\t/, $_); 
+
+	## Structure to store the data. QueryID can be redundant, but still
+	## it should be able to be accessible as a hash key
+	## KEY = QueryID and VALUE = ARRAYREFs of HASHREFs.
+	
+	my %repdata = ();
+	my $n = 0;
+	foreach my $rep_h (@repmk_header) {
+	
+	    $repdata{$rep_h} = $line[$n];
+	    $n++;
+	}
+
+	my $repclass = $repdata{'RepeatClass'};
+
+	if (exists $rep_annots{$repdata{'QueryID'}}) {
+	
+	    push @{$rep_annots{$repdata{'QueryID'}}}, \%repdata;
+	    if (exists $rep_accounts{$repdata{'QueryID'}}->{$repclass}) {
+	    
+		$rep_accounts{$repdata{'QueryID'}}->{$repclass}++;
+	    }
+	    else {
+	    
+		$rep_accounts{$repdata{'QueryID'}}->{$repclass} = 1;
+	    }
+	}
+	else {
+	
+	    $rep_annots{$repdata{'QueryID'}} = [\%repdata];
+	    $rep_accounts{$repdata{'QueryID'}} = { $repclass => 1 };
+	}
+    }
+}
+
+## Now it will get the stats to print them
+
+my %simple_reps = ();
+my %complex_reps = ();
+
+foreach my $qid (sort(keys(%rep_accounts))) {
+
+    my @reps = sort(keys(%{$rep_accounts{$qid}}));
+    my $repname = join("|+|", @reps); 
+
+    if (scalar(@reps) == 1) {
+    
+	$simple_reps{$repname}++;
+    }
+    else {
+    
+	$complex_reps{$repname}++;
+    }
+}
+
+## Now it will print the results
+
+print STDERR "\tSummary Repeat Identification Stage 1:\n";
+print STDERR "\t\tSimple Repeats:\n";
+foreach my $s_rep (sort(keys(%simple_reps))) {
+
+    print STDERR "\t\t\t$s_rep\t$simple_reps{$s_rep}\n";
+}
+print STDERR "\t\tComplex Repeats:\n";
+foreach my $c_rep (sort(keys(%complex_reps))) {
+
+    print STDERR "\t\t\t$c_rep\t$complex_reps{$c_rep}\n";
+}
+
+## it will also change the repetive abundance file
+## $repcov4smp{$gp} = { ID => { LEN => $LEN, CV => $CV } };
+## It will generate a table as:
+## RepeatID\tClass\tLEN\tCV_SAMPLE1\tCV_SAMPLE2...
+my @rep_abund_header = ('##RepeatID', 'RepeatClass', 'RepeatLength');
+my %rep_id_line = ();
+
+my $s = 0;
+foreach my $gp (sort(keys(%repcov4smp))) {
+
+    push @rep_abund_header, $gpnames{$gp};
+    foreach my $repid (sort(keys(%{$repcov4smp{$gp}}))) {
+    
+	my $rep_cov = $repcov4smp{$gp}->{$repid}->{"RepeatCV"};
+	if ($s == 0) {
+	    
+	    my $class = 'Unknown';
+	    if (exists $rep_annots{$repid}) {
+
+		my @repdata_list = @{$rep_annots{$repid}}; 
+		my @class = ();
+		foreach my $repdata_item (@repdata_list) {
+		
+		    push @class, $repdata_item->{'RepeatClass'};
+		}
+		$class = join("|+|", sort(@class)); 
+	    }
+ 
+	    my $rep_len = $repcov4smp{$gp}->{$repid}->{"RepeatLE"};	    
+	    $rep_id_line{$repid} = [$class, $rep_len, $rep_cov];
+	}
+	else {
+	
+	    push @{$rep_id_line{$repid}}, $rep_cov; 
+	}
+	$s++;
+    }
+}
+
+## Now it will create a tab file
+
+my $repann_file = File::Spec->catfile($outbase, "03_2_RepDenovoAnnotated.txt");
+open my $repann_fh, '>', $repann_file;
+my $rep_abund_pheader = join("\t", @rep_abund_header);
+print $repann_fh "$rep_abund_pheader\n";
+foreach my $rep_id (sort(keys(%rep_id_line))) {
+
+    my $rep_line = join("\t", @{$rep_id_line{$rep_id}});
+    print $repann_fh "$rep_line\n";
+}
+
 
 
 ##############################################################################
