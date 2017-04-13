@@ -230,6 +230,7 @@ if ($opt_n) {
 	}
 	else {
 	
+	    print STDERR "\t\tSample $sitems[1] linked to group $sitems[0]\n";
 	    $gpnames{$sitems[0]} = $sitems[1];
 	}
     }
