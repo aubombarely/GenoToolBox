@@ -212,6 +212,8 @@ my %libfeats = ();
 
 my %perm_pairs = ( 'S' => 1, 'R' => 1, 'F' => 1);
 
+print STDERR "\tInput file list:\n";
+
 open my $infh, '<', $infile;
 my $n = 0;
 while(<$infh>) {
@@ -245,6 +247,8 @@ while(<$infh>) {
 	else {
 	
 	    $samplefiles{$line[0]} = { $line[2] => $line[1] };
+	    print STDERR "\t\t\tAdded file $line[1] as sample $line[0] ";
+	    print STDERR "type$line[2]\n";
 	}
     }
     else {
@@ -254,10 +258,13 @@ while(<$infh>) {
 	    'insert_size'    => $line[3], 
 	    'sd_insert_size' => $line[4] 
 	}
+
+	print STDERR "\t\t\tAdded file $line[1] as sample $line[0] ";
+	print STDERR "type $line[2]\n";
     }
 }
 
-print STDERR "\tInput file list:\t$infile with $n files\n";
+
     
 my $outbase = $opt_o || 
     die("\nINPUT ARG. ERROR: -o <out_basename> argument was not supplied.\n\n");
@@ -409,7 +416,7 @@ if ($opt_c) {
     ## to the contaminant file
 
     ## first create the index
-    print STDERR "\t0.1- Contaminant fasta reference indexing\n";    
+    print STDERR "\t0.1- Contaminant fasta reference indexing\n\n";    
 
     my $filter_dir = File::Spec->catfile($outbase, "00_1_ReadFilter");
     mkdir($filter_dir);
@@ -423,7 +430,7 @@ if ($opt_c) {
 
     ## Running the mapping
 
-    print STDERR "\t0.2- Read mapping and bam filtering\n";    
+    print STDERR "\t0.2- Read mapping and bam filtering\n\n";    
 
     my %bamfiles = ();
 
@@ -470,7 +477,7 @@ if ($opt_c) {
     
     ## Finally it will go from bam => fastq
 
-    print STDERR "\t0.3- Bam to fastq\n";  
+    print STDERR "\t0.3- Bam to fastq\n\n";  
 
     foreach my $smp (sort(keys(%bamfiles))) {
 
