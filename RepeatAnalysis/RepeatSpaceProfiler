@@ -101,6 +101,7 @@ B<help>                   print the help
  - TERefiner_1 ($REFINER_PATH) (included REPdenovo package).
  - ContigsMerger ($CONTIGS_MERGER_PATH) (included REPdenovo package).  
  - Fastq-stats ($FASTQSTATS_PATH) (https://github.com/ExpressionAnalysis/).
+ - Bedtools ($BEDTOOLS_PATH) (http://bedtools.readthedocs.io/en/latest/)
 
  Additionally the program will need BioPerl and the requeriments of the
  mentioned programs (e.g. RMBlast for Repeatmasker).
@@ -330,7 +331,8 @@ my %exec_list = (
     SAMTOOLS_PATH   => ['samtools'],
     JELLYFISH_PATH  => ['jellyfish'],
     VELVET_PATH     => ['velveth'],
-    FASTQSTATS_PATH => ['fastq-stats']
+    FASTQSTATS_PATH => ['fastq-stats'],
+    BEDTOOLS_PATH   => ['bedtools'],
     );
 
 my %exepath = ();
@@ -650,6 +652,59 @@ my $rep_number = `grep -c ">" $repcontigs_file`;
 chomp($rep_number); 
 print STDERR "\n\tREPdenovo has produced $rep_number repeats.\n";
 
+## At this step will produce a file with the coverage per position using
+## bedtools. This will be used latter on to recover the reads and assess the
+## completeness of the consensus repeat 
+
+print STDERR "\t2.3- Generating bedtools coverage files for REPdenovo\n\n";
+
+my %maxcov = ();
+
+foreach my $gp (sort (keys %gpnames)) {
+
+    my $idx = $gp - 1;
+    my $base_bam = "contigs.fa_" . $idx . "sam_for_coverage.sorted.bam"; 
+    my $full_bam = File::Spec->catfile($repout_dir, $base_bam);
+    my $full_gidx = File::Spec->catfile($repout_dir, "contigs.fa.fai");
+
+    my $base_covbed = "contigs.fa_" . $idx . ".bedcov.txt";
+    my $full_covbed = File::Spec->catfile($repout_dir, $base_covbed);
+
+    my @covbed_cmd = ($exepath{'bedtools'}, 'genomecov', '-d');
+    push @covbed_cmd, ('-ibam', $full_bam);
+    push @covbed_cmd, ('-g', $full_gidx);
+    push @covbed_cmd, ('>', $full_covbed);
+    my $covbed_cmd = join(" ", @covbed_cmd);
+
+    my @run01covbed = run( command => $covbed_cmd, verbose => $opt_V );    
+
+    ## The program will parse the covbed to look for the maximum (it will
+    ## use this to retrieve the max. reads).
+
+    $maxcov{$gp} = {};
+    
+    open my $cov_fh, '<', $full_covbed;
+    while(<$cov_fh>) {
+	
+	chomp($_);
+	my @line = split(/\t/, $_); 
+	if (exists $maxcov{$gp}->{$line[0]}) {
+	
+	    my $prev_cov = $maxcov{$gp}->{$line[0]}->[2];
+	    if ($line[2] > $prev_cov) {
+	    
+		$maxcov{$gp}->{$line[0]} = \@line;
+	    }
+	}
+	else {
+
+	    ## it will store the coverage as arrayref with ID, POS, COV
+	    $maxcov{$gp}->{$line[0]} = \@line;
+	}
+    }
+}
+
+
 ##############################################################################
 ## Read identification using RepeatMasker
 ##############################################################################
@@ -840,6 +895,18 @@ foreach my $rep_id (sort(keys(%rep_id_line))) {
     print $repann_fh "$rep_line\n";
 }
 
+##############################################################################
+## Repeat Borders
+##############################################################################
+
+print_header("4) Retrieving Borders and Core Repeat Reads");
+
+print STDERR "\t4.1- Getting coverage per position.\n";
+
+## First, the program
+
+
+
 
 
 ##############################################################################
@@ -910,6 +977,7 @@ sub help {
       - TERefiner_1 (\$REFINER_PATH) (included REPdenovo package).
       - ContigsMerger (\$CONTIGS_MERGER_PATH) (included REPdenovo package).  
       - Fastq-stats (\$FASTQSTATS_PATH) (https://github.com/ExpressionAnalysis).
+      - Bedtools (\$BEDTOOLS_PATH) (http://bedtools.readthedocs.io/en/latest/).
 
      Additionally the program will need BioPerl and the requeriments of the
      mentioned programs (e.g. RMBlast for Repeatmasker).
