@@ -119,6 +119,14 @@ B<help>                   print the help
  three samples, six files in the input file, with three groups, you can tag 
  them using -n '1=SampleA,2=SampleB,3=SampleC'.
 
+ The program will produce a file: "03_2_RepDenovoAnnotated.txt" with the 
+ following columns (N depends of the number of groups):
+   1- RepeatID (based in the REPdenovo analysis)
+   2- RepeatClass (based in the RepeatMasker annotation)
+   3- RepeatLength
+   Na- Sample_CvMean (Mean coverage based in the REPdenovo analysis) 
+   Nb- Sample_BPKM (Bases per 1Kb repeat size per 1M reads)
+   Nc- Sample_EstCp (Estimated number of copies in the genome) 
 
 =cut
 
@@ -380,12 +388,19 @@ my $instatsdir = File::Spec->catfile($outbase, "01_0_FastqInputStats");
 mkdir($instatsdir);
 
 my %filestats = ();
+my %readstats_by_group = ();
 my %totalstats = ( reads => 0, total_bases => 0 ); 
 
 foreach my $infile_idx (sort(keys(%infiles))) {
 
     my $filename = $infiles{$infile_idx}->{file};
+    my $group = $infiles{$infile_idx}->{group};
+
+    unless (exists $readstats_by_group{$group}) {
     
+	$readstats_by_group{$group} = { 'reads' => 0, 'total_bases' => 0};
+    }
+
     ## Remove the extension
     my $basename = basename($filename);
     $basename =~ s/\.\w+$//;
@@ -425,6 +440,8 @@ foreach my $infile_idx (sort(keys(%infiles))) {
 
     $totalstats{reads} += $statsperfile{reads};
     $totalstats{total_bases} += $statsperfile{total_bases};
+    $readstats_by_group{$group}->{reads} += $statsperfile{reads};
+    $readstats_by_group{$group}->{total_bases} += $statsperfile{total_bases};
 
     $filestats{$infile_idx} = \%statsperfile;
 }
@@ -659,6 +676,7 @@ print STDERR "\n\tREPdenovo has produced $rep_number repeats.\n";
 print STDERR "\t2.3- Generating bedtools coverage files for REPdenovo\n\n";
 
 my %maxcov = ();
+my %bp_repid = ();
 
 foreach my $gp (sort (keys %gpnames)) {
 
@@ -682,6 +700,7 @@ foreach my $gp (sort (keys %gpnames)) {
     ## use this to retrieve the max. reads).
 
     $maxcov{$gp} = {};
+    $bp_repid{$gp} = {};
     
     open my $cov_fh, '<', $full_covbed;
     while(<$cov_fh>) {
@@ -695,11 +714,13 @@ foreach my $gp (sort (keys %gpnames)) {
 	    
 		$maxcov{$gp}->{$line[0]} = \@line;
 	    }
+	    $bp_repid{$gp}->{$line[0]} += $line[2];
 	}
 	else {
 
 	    ## it will store the coverage as arrayref with ID, POS, COV
 	    $maxcov{$gp}->{$line[0]} = \@line;
+	    $bp_repid{$gp}->{$line[0]} = $line[2];
 	}
     }
 }
@@ -854,10 +875,26 @@ my %rep_id_line = ();
 my $s = 0;
 foreach my $gp (sort(keys(%repcov4smp))) {
 
-    push @rep_abund_header, $gpnames{$gp};
+    push @rep_abund_header, $gpnames{$gp} . "_CvMean";
+    push @rep_abund_header, $gpnames{$gp} . "_BPKM";
+    push @rep_abund_header, $gpnames{$gp} . "_EstCp";
     foreach my $repid (sort(keys(%{$repcov4smp{$gp}}))) {
     
 	my $rep_cov = $repcov4smp{$gp}->{$repid}->{"RepeatCV"};
+
+	## Calculate the estimated number of copies
+	my $bp4rep = $bp_repid{$gp}->{$repid};
+	my $ln4rep = $repcov4smp{$gp}->{$repid}->{"RepeatLE"};
+	my $totalbp = $readstats_by_group{$gp}->{total_bases};
+	
+	my $raw_bpkm = ($bp4rep * 1000 / $ln4rep) / ($totalbp / 1000000);	
+	my $bfo_bpkm = Math::BigFloat->new($raw_bpkm);
+	my $bpkm = $bfo_bpkm->bfround(-2)->bstr();
+
+	my $raw_estcp = ($bp4rep / $ln4rep) / ($totalbp / $gsize);
+	my $bfo_estcp = Math::BigFloat->new($raw_bpkm);
+	my $estcp = $bfo_bpkm->bfround(-1)->bstr();
+
 	if ($s == 0) {
 	    
 	    my $class = 'Unknown';
@@ -874,10 +911,13 @@ foreach my $gp (sort(keys(%repcov4smp))) {
  
 	    my $rep_len = $repcov4smp{$gp}->{$repid}->{"RepeatLE"};	    
 	    $rep_id_line{$repid} = [$repid, $class, $rep_len, $rep_cov];
+
+	    ## Add the BPKM
+	    push @{$rep_id_line{$repid}}, ($bpkm, $estcp);
 	}
 	else {
 	
-	    push @{$rep_id_line{$repid}}, $rep_cov; 
+	    push @{$rep_id_line{$repid}}, ($rep_cov, $bpkm, $estcp); 
 	}
     }
     $s++;
@@ -989,10 +1029,19 @@ sub help {
 
      Option -s genome_size_mb is used to estimate coverage.
 
-      Sample names can be used to identify the files supplied in the input file 
-      (-i). Samples will be cluster by group number, so for example if you are 
-      using three samples, six files in the input file, with three groups, 
-      you can tag them using -n '1=SampleA,2=SampleB,3=SampleC'.
+     Sample names can be used to identify the files supplied in the input file 
+     (-i). Samples will be cluster by group number, so for example if you are 
+     using three samples, six files in the input file, with three groups, 
+     you can tag them using -n '1=SampleA,2=SampleB,3=SampleC'.
+
+     The program will produce a file: "03_2_RepDenovoAnnotated.txt" with the 
+     following columns (N depends of the number of groups):
+       1- RepeatID (based in the REPdenovo analysis)
+       2- RepeatClass (based in the RepeatMasker annotation)
+       3- RepeatLength
+       Na- Sample_CvMean (Mean coverage based in the REPdenovo analysis) 
+       Nb- Sample_BPKM (Bases per 1Kb repeat size per 1M reads)
+       Nc- Sample_EstCp (Estimated number of copies in the genome) 
  
     Flags:
 
