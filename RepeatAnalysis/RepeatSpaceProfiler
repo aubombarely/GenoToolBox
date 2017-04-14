@@ -257,7 +257,7 @@ while(<$infh>) {
 	$libfeats{$line[0]} = { 
 	    'insert_size'    => $line[3], 
 	    'sd_insert_size' => $line[4] 
-	}
+	};
 
 	print STDERR "\t\t\tAdded file $line[1] as sample $line[0] ";
 	print STDERR "type $line[2]\n";
