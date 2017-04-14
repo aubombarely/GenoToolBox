@@ -246,7 +246,7 @@ while(<$infh>) {
 	}
 	else {
 	
-	    $samplefiles{$line[0]} = { $line[2] => $line[1] };
+	    $samplefiles{$line[0]}->{$line[2]} = $line[1];
 	    print STDERR "\t\t\tAdded file $line[1] as sample $line[0] ";
 	    print STDERR "type $line[2]\n";
 	}
@@ -444,10 +444,8 @@ if ($opt_c) {
 	my @bwa_cmd = ($exepath{'bwa'}, 'mem', $idx_prefix); 
 	push @bwa_cmd, ('-t', $threads);
 	
-	print STDERR "TESTING sample $smp\n";
 	foreach my $rtype (sort(keys(%{$samplefiles{$smp}}))) {
 	    
-	    print STDERR "\tTESTING $rtype and $samplefiles{$smp}->{$rtype}\n";
 	    push @bwa_cmd, $samplefiles{$smp}->{$rtype};	    
 	}
 
