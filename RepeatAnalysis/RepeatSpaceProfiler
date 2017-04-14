@@ -13,8 +13,8 @@ our $version = '0.1.0';
 
  RepeatSpaceProfiler [-h] -i <input_filelist> -o <output_basedir> 
                           -r <repdenovo_config> -g <gene_space_fastaref>
-                          -s <genome_size_mb>
-                          [-n <sample_names>]
+                          -s <genome_size_mb> 
+                          [-c <contaminant_fastaref>]
                           [-m <repeatmasker_args>]
                           [-t <threads>] [-W]
 
@@ -25,7 +25,7 @@ our $version = '0.1.0';
 
 =item -i
 
-B<input_filelist>         input 4 columns file list (mandatory)
+B<input_filelist>         input 5 columns file list (mandatory)
 
 =item -o
 
@@ -43,9 +43,9 @@ B<gene_space_fastaref>    Fasta file with the gene space (mandatory)
 
 B<genome_size>            Estimated genome size as kb, mb or gb (mandatory)
 
-=item -n
+=item -c
 
-B<sample_name>            String with group=sample_name sep. by , (optional)
+B<contaminant_fastaref>   Fasta file with contaminants to filter (e.g. Chl)
 
 =item -m
 
@@ -80,6 +80,7 @@ B<help>                   print the help
  This program run several tools to analyze the repeat profile of a genome 
  based in unassembled short reads in several steps:
 
+ Step 0: Filter known contaminants (e.g. chloroplast).
  Step 1: Get the stats of the input fastq input files.
  Step 2: Get the de-novo repeats using REPdenovo.
  Step 3: Annotate the de-novo repeats using RepeatMasker.
@@ -88,6 +89,13 @@ B<help>                   print the help
  Step 6: Construct repeat copies.
  Step 7: Estimate age of the repeats.
  Step 8: Build summary report. 
+
+ Input file is a file with 5 columns:
+  -c1: sample_name
+  -c2: file
+  -c3: pair (permited values: S=Single, F=Forward, R=Reverse)
+  -c4: insert_size
+  -c5: sd_insert_size
 
  The following programs have to be in the PATH or be set up with enviromental
  variable.
@@ -158,10 +166,10 @@ use IPC::Cmd qw[can_run run];
 use Bio::SeqIO;
 use Math::BigFloat;
 
-our ($opt_i, $opt_o, $opt_r, $opt_g, $opt_s, $opt_n, $opt_m, $opt_t, $opt_W, 
-     $opt_V, $opt_v, $opt_h);
-getopts("i:o:r:g:s:n:m:t:WVvh");
-if (!$opt_i && !$opt_o && !$opt_r && !$opt_g && !$opt_s && !$opt_m && !$opt_n 
+our ($opt_i, $opt_o, $opt_r, $opt_g, $opt_c, $opt_s, $opt_m, $opt_t, 
+     $opt_W, $opt_V, $opt_v, $opt_h);
+getopts("i:o:r:g:c:s:m:t:WVvh");
+if (!$opt_i && !$opt_o && !$opt_r && !$opt_g && !$opt_s && !$opt_m 
     && !$opt_t && !$opt_W && !$opt_V && !$opt_v && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
@@ -199,7 +207,10 @@ my $infile = $opt_i ||
 ## Check that the input file has the right number of columns
 
 my %infiles = ();
-my %gpnames = (); 
+my %samplefiles = (); 
+my %libfeats = ();
+
+my %perm_pairs = ( 'S' => 1, 'R' => 1, 'F' => 1);
 
 open my $infh, '<', $infile;
 my $n = 0;
@@ -207,50 +218,47 @@ while(<$infh>) {
     chomp($_); 
     $n++;
     my @line = split(/\t/, $_);
-    if (scalar(@line) != 4) {
+    if (scalar(@line) != 5) {
     
-	die("ERROR: Line $n for file $infile do not have 4 columns.\n\n"); 
+	die("ERROR: Line $n for file $infile do not have 5 columns.\n\n"); 
     }
+
+    unless (exists $perm_pairs{$line[2]}) {
+    
+	die("ERROR: pair has a non valid value such as 'S', 'F' or 'R'\n\n"); 
+    }
+
     $infiles{$n} = {
-	'file'           => $line[0],
-	'group'          => $line[1],
-	'insert_size'    => $line[2],
-	'sd_insert_size' => $line[3],
+	'sample'         => $line[0],
+	'file'           => $line[1],
+	'pair'           => $line[2],
+	'insert_size'    => $line[3],
+	'sd_insert_size' => $line[4],
     };
 
-    $gpnames{$line[1]} = $line[1];
-}
-
-print STDERR "\tInput file list:\t$infile with $n files\n";
-
-if ($opt_n) {
-
-    ## Parse the line
-    my @snames = split(/,/, $opt_n);
-    if (scalar(@snames) != scalar(keys(%gpnames))) {
+    if (exists $samplefiles{$line[0]}) {
     
-	die("ERROR: -n <sample> names is not the same than groups at $opt_i\n");
-    }
-
-    print STDERR "\tSample Names List:\n";
-    
-    foreach my $sname (@snames) {
-
-	my @sitems = split(/=/, $sname);
-	unless (exists $gpnames{$sitems[0]}) {
+	if (exists $samplefiles{$line[0]}->{$line[2]}) {
 	
-	    die("ERROR: group $sitems[0] from -n dont exist at -i $opt_i\n");
+	    die("ERROR: sample $line[0] already has the $line[2] pair.\n");
 	}
 	else {
 	
-	    print STDERR "\t\tSample $sitems[1] linked to group $sitems[0]\n";
-	    $gpnames{$sitems[0]} = $sitems[1];
+	    $samplefiles{$line[0]} = { $line[2] => $line[1] };
 	}
     }
-    print STDERR "\n";
-} 
+    else {
+    
+	$samplefiles{$line[0]} = { $line[2] => $line[1] };
+	$libfeats{$line[0]} = { 
+	    'insert_size'    => $line[3], 
+	    'sd_insert_size' => $line[4] 
+	}
+    }
+}
 
-
+print STDERR "\tInput file list:\t$infile with $n files\n";
+    
 my $outbase = $opt_o || 
     die("\nINPUT ARG. ERROR: -o <out_basename> argument was not supplied.\n\n");
 print STDERR "\tOutput basename:\t$outbase\n";
@@ -258,6 +266,17 @@ print STDERR "\tOutput basename:\t$outbase\n";
 my $repnovo_conf = $opt_r ||
     die("\nINPUT ARG. ERROR: -r <REPdenovo_config> arg. was not supplied.\n\n");
 print STDERR "\tREPdenovo configuration file:\t$repnovo_conf\n";
+
+my $contfasta = '';
+if ($opt_c) {
+
+    $contfasta = $opt_c;
+    print STDERR "\tContaminant screening file:\t$contfasta\n";
+}
+else {
+
+     print STDERR "\tContaminant screening file:\tNA (Disabled)\n";
+}
 
 my $threads = 4;
 if ($opt_t) {
@@ -372,15 +391,116 @@ foreach my $exec_key (sort keys %exec_list) {
     }
 }
 
+##############################################################################
+## Create the output dir
+##############################################################################
 
+mkdir($outbase);
+
+##############################################################################
+## Filter known contaminants
+##############################################################################
+
+print_header("0) Filtering possible contaminants");
+
+if ($opt_c) {
+
+    ## Contaminants filtering will look for sequence pairs that map
+    ## to the contaminant file
+
+    ## first create the index
+    print STDERR "\t0.1- Contaminant fasta reference indexing\n";    
+
+    my $filter_dir = File::Spec->catfile($outbase, "00_1_ReadFilter");
+    mkdir($filter_dir);
+
+    my $idx_prefix =  File::Spec->catfile($filter_dir, "ContaminantRef");
+ 
+    my @bwaidx_cmd = ($exepath{'bwa'}, 'index', '-p', $idx_prefix, $contfasta); 
+    my $bwaidx_cmd = join(" ", @bwaidx_cmd);
+    
+    my @run01bwaidx = run( command => $bwaidx_cmd, verbose => $opt_V );
+
+    ## Running the mapping
+
+    print STDERR "\t0.2- Read mapping and bam filtering\n";    
+
+    my %bamfiles = ();
+
+    foreach my $smp (sort(keys(%samplefiles))) {
+    
+	my $type = scalar(keys(%{$samplefiles{$smp}}));
+	
+	my $bam_out = File::Spec->catfile($filter_dir, $smp."_contmap.bam");
+	$bamfiles{$smp} = { 'bam' => $bam_out, 'type' => $type };
+
+	my @bwa_cmd = ($exepath{'bwa'}, 'mem', $idx_prefix); 
+	push @bwa_cmd, ('-t', $threads);
+	    
+	foreach my $rtype (sort(keys(%{$samplefiles{$smp}}))) {
+	    
+	    push @bwa_cmd, $samplefiles{$smp}->{$rtype};	    
+	}
+
+	## Filter will depend of the type. For single reads (type = 1) 
+	## we'll get -F 4, but for pairs we'll get -F12 
+
+	push @bwa_cmd, ('|', $exepath{'samtools'}, 'view', '-Sb');
+	
+	if ($type == 1) {
+	
+	    push @bwa_cmd, '-f4';
+	}
+	else {
+	
+	    push @bwa_cmd, '-f12';
+	}
+
+	push @bwa_cmd, ('-o', $bam_out, '-'); 
+
+	my $bwa_cmd = join(" ", @bwa_cmd);
+	my @run01bwa = run( command => $bwa_cmd, verbose => $opt_V );
+
+	## Additionally it will sort the bam
+	
+	my @bam_sort = ($exepath{'samtools'}, 'sort', '-o', $bam_out, $bam_out);
+	my $bamsort_cmd = join(" ", @bam_sort);
+	my @run01bamsort = run( command => $bamsort_cmd, verbose => $opt_V ); 
+    }
+    
+    ## Finally it will go from bam => fastq
+
+    print STDERR "\t0.3- Bam to fastq\n";  
+
+    foreach my $smp (sort(keys(%bamfiles))) {
+
+	my $fastqbase = File::Spec->catfile($filter_dir, $smp."_filtered");
+
+	my $bam = $bamfiles{$smp}->{bam};
+	my @bam2fastq = ($exepath{'bedtools'}, 'bamtofastq', '-i', $bam); 
+	if ($bamfiles{$smp}->{type} == 1) {
+	
+	    my $fastqfile = $fastqbase . "_S.fq";
+	    $samplefiles{$smp}->{'S'} = $fastqfile;
+	    push @bam2fastq, ('-fq',  $fastqfile);
+	}
+	else {
+	
+	    my $fastqfile1 = $fastqbase . "_F.fq";
+	    $samplefiles{$smp}->{'F'} = $fastqfile1;
+	    my $fastqfile2 = $fastqbase . "_R.fq";
+	    $samplefiles{$smp}->{'R'} = $fastqfile2;
+	    push @bam2fastq, ('-fq',  $fastqfile1, '-fq2', $fastqfile2);
+	}
+
+	my $bam2fastq_cmd = join(" ", @bam2fastq);
+	my @run01bam2fastq = ( command => $bam2fastq_cmd, verbose => $opt_V ); 
+    }
+}
 
 ##############################################################################
 ## Get the stats
 ##############################################################################
-
-## Create the output dir
-
-mkdir($outbase);
 
 print_header("1) Getting Stats of the Input Fastq Files");
 
@@ -391,59 +511,59 @@ my %filestats = ();
 my %readstats_by_group = ();
 my %totalstats = ( reads => 0, total_bases => 0 ); 
 
-foreach my $infile_idx (sort(keys(%infiles))) {
+foreach my $smp (sort(keys(%samplefiles))) {
 
-    my $filename = $infiles{$infile_idx}->{file};
-    my $group = $infiles{$infile_idx}->{group};
+    $readstats_by_group{$smp} = { 'reads' => 0, 'total_bases' => 0};
 
-    unless (exists $readstats_by_group{$group}) {
+    foreach my $type (sort(keys(%{$samplefiles{$smp}}))) {
+
+	my $filename = $samplefiles{$smp}->{$type};	
+
+	## Remove the extension
+	my $basename = basename($filename);
+	$basename =~ s/\.\w+$//;
+	my $statsname = $basename . ".stats.txt";
+	my $fullstatsname = File::Spec->catfile($instatsdir, $statsname);
+
+	my @stats_cmd = ($exepath{'fastq-stats'}, $filename);
+	push @stats_cmd, ('>', $fullstatsname);
+	my $stats_cmd = join(" ", @stats_cmd);
+
+	my @run01stats = run( command => $stats_cmd, verbose => $opt_V );
+
+	## Now it will parse the files and add the stats to a hash
     
-	$readstats_by_group{$group} = { 'reads' => 0, 'total_bases' => 0};
-    }
+	my %statsperfile = ( file => $fullstatsname );
 
-    ## Remove the extension
-    my $basename = basename($filename);
-    $basename =~ s/\.\w+$//;
-    my $statsname = $basename . ".stats.txt";
-    my $fullstatsname = File::Spec->catfile($instatsdir, $statsname);
+	open my $stats_fh, '<', $fullstatsname;
+	while(<$stats_fh>) {
 
-    my @stats_cmd = ($exepath{'fastq-stats'}, $filename, '>', $fullstatsname);
-    my $stats_cmd = join(" ", @stats_cmd);
-
-    my @run01stats = run( command => $stats_cmd, verbose => $opt_V );
-
-    ## Now it will parse the files and add the stats to a hash
-    
-    my %statsperfile = ( file => $fullstatsname );
-
-    open my $stats_fh, '<', $fullstatsname;
-    while(<$stats_fh>) {
-
-	chomp($_);
+	    chomp($_);
 	
-	## Replace some line to be able to get a field
-	$_ =~ s/len mean/len_mean/;
-	$_ =~ s/len stdev/len_stdev/;
-	$_ =~ s/len min/len_min/;
-	$_ =~ s/unique-dup deq/unique-dup_seq/;
-	$_ =~ s/min dup count/min_dup_count/;
-	$_ =~ s/^dup seq\s+/dup_seq_/;
-	$_ =~ s/^dup /dup_/;
-	$_ =~ s/^qual /qual_/;
-	$_ =~ s/total bases/total_bases/;
+	    ## Replace some line to be able to get a field
+	    $_ =~ s/len mean/len_mean/;
+	    $_ =~ s/len stdev/len_stdev/;
+	    $_ =~ s/len min/len_min/;
+	    $_ =~ s/unique-dup deq/unique-dup_seq/;
+	    $_ =~ s/min dup count/min_dup_count/;
+	    $_ =~ s/^dup seq\s+/dup_seq_/;
+	    $_ =~ s/^dup /dup_/;
+	    $_ =~ s/^qual /qual_/;
+	    $_ =~ s/total bases/total_bases/;
+	    
+	    my @line = split(/\t/, $_);
+	    my $id = shift(@line);
+	    my $datarest = join(",", @line);
+	    $statsperfile{$id} = $datarest;	
+	}
 
-	my @line = split(/\t/, $_);
-	my $id = shift(@line);
-	my $datarest = join(",", @line);
-	$statsperfile{$id} = $datarest;	
+	$totalstats{reads} += $statsperfile{reads};
+	$totalstats{total_bases} += $statsperfile{total_bases};
+	$readstats_by_group{$smp}->{reads} += $statsperfile{reads};
+	$readstats_by_group{$smp}->{total_bases} += $statsperfile{total_bases};
+
+	$filestats{$filename} = \%statsperfile;
     }
-
-    $totalstats{reads} += $statsperfile{reads};
-    $totalstats{total_bases} += $statsperfile{total_bases};
-    $readstats_by_group{$group}->{reads} += $statsperfile{reads};
-    $readstats_by_group{$group}->{total_bases} += $statsperfile{total_bases};
-
-    $filestats{$infile_idx} = \%statsperfile;
 }
 
 my $avg_read_length =  $totalstats{total_bases} / $totalstats{reads};
@@ -459,6 +579,28 @@ print STDERR "\t\tESTIMATED_COVERAGE:\t$est_coverage\n";
 ##############################################################################
 
 print_header("2) Running REPdenovo");
+
+##############################################################################
+## Reconstruct the input file for REPdenovo
+##############################################################################
+
+print STDERR "\t2.0- Writting of REPdenovo input files.\n";
+
+my $repfiles = File::Spec->catfile($outbase, "02_0_REPdenovo_FileInput.txt");
+open my $rep_fh, '>', $repfiles;
+
+foreach my $smp (sort(keys(%samplefiles))) {
+
+    my $grp_idx = 1;
+    my $lib_is = $libfeats{$smp}->{'insert_size'};
+    my $lib_sdis = $libfeats{$smp}->{'sd_insert_size'};
+    foreach my $type (sort(keys(%{$samplefiles{$smp}}))) {
+    
+	my @line = ($samplefiles{$smp}->{$type}, $grp_idx, $lib_is, $lib_sdis);
+	my $pline = join("\t", @line);
+	print $rep_fh "$pline\n";
+    }
+}
 
 print STDERR "\t2.1- Checking the configuration file.\n";
 
@@ -627,7 +769,7 @@ print STDERR "\t2.2- Running REPdenovo.\n\n";
 
 my @repdenovo_cmd = ("python", $exepath{'main.py'}, '-c', 'All');
 push @repdenovo_cmd, ("-g", "$repnovo_conf");
-push @repdenovo_cmd, ("-r", "$infile");
+push @repdenovo_cmd, ("-r", "$repfiles");
 my $repdenovo_cmd = join(" ", @repdenovo_cmd);  
 
 my @run02repdenovo = run( command => $repdenovo_cmd, verbose => $opt_V );
@@ -644,9 +786,9 @@ my $repcontigs_file = File::Spec->catfile($repout_dir, 'contigs.fa');
 my %repcov4smp = ();
 my %repbam4smp = ();
 
-foreach my $gp (sort (keys %gpnames)) {
+my $idx = 0;
+foreach my $smp (sort(keys(%samplefiles))) {
 
-    my $idx = $gp - 1;
     my $suffix1 = "contig_pairs_info.txt_cov_info_with_cutoff.txt"; 
     my $base_ctg_cov = join("_", ($idx, $suffix1));
     my $ctg_cov = File::Spec->catfile($repout_dir, $base_ctg_cov);
@@ -658,11 +800,16 @@ foreach my $gp (sort (keys %gpnames)) {
 	chomp($_);
 	my @line = split(/\s+/, $_); 
 	my $repID = shift(@line);
-	$covdata{$repID} = { 'RepeatLE' => $line[0], 'RepeatCV' => $line[1] };
+	$covdata{$repID} = { 
+	    'RepeatLE' => $line[0], 
+	    'RepeatCV' => $line[1] 
+	};
     }
-    $repcov4smp{$gp} = \%covdata;
+
+    $repcov4smp{$smp} = \%covdata;
     my $bamname = join("_", ('contigs.fa', join(".", ($idx, "sort.bam"))));
-    $repbam4smp{$gp} = File::Spec->catfile($repout_dir, $bamname);
+    $repbam4smp{$smp} = File::Spec->catfile($repout_dir, $bamname);
+    $idx++;
 }
 
 my $rep_number = `grep -c ">" $repcontigs_file`;
@@ -678,10 +825,10 @@ print STDERR "\t2.3- Generating bedtools coverage files for REPdenovo\n\n";
 my %maxcov = ();
 my %bp_repid = ();
 
-foreach my $gp (sort (keys %gpnames)) {
+my $idx2 = 0;
+foreach my $smp (sort(keys(%samplefiles))) {
 
-    my $idx = $gp - 1;
-    my $base_bam = "contigs.fa_" . $idx . ".sam_for_coverage.sorted.bam"; 
+    my $base_bam = "contigs.fa_" . $idx2 . ".sam_for_coverage.sorted.bam"; 
     my $full_bam = File::Spec->catfile($repout_dir, $base_bam);
     my $full_gidx = File::Spec->catfile($repout_dir, "contigs.fa.fai");
 
@@ -699,30 +846,31 @@ foreach my $gp (sort (keys %gpnames)) {
     ## The program will parse the covbed to look for the maximum (it will
     ## use this to retrieve the max. reads).
 
-    $maxcov{$gp} = {};
-    $bp_repid{$gp} = {};
+    $maxcov{$smp} = {};
+    $bp_repid{$smp} = {};
     
     open my $cov_fh, '<', $full_covbed;
     while(<$cov_fh>) {
 	
 	chomp($_);
 	my @line = split(/\t/, $_); 
-	if (exists $maxcov{$gp}->{$line[0]}) {
+	if (exists $maxcov{$smp}->{$line[0]}) {
 	
-	    my $prev_cov = $maxcov{$gp}->{$line[0]}->[2];
+	    my $prev_cov = $maxcov{$smp}->{$line[0]}->[2];
 	    if ($line[2] > $prev_cov) {
 	    
-		$maxcov{$gp}->{$line[0]} = \@line;
+		$maxcov{$smp}->{$line[0]} = \@line;
 	    }
-	    $bp_repid{$gp}->{$line[0]} += $line[2];
+	    $bp_repid{$smp}->{$line[0]} += $line[2];
 	}
 	else {
 
 	    ## it will store the coverage as arrayref with ID, POS, COV
-	    $maxcov{$gp}->{$line[0]} = \@line;
-	    $bp_repid{$gp}->{$line[0]} = $line[2];
+	    $maxcov{$smp}->{$line[0]} = \@line;
+	    $bp_repid{$smp}->{$line[0]} = $line[2];
 	}
     }
+    $idx2++;
 }
 
 
@@ -873,20 +1021,20 @@ my @rep_abund_header = ('##RepeatID', 'RepeatClass', 'RepeatLength');
 my %rep_id_line = ();
 
 my $s = 0;
-foreach my $gp (sort(keys(%repcov4smp))) {
+foreach my $smp (sort(keys(%repcov4smp))) {
 
-    push @rep_abund_header, $gpnames{$gp} . "_CvMean";
-    push @rep_abund_header, $gpnames{$gp} . "_BPKM";
-    push @rep_abund_header, $gpnames{$gp} . "_EstCp";
-    foreach my $repid (sort(keys(%{$repcov4smp{$gp}}))) {
+    push @rep_abund_header, $smp . "_CvMean";
+    push @rep_abund_header, $smp . "_BPKM";
+    push @rep_abund_header, $smp . "_EstCp";
+    foreach my $repid (sort(keys(%{$repcov4smp{$smp}}))) {
     
-	my $rep_cov = $repcov4smp{$gp}->{$repid}->{"RepeatCV"};
+	my $rep_cov = $repcov4smp{$smp}->{$repid}->{"RepeatCV"};
 
 	## Calculate the estimated number of copies
 
-	my $bp4rep = $bp_repid{$gp}->{$repid};
-	my $ln4rep = $repcov4smp{$gp}->{$repid}->{"RepeatLE"};
-	my $totalbp = $readstats_by_group{$gp}->{total_bases};
+	my $bp4rep = $bp_repid{$smp}->{$repid};
+	my $ln4rep = $repcov4smp{$smp}->{$repid}->{"RepeatLE"};
+	my $totalbp = $readstats_by_group{$smp}->{total_bases};
 	
 	my $raw_bpkm = ($bp4rep * 1000 / $ln4rep) / ($totalbp / 1000000);	
 	my $bfo_bpkm = Math::BigFloat->new($raw_bpkm);
@@ -910,7 +1058,7 @@ foreach my $gp (sort(keys(%repcov4smp))) {
 		$class = join("|+|", sort(@class)); 
 	    }
  
-	    my $rep_len = $repcov4smp{$gp}->{$repid}->{"RepeatLE"};	    
+	    my $rep_len = $repcov4smp{$smp}->{$repid}->{"RepeatLE"};	    
 	    $rep_id_line{$repid} = [$repid, $class, $rep_len, $rep_cov];
 
 	    ## Add the BPKM
@@ -991,71 +1139,79 @@ sub help {
 
       RepeatSpaceProfiler [-h] -i <input_filelist> -o <output_basedir> 
                           -r <repdenovo_config> -g <gene_space_fastaref>
-                          -g <genome_size>
-                          [-s <sample_name>]
-			  [-m <repeatmasker_args>]
+                          -s <genome_size_mb> 
+                          [-c <contaminant_fastaref>]
+                          [-m <repeatmasker_args>]
                           [-t <threads>] [-W]
 
     Description:
       
-      This program run several tools to analyze the repeat profile of a genome 
-      based in unassembled short reads in several steps:
+     This program run several tools to analyze the repeat profile of a genome 
+    based in unassembled short reads in several steps:
 
-       Step 1: Get the stats of the input fastq input files.
-       Step 2: Get the de-novo repeats using REPdenovo.
-       Step 3: Annotate the de-novo repeats using RepeatMasker.
-       Step 4: Get the repeat borders.
-       Step 5: Map repeat border reads with the gene space fasta reference.
-       Step 6: Construct repeat copies.
-       Step 7: Estimate age of the repeats.
-       Step 8: Build summary report. 
+     Step 0: Filter known contaminants (e.g. chloroplast).
+     Step 1: Get the stats of the input fastq input files.
+     Step 2: Get the de-novo repeats using REPdenovo.
+     Step 3: Annotate the de-novo repeats using RepeatMasker.
+     Step 4: Get the repeat borders.
+     Step 5: Map repeat border reads with the gene space fasta reference.
+     Step 6: Construct repeat copies.
+     Step 7: Estimate age of the repeats.
+     Step 8: Build summary report. 
 
-      The following programs have to be in the PATH or be set up with 
-     enviromental variables.
+    Input file is a file with 5 columns:
+     -c1: sample_name
+     -c2: file
+     -c3: pair (permited values: S=Single, F=Forward, R=Reverse)
+     -c4: insert_size
+     -c5: sd_insert_size
 
-      - REPdenovo (\$REPDENOVO_PATH) (https://github.com/Reedwarbler/REPdenovo).
-      - Repeatmasker (\$REPMASKER_PATH) (http://www.repeatmasker.org/).
-      - BWA (\$BWA_PATH) (http://bio-bwa.sourceforge.net/).
-      - Samtools (\$SAMTOOLS_PATH) (http://samtools.sourceforge.net/).
-      - Jellyfish (\$JELLYFISH_PATH) (http://www.cbcb.umd.edu/software).
-      - Velvet (\$VELVET_PATH) (https://www.ebi.ac.uk/~zerbino/velvet/).
-      - TERefiner_1 (\$REFINER_PATH) (included REPdenovo package).
-      - ContigsMerger (\$CONTIGS_MERGER_PATH) (included REPdenovo package).  
-      - Fastq-stats (\$FASTQSTATS_PATH) (https://github.com/ExpressionAnalysis).
-      - Bedtools (\$BEDTOOLS_PATH) (http://bedtools.readthedocs.io/en/latest/).
+     The following programs have to be in the PATH or be set up with 
+    enviromental variable.
+
+     - REPdenovo (\$REPDENOVO_PATH) (https://github.com/Reedwarbler/REPdenovo)
+     - Repeatmasker (\$REPMASKER_PATH) (http://www.repeatmasker.org/)
+     - BWA (\$BWA_PATH) (http://bio-bwa.sourceforge.net/)
+     - Samtools (\$SAMTOOLS_PATH) (http://samtools.sourceforge.net/)
+     - Jellyfish (\$JELLYFISH_PATH)(http://www.cbcb.umd.edu/software/jellyfish/)
+     - Velvet (\$VELVET_PATH) (https://www.ebi.ac.uk/~zerbino/velvet/)
+     - TERefiner_1 (\$REFINER_PATH) (included REPdenovo package)
+     - ContigsMerger (\$CONTIGS_MERGER_PATH) (included REPdenovo package)  
+     - Fastq-stats (\$FASTQSTATS_PATH) (https://github.com/ExpressionAnalysis/)
+     - Bedtools (\$BEDTOOLS_PATH) (http://bedtools.readthedocs.io/en/latest/)
 
      Additionally the program will need BioPerl and the requeriments of the
-     mentioned programs (e.g. RMBlast for Repeatmasker).
+    mentioned programs (e.g. RMBlast for Repeatmasker).
 
      REPdenovo configuration file has several variables that could be rewriten 
-     by the previous enviromental variables (e.g. VELVET_PATH), including 
-     THREADS (with option -t) in case that you do not know where are the 
-     executables. To re-write them use option -W.  
+   by the enviromental variables (e.g. VELVET_PATH), including THREADS 
+   (with option -t) in case that you do not know where are the executables.
+   To re-write them use option -W.  
 
-     Option -s genome_size_mb is used to estimate coverage.
+     Option -s is used to estimate genome coverage. It needs the units (e.g. kb,
+    mb or gb).
 
      Sample names can be used to identify the files supplied in the input file 
-     (-i). Samples will be cluster by group number, so for example if you are 
-     using three samples, six files in the input file, with three groups, 
-     you can tag them using -n '1=SampleA,2=SampleB,3=SampleC'.
+    (-i). Samples will be cluster by group number, so for example if you are 
+    using three samples, six files in the input file, with three groups, you 
+    can tag them using -n '1=SampleA,2=SampleB,3=SampleC'.
 
      The program will produce a file: "03_2_RepDenovoAnnotated.txt" with the 
-     following columns (N depends of the number of groups):
-       1- RepeatID (based in the REPdenovo analysis)
-       2- RepeatClass (based in the RepeatMasker annotation)
-       3- RepeatLength
-       Na- Sample_CvMean (Mean coverage based in the REPdenovo analysis) 
-       Nb- Sample_BPKM (Bases per 1Kb repeat size per 1M reads)
-       Nc- Sample_EstCp (Estimated number of copies in the genome) 
+    following columns (N depends of the number of groups):
+     1- RepeatID (based in the REPdenovo analysis)
+     2- RepeatClass (based in the RepeatMasker annotation)
+     3- RepeatLength
+     Na- Sample_CvMean (Mean coverage based in the REPdenovo analysis) 
+     Nb- Sample_BPKM (Bases per 1Kb repeat size per 1M reads)
+     Nc- Sample_EstCp (Estimated number of copies in the genome) 
  
     Flags:
 
-      -i <input_filelist>    input 4 columns file list (mandatory)
+      -i <input_filelist>    input 5 columns file list (mandatory)
       -o <output_basedir>    name of the output directory (mandatory)
       -r <REPdenovo_config>  REPdenovo configuration file (mandatory)
       -g <gene_space_ref>    Fasta file with the gene space (mandatory)
       -s <genome_size>       Estimated genome size kb,mb or gb (mandatory)
-      -s <sample_name>       Sample name as group=name sep. by , (optional)
       -m <Repeatmasker_args> Repeatmasker args separated by comma (optional)
       -t <threads>           Number of threads to run the process (optional)
       -W <rewrite_REPdenovo> Rewrite REPdenovo config file (optional)
