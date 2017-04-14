@@ -681,7 +681,7 @@ my %bp_repid = ();
 foreach my $gp (sort (keys %gpnames)) {
 
     my $idx = $gp - 1;
-    my $base_bam = "contigs.fa_" . $idx . "sam_for_coverage.sorted.bam"; 
+    my $base_bam = "contigs.fa_" . $idx . ".sam_for_coverage.sorted.bam"; 
     my $full_bam = File::Spec->catfile($repout_dir, $base_bam);
     my $full_gidx = File::Spec->catfile($repout_dir, "contigs.fa.fai");
 
@@ -715,14 +715,12 @@ foreach my $gp (sort (keys %gpnames)) {
 		$maxcov{$gp}->{$line[0]} = \@line;
 	    }
 	    $bp_repid{$gp}->{$line[0]} += $line[2];
-	     print STDERR "TEST FOR $gp AND REPEAT $line[0] + $line[2]\n ";
 	}
 	else {
 
 	    ## it will store the coverage as arrayref with ID, POS, COV
 	    $maxcov{$gp}->{$line[0]} = \@line;
 	    $bp_repid{$gp}->{$line[0]} = $line[2];
-	    print STDERR "TEST FOR $gp AND REPEAT $line[0] starting $line[2]\n ";
 	}
     }
 }
@@ -885,7 +883,6 @@ foreach my $gp (sort(keys(%repcov4smp))) {
 	my $rep_cov = $repcov4smp{$gp}->{$repid}->{"RepeatCV"};
 
 	## Calculate the estimated number of copies
-	print STDERR "TEST repid var: $repid\n";
 
 	my $bp4rep = $bp_repid{$gp}->{$repid};
 	my $ln4rep = $repcov4smp{$gp}->{$repid}->{"RepeatLE"};
