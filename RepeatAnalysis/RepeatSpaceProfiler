@@ -715,12 +715,14 @@ foreach my $gp (sort (keys %gpnames)) {
 		$maxcov{$gp}->{$line[0]} = \@line;
 	    }
 	    $bp_repid{$gp}->{$line[0]} += $line[2];
+	     print STDERR "TEST FOR $gp AND REPEAT $line[0] + $line[2]\n ";
 	}
 	else {
 
 	    ## it will store the coverage as arrayref with ID, POS, COV
 	    $maxcov{$gp}->{$line[0]} = \@line;
 	    $bp_repid{$gp}->{$line[0]} = $line[2];
+	    print STDERR "TEST FOR $gp AND REPEAT $line[0] starting $line[2]\n ";
 	}
     }
 }
@@ -883,6 +885,8 @@ foreach my $gp (sort(keys(%repcov4smp))) {
 	my $rep_cov = $repcov4smp{$gp}->{$repid}->{"RepeatCV"};
 
 	## Calculate the estimated number of copies
+	print STDERR "TEST repid var: $repid\n";
+
 	my $bp4rep = $bp_repid{$gp}->{$repid};
 	my $ln4rep = $repcov4smp{$gp}->{$repid}->{"RepeatLE"};
 	my $totalbp = $readstats_by_group{$gp}->{total_bases};
@@ -934,6 +938,10 @@ foreach my $rep_id (sort(keys(%rep_id_line))) {
     my $rep_line = join("\t", @{$rep_id_line{$rep_id}});
     print $repann_fh "$rep_line\n";
 }
+
+## Look for a method to annotate centromeric and telomeric repeats... if it
+## is possible
+
 
 ##############################################################################
 ## Repeat Borders
