@@ -438,7 +438,7 @@ if ($opt_c) {
     
 	my $type = scalar(keys(%{$samplefiles{$smp}}));
 	
-	my $bam_out = File::Spec->catfile($filter_dir, $smp."_contmap.bam");
+	my $bam_out = File::Spec->catfile($filter_dir, $smp."_filtcontam.bam");
 	$bamfiles{$smp} = { 'bam' => $bam_out, 'type' => $type };
 
 	my @bwa_cmd = ($exepath{'bwa'}, 'mem', $idx_prefix); 
