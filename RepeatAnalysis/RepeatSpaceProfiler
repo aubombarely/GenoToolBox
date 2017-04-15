@@ -501,7 +501,7 @@ if ($opt_c) {
 	}
 
 	my $bam2fastq_cmd = join(" ", @bam2fastq);
-	my @run01bam2fastq = ( command => $bam2fastq_cmd, verbose => $opt_V ); 
+	my @run01bam2fastq = run( command => $bam2fastq_cmd, verbose => $opt_V ); 
     }
 }
 
