@@ -607,6 +607,7 @@ foreach my $smp (sort(keys(%samplefiles))) {
 	my $pline = join("\t", @line);
 	print $rep_fh "$pline\n";
     }
+    $grp_idx++;	
 }
 
 print STDERR "\t2.1- Checking the configuration file.\n";
