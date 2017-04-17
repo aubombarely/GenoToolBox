@@ -1060,7 +1060,7 @@ foreach my $smp (sort(keys(%repcov4smp))) {
 	my $bpkm = $bfo_bpkm->bfround(-2)->bstr();
 
 	my $raw_estcp = ($bp4rep / $ln4rep) / ($totalbp / $gsize);
-	my $bfo_estcp = Math::BigFloat->new($raw_bpkm);
+	my $bfo_estcp = Math::BigFloat->new($raw_estcp);
 	my $estcp = $bfo_estcp->bfround(0)->bstr();
 
 	if ($s == 0) {
