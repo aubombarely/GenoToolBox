@@ -504,6 +504,10 @@ if ($opt_c) {
 	my @run01bam2fastq = run( command => $bam2fastq_cmd, verbose => $opt_V ); 
     }
 }
+else {
+
+	print STDERR "\tNo -c <contaminant_reference> file was supplied. Skipping.\n\n";
+}
 
 ##############################################################################
 ## Get the stats
@@ -1040,9 +1044,13 @@ foreach my $smp (sort(keys(%repcov4smp))) {
 
 	## Calculate the estimated number of copies
 
+	print STDERR "TESTING 2: SAMPLE=$smp and REPID=$repid\n";
 	my $bp4rep = $bp_repid{$smp}->{$repid};
+	print STDERR "TESTING 3: BP4REP=$bp4rep\n";
 	my $ln4rep = $repcov4smp{$smp}->{$repid}->{"RepeatLE"};
+	print STDERR "TESTING 4: LN4REP=$ln4rep\n";
 	my $totalbp = $readstats_by_group{$smp}->{total_bases};
+	print STDERR "TESTING 5: TOTALBP=$totalbp\n";
 	
 	my $raw_bpkm = ($bp4rep * 1000 / $ln4rep) / ($totalbp / 1000000);	
 	my $bfo_bpkm = Math::BigFloat->new($raw_bpkm);
