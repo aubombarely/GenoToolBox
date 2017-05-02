@@ -1,0 +1,4 @@
+Artha_COL	COL1	/data/aurebg_projects/RepProfiling/Artha_cvCOL1_Q30L50_R1.fq	PE	F	450	50
+Artha_COL	COL1	/data/aurebg_projects/RepProfiling/Artha_cvCOL1_Q30L50_R2.fq	PE	R	450	50
+Artha_COL	COL2	/data/aurebg_projects/RepProfiling/Artha_cvCOL2_Q30L50_R1.fq	PE	F	450	50
+Artha_COL	COL2	/data/aurebg_projects/RepProfiling/Artha_cvCOL2_Q30L50_R2.fq	PE	R	450	50

@@ -145,10 +145,73 @@ elsif ($opt_v) {
     print STDERR "Developed at the Bombarely Laboratory (2017-04-10)\n\n";
     exit(1);
 }
-elsif ($opt_C) {
 
-    print_configfile();
-    exit("\nConfiguration file has been created (RDS_GenomeExplorer.cfg)\n");
+###############################################################################
+## Configuration file
+###############################################################################
+## The configuration file is a text file with different sections
+## The program can print a template for the configuration file that
+## can be latter on parsed to extract the data
+
+my %fixed_config = ( 
+    '00_global' => {
+	'00_01_threads'               => ['numeric', 'optional', 1],
+	'00_02_chloroplast_seqfile'   => ['file', 'optional', ''],
+	'00_03_mitochondria_seqfile'  => ['file', 'optional', ''],
+	'00_04_contaminant_seqfile'   => ['file', 'optional', ''],
+	'00_05_estimated_genome_size' => ['nucleotide_size', 'optional', ''],
+	'00_06_multikmer'             => {
+	    '00_06_01_initial_kmer'       => ['numeric', 'optional', 15],
+	    '00_06_02_steps_size'         => ['numeric', 'optional', 4],
+	    '00_06_03_steps_number'       => ['numeric', 'optional', 5],
+	},
+	'00_07_kmers_filter'          => {
+	    '00_07_00_dynamic_kmer_filter'=> ['boolean', 'optional', 1],
+	    '00_07_01_kmer_meancov_fold'  => ['numeric', 'optional', 2],
+	    '00_07_02_kmer_error_cutoff'  => ['numeric', 'optional', 3],
+	    '00_07_03_kmer_repeat_cutoff' => ['numeric', 'optional', 10],
+	},
+    },
+    '01_jellyfish_args'    => {
+    },
+    '02_bcalm_args'        => {
+    },
+    '03_repeatmasker_args' => {
+    },
+    );
+
+## Additionally an extra hash with keep the descriptions
+
+my %descr_config = (
+    '00_global'                   => "Global arguments used by the script. They can be overwriten by the arguments specific for each section",
+    '00_01_threads'               => "Number of threads used in each section (default=1)",
+    '00_02_chloroplast_seqfile'   => "Fasta file with a close related chloroplast to the sample (or samples) analyzed. Used to detect NUPTs. (optional)",
+    '00_03_mitochondria_seqfile'  => "Fasta file with a close related mitochondria to the sample (or samples) analyzed. Used to detect NUMTs. (optional)",
+    '00_04_contaminant_seqfile'   => "Fasta file with contaminant sequences. Any read that maps with them, will be removed from the analysis. (optional)",
+    '00_05_estimated_genome_size' => "Estimated genome size with the unit suffix such as Kb, Mb or Gb (e.g. 132Mb). (optional)",
+    '00_06_multikmer'             => "Subsection to specify the multi-kmer steps (mandatory)",
+    '00_06_01_initial_kmer'       => "Initial Kmer size (default=15)",
+    '00_06_02_steps_size'         => "Size of the kmers (default=4)",
+    '00_06_03_steps_number'       => "Number of increases/steps in the kmer analysis (default=5)",
+    '00_07_kmers_filter'          => "Subsection to filter Kmer distributions (mandatory)",
+    '00_07_00_dynamic_kmer_filter'=> "Boolean (TRUE/FALSE) to activate the kmer cutoffs for errors (first valley in the distribution) and repeats (00_07_01_repeat_meancov_fold) (optional)",
+    '00_07_01_kmer_meancov_fold'  => "Minimum ocurrences/coverage used for the repetive elmenets based in the estimated genome coverage. For example, if the esxtimated genome coverage is 10 and this value is 2, the program will set the cutoff in 20 (optional, default=2)",
+    '00_07_02_kmer_error_cutoff'  => "Minimum kmer ocurrence/coverage filtered out as sequencing errors (optional; default=3)",
+    '00_07_03_kmer_repeat_cutoff' => "Minimum kmer ocurrence/coverage used to study repetive elements (optional; default=10)",
+    '01_jellyfish_args'           => "Extra Jellyfish arguments. Arguments controling the output will be ignored. (optional)",
+    '02_bcalm_args'               => "Extra BCalm arguments. Arguments controling the output will be ignored (optional)",
+    '03_repeatmasker_args'        => "Extra RepeatMasker arguments. Arguments controling the output will be ignored (optional)",
+    );
+
+##############################################################################
+
+
+if ($opt_C) {
+
+    print_configfile(\%fixed_config, \%descr_config);
+    print STDERR "\nConfiguration file has been created ";
+    print STDERR "(RDS_GE.cfg)\n\n";
+    exit();
 }
 
 my $date = `date`;
@@ -186,8 +249,8 @@ my $config_file = $opt_c ||
     die("\nINPUT ARG. ERROR: -c <config_file> arg. was not supplied.\n\n");
 print STDERR "\tConfiguration file:\t$config_file\n";
 
-my %configparam = parse_configuration($config_file);
-print_config_report(%configparam); 
+my %configparam = parse_configuration($config_file, \%fixed_config);
+#print_config_report(%configparam); 
 
 ## Check the executables
 
@@ -514,25 +577,125 @@ sub print_input_report {
 ## parse_configuration
 ###############################################################################
 ##
-## USAGE: my %configparam = parse_configuration($config_file);
-##
-## The configuration file is a file with the following sections
-## 00_global:
-##   00_01_threads=(numeric)
-##   00_02_chloroplast_seqfile=(file)
-##   00_03_mitochondria_seqfile=(file)
-##   00_04_contaminant_seqfile=(file)
-##   00_05_estimated_genome_size=(file)
-##   00_06_multikmer:
-##     00_06_01_initial_kmer=(numeric)
-##     00_06_02_steps_size=(numeric)
-##     00_06_03_steps_number=(numeric)
-##   00_07_kmers_filter:
-##     00_07_01_kmer_error_cutoff=(numeric)
-##     00_07_02_kmer_repeat_cutoff=(numeric)
-## 01_jellyfish_args:
-## 02_bcalm_args:
-## 03_repeatmasker_args:
+## USAGE: my %configparam = parse_configuration($config_file, \%fixed_config);
+## DESCRIPTION: This function parse the configuration file checking the 
+##              the variables based on the fixed_configuration file.
+
+sub parse_configuration {
+
+    my $cfg_file = shift;
+    my $fixed_cfg_href = shift;
+
+    my %fxcfg = %{$fixed_cfg_href};
+   
+    ## Transform the hash with the requirements
+    my %requ = ();
+    foreach my $key (sort(keys(%fxcfg))) {
+    
+	if (ref($fxcfg{$key}) eq 'HASH') {
+	
+	    foreach my $kkey (sort(keys(%{$fxcfg{$key}}))) {
+	    
+		if (ref($fxcfg{$key}->{$kkey}) eq 'HASH') {
+	
+		    foreach my $kkkey (sort(keys(%{$fxcfg{$key}->{$kkey}}))) {
+	    
+			$requ{$kkkey} = $fxcfg{$key}->{$kkey}->{$kkkey}->[0];
+		    }
+		}
+		elsif (ref($fxcfg{$key}->{$kkey}) eq 'ARRAY') {
+		    
+		    $requ{$kkey} = $fxcfg{$key}->{$kkey}->[0];
+		}
+	    }
+	}
+	elsif (ref($fxcfg{$key}) eq 'ARRAY') {
+	
+	    $requ{$key} = $fxcfg{$key}->[0];
+	}
+    }
+
+
+    my %cfg = ();
+    my $l = 0;
+    open my $cfg_fh, '<', $cfg_file;
+    while(<$cfg_fh>) {
+    
+	chomp($_); 
+	$l++; 
+
+	## Ignore comments
+	if ($_ !~ m/^\s*#/) {
+	
+	    ## Remove the first spaces
+	    $_ =~ s/^\s+//;
+
+	    ## Parse the line. It will have the structure 
+	    ## key [] = something or key:
+
+	    if ($_ =~ m/^(\w+):/) {
+
+		my $section = $1;
+	    }
+	    elsif ($_ =~ m/^(\w+)\s+\[(\w+)\]=(.+)$/) {
+
+		my $arg = $1;
+		my $req = $2;
+		my $val = $3;
+
+		$cfg{$arg} = $val;
+
+		if (exists $requ{$arg}) {
+		
+		    if ($requ{$arg} eq 'numeric' && $val !~ m/^\d+$/) {
+			
+			print STDERR "\nERROR: value ($val) for argument ";
+			die("$arg, line $l should have numeric value\n\n"); 
+		    }
+		    elsif ($requ{$arg} eq 'file' && !-e $val) {
+		    
+			print STDERR "\nERROR: file=$val for argument $arg at ";
+			die("line $l does not exist.\n\n"); 
+		    }
+		    elsif ($requ{$arg} eq 'nucleotide_size') {
+		    
+			if ($val =~ m/^(\d+)([a-z]+)$/i) {
+			
+			    my $size = $1;
+			    my $unit = lc($2);
+			    
+			    my %perm_units = ( 
+				'gb' => 1000000000,
+				'mb' => 1000000,
+				'kb' => 1000,
+				'bp' => 1
+				);
+			    unless (exists $perm_units{$unit}) {
+			    
+				print STDERR "\nERROR: units used for genome ";
+				die("size are not gb, mb, kb or bp.\n\n"); 
+			    }
+			}
+			else {
+
+			    print STDERR "\nERROR: value ($val) for argument ";
+			    die("$arg, doesnt have nucl size format\n\n");
+			}
+		    }
+		}
+		else {
+		
+		    print STDERR "\nERROR: Argument $arg at line $l for ";
+		    die("$cfg_file is not a real argument.\n\n");
+		}				
+	    }
+	}	
+    }
+
+
+    return %cfg;
+}
+
 
 
 ###############################################################################
@@ -552,55 +715,45 @@ sub print_input_report {
 
 sub print_configfile {
 
+    my $fixed_config_href = shift;
+    my $descr_config_href = shift;
+    my %descr = %{$descr_config_href};
+
     ## Define the sections into a hash
-    my %config = ( 
-	'00_global' => {
-	    '00_01_threads'               => 'numeric',
-	    '00_02_chloroplast_seqfile'   => 'file',
-	    '00_03_mitochondria_seqfile'  => 'file',
-	    '00_04_contaminant_seqfile'   => 'file',
-	    '00_05_estimated_genome_size' => 'nucleotide_size',
-	    '00_06_multikmer'             => {
-		'00_06_01_initial_kmer'       => 'numeric',
-		'00_06_02_steps_size'         => 'numeric',
-		'00_06_03_steps_number'       => 'numeric',
-	    },
-	    '00_07_kmers_filter'          => {
-		'00_07_01_kmer_error_cutoff'  => 'numeric',
-		'00_07_02_kmer_repeat_cutoff' => 'numeric',
-	    },
-	},
-	'01_jellyfish_args'    => {
-	},
-	'02_bcalm_args'        => {
-	},
-	'03_repeatmasker_args' => {
-	},
-	);
 
     ## Open the file to write the variables
-    my $filename = "RDS_GenomeExplorer.cfg";
+    my $filename = "RDS_GE.cfg";
     open my $fh, '>', $filename;
 
-    foreach my $k (sort(keys(%config))) {
+    foreach my $k (sort(keys(%{$fixed_config_href}))) {
     
-	my %subcfg = %{$config{$k}};
+	my %subcfg = %{$fixed_config_href->{$k}};
+
+	my $pr1 = join("\n## ", ( $descr{$k} =~ m/.{1,90}/g ));
+	print $fh "## $pr1\n";
 	print $fh "$k:\n";
-	
+		
 	foreach my $subk (sort(keys(%subcfg))) {
 	
+	    my $pr2 = join("\n\t## ", ($descr{$subk} =~ m/.{1,90}/g));
+	    print $fh "\t## $pr2\n";
+
 	    if (ref($subcfg{$subk}) eq "HASH") {
-	    
+	    		
 		print $fh "\t$subk:\n";
+		
 		my %lv3cfg = %{$subcfg{$subk}};
 		foreach my $lv3k (sort(keys(%lv3cfg))) {
 		
-		    print $fh "\t\t$lv3k [$lv3cfg{$lv3k}]=\n";
+		    my $p3 = join("\n\t\t## ", ($descr{$lv3k} =~ m/.{1,90}/g));
+		    print $fh "\t\t## $p3\n";
+		    print $fh "\t\t$lv3k [$lv3cfg{$lv3k}->[0]]=";
+		    print $fh "$lv3cfg{$lv3k}->[2]\n";		    
 		}
 	    }
 	    else {
 	    
-		print $fh "\t$subk [$subcfg{$subk}]=\n";
+		print $fh "\t$subk [$subcfg{$subk}->[0]]=$subcfg{$subk}->[2]\n";
 	    }
 	}    
     }
