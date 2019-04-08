@@ -13,7 +13,8 @@
                        -a <donor_a> -b <donor_b> -t <cross_type>
                        [-k <keys>] [-f <outformat>] 
                        [-p <chisqr_pvalue>] [-s <segregation>]
-                       [-e <samples_to_exclude>] [-d <distance_snps>] [-B][-H]
+                       [-e <samples_to_exclude>] [-d <distance_snps>]  
+                       [-B][-H][-F][-I]
                        
 =head1 EXAMPLE
 
@@ -79,6 +80,14 @@ B<biallelic_filter>       filter out the non biallelic genotypes.
 =item -H
 
 B<homozygous_donor>       select only homozygous markers for donors
+
+=item -F
+
+B<bicaracter_format>      output format as bicharacters (e.g. aa, ab, bb).
+
+=item -I
+
+B<ignore_popcross>        ignore pop. cross type
 
 =item -d
 
@@ -214,12 +223,12 @@ use Statistics::Distributions;
 
 
 our ($opt_i, $opt_o, $opt_f, $opt_a, $opt_b, $opt_t, $opt_k, $opt_e, $opt_d, 
-     $opt_s, $opt_p, $opt_B, $opt_H, $opt_V, $opt_h);
+     $opt_s, $opt_p, $opt_B, $opt_H, $opt_F, $opt_I, $opt_V, $opt_h);
 
-getopts("i:o:f:a:b:t:k:e:d:s:p:BHVh");
+getopts("i:o:f:a:b:t:k:e:d:s:p:BHFIVh");
 if (!$opt_i && !$opt_o && !$opt_f && !$opt_a && !$opt_b && !$opt_t && !$opt_k 
-    && !$opt_e && !$opt_d && !$opt_s && !$opt_p && !$opt_B && !$opt_H 
-    && !$opt_V && !$opt_h) {
+    && !$opt_e && !$opt_d && !$opt_s && !$opt_p && !$opt_B && !$opt_H && !$opt_F
+    && !$opt_I && !$opt_V && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -297,12 +306,18 @@ my $b_donor_c = scalar(keys %b_donors);
 print STDERR "\tB Donors ($b_donor_c): $b_donor_line\n";
 
 my %types = (
-    "f2 intercross" => 1, 
-    "f2 backcross"  => 1, 
-    "f3 self"       => 1, 
-    "ri self"       => 1,
-    "ri sib"        => 1,
-    "dh"            => 1,
+    "f2 intercross" => {'aaxbb' => '1:2:1'}, 
+    "f2 backcross"  => {'lmxll' => '1:1', 
+			'nnxnp' => '1:1'}, 
+    "f3 self"       => {'aaxbb' => '1:2:1'},
+    "ri self"       => {'axb'   => '1:1'},
+    "ri sib"        => {'axb'   => '1:1'},
+    "dh"            => {'axb'   => '1:1'},
+    "cp"            => {'abxcd' => '1:1:1:1', 
+			'efxeg' => '1:1:1:1', 
+			'hkxhk' => '1:2:1', 
+			'lmxll' => '1:1', 
+			'nnxnp' => '1:1'}
 );
 
 my $mtype = "f2 intercross";
@@ -375,7 +390,10 @@ my %segreg = (
     "(b,d)"         =>  "1:3",
     "(a,b,h)"       =>  "1:1:2",
     "(ac,ad,bc,bd)" =>  "1:1:1:1",
-    "(ee,ef,eg,fg)" =>  "1:1:1:1"    
+    "(ee,ef,eg,fg)" =>  "1:1:1:1",
+    "(hh, kk, hk)"  =>  "1:1:2",
+    "(ll, lm)"      =>  "1:1",
+    "(nn, np)"      =>  "1:1"    
     );
 
 
@@ -422,12 +440,12 @@ else {
 print_header("1) Parsing VCF input file");
 
 my ($mk_abh_href, $mk_loc_href) = parse_vcf($input, \%a_donors, \%b_donors, 
-					       \%excluded);
+					     $types{$mtype}, \%excluded);
 
 my %marks = %{$mk_abh_href};
 
 my $nmrks = scalar(keys %marks);
-print STDERR "\t$nmrks makers have been extracted from the hapmap file.\n";
+print STDERR "\t$nmrks makers have been extracted from the VCF file.\n";
 
 if ($nmrks == 0) {
 
@@ -666,6 +684,7 @@ elsif ($oformat eq 'jointmap4') {
 	"ri self"       => "RI2",
 	#"ri sib"        => 1,
 	"dh"            => "DH1",
+	"cp"            => "CP"
 	);
 
     print $ofh "name = hapmap2maker_pop\n";
@@ -859,15 +878,37 @@ sub help {
              where Additional_AAAA is aditional information such as the coding
              scheme (keys), for example: "symbols 1=A 2=B 3=H 0=-")
 
+     The possible populations are
+	    
+       POP_TYPE        JM_POP   SEG_TYPES   
+       "f2 intercross" "F2"     aaxbb
+       "f2 backcross"  "BC1"    lmxll
+                                nnxnp
+       "f3 self"       "F3"     aaxbb
+       "ri self"       "RI"     axb
+       "ri sib"        "RI"     axb
+       "dh"            "DH"     axb
+       "cp"            "CP"     abxcd
+                                efxeg
+                                hkxhk
+                                lmxll
+                                nnxnp
+
+     Seg_types not associated to specific populations will be ignored
+     (e.g. if "f2 intercross" is selected, seg_type = nnxnp will be code as X)
+     except if the option -I is used.
+
      The standard key is:
-       KEY     DESCRIPTION
-       a       homozygote or haploid as the first donor (A)
-       b       homozygote or haploid as the second donor (B)
-       h       heterozygote
-       c       not genotype a (the b-allele is dominant)
-       d       not genotype b (the a-allele is dominant)
-       –       genotype unknown
-       x       genotype is not A or B
+       KEY [-F option]  DESCRIPTION
+       A   aa,ll,nn,hh  homozygote or haploid as the first donor (A)
+       B   bb,kk        homozygote or haploid as the second donor (B)
+       H   ab,lm,np,hk  heterozygous
+       C   ef,ac        heterozygous pair 1 for 3,4 alelles
+       D   eg,ad        heterozygous pair 2 for 3,4 alelles
+       E   ee,bc        heterozygous pair 3 for 3,4 alelles
+       F   gf,db        heterozygous pair 4 for 3,4 alelles
+       –   --           genotype unknown
+       x   xx           genotype is not A or B
 
      After these two lines, the raw input file contains one line per locus
      where it starts with "*" plus the locus name, space (tab...) and the 
@@ -927,7 +968,8 @@ sub help {
                      -a <donor_a> -b <donor_b> -t <data_type>
                     [-k <keys>] [-f <output_format>]
                     [-p <chisqr_pvalue>] [-s <segregation>]
-                    [-e <samples_to_exclude>] [-d <distance_snps>] [-B][-H]
+                    [-e <samples_to_exclude>] [-d <distance_snps>] 
+                    [-B][-H][-F][-I]
 
     Example:
    
@@ -953,6 +995,9 @@ sub help {
       -s <filter_segregation>   filter by expected segregation (optional)
       -p <chisqr_pvalue>        chi square p-value for segregation test (0.01)
       -B <biallelic_filter>     filter out the non biallelic genotypes.
+      -H <homozygous_donor>     select only homozygous markers for donors
+      -F <bicaracter_format>    output format as bicharacters (e.g. aa, ab, bb).
+      -I <ignore_popcross>      ignore pop. cross type
       -d <distance_snps>        filter snps closer than this distance
       -V <be_verbose>           be verbose and print the parsing status.
       -h <help>                 print the help
@@ -1018,6 +1063,8 @@ sub parse_vcf {
 	die("ERROR: No A donor was supplied to parse_vcf function.\n");
     my $b_donor_href = shift ||
 	die("ERROR: No B donor was supplied to parse_vcf function.\n");
+    my $crosses_href = shift ||
+       die("ERROR: No Cross Hash was supplied to parse_vcf function.\n");;
     my $excl_href = shift;
 
     my %excl = ();
@@ -1026,6 +1073,8 @@ sub parse_vcf {
 	%excl = %{$excl_href};
     }
     
+    ## Get crosses
+    my %crosses = %{$crosses_href};
 
     ## Define the variables
 
@@ -1164,7 +1213,7 @@ sub parse_vcf {
 		my @genoinfo = split(/:/, $geno[$a]); 
 		my $g = 0;
 		foreach my $forf (@forms) {
-		    
+		   
 		    $genobyind{$forf} = $genoinfo[$g];
 		    $g++;
 		} 
@@ -1174,13 +1223,14 @@ sub parse_vcf {
 		
 		if (exists $genobyind{GT}) {
 
-		    if ($genobyind{GT} =~ m/\//) {
+		    if ($genobyind{GT} =~ m/\// && $genobyind{GT} ne './.') {
 
 			foreach my $gncode (split(/\//, $genobyind{GT})) {
-		    
+
 			    push @geno4ind, $genops[$gncode];
+			    
 			}
-			$genotypes{$ind} = join("", sort(@geno4ind));
+			$genotypes{$ind} = join(",", sort(@geno4ind));
 		    }
 		    else {
 		    
@@ -1233,7 +1283,7 @@ sub parse_vcf {
 	    ## 0) If the donors have missing data
 	    ## 1) All the A donors are the same (and same for B donors)
 	    ## 2) A donor is different from B donor
-	    ## 3) A and B donors are homozygous
+	    ## 3) A and B donors are homozygous (-H option)
 
 	    my $optimal_donors = 0;
 
@@ -1241,16 +1291,37 @@ sub parse_vcf {
 	    
 	    if ($a_donor_gn_c == 1 && $b_donor_gn_c == 1) {
 		
-		## Check if the A_DONOR != B_DONOR
+		## Check if the A_DONOR != B_DONOR ...
+		## This is true for most of the crosses except when
+		## they are hkxhk in which case
 
-		if ($a_donor_gntypes[0] ne $b_donor_gntypes[0]) {
+		my %adonor = (); 
+		foreach my $adonor_nt (split(//, $a_donor_gntypes[0])) {
+
+		    $adonor{$adonor_nt} = 1;
+		}
+		my %bdonor = ();
+		foreach my $bdonor_nt (split(//, $b_donor_gntypes[0])) {
+
+		    $bdonor{$bdonor_nt} = 1;
+		} 
+
+		## We want to exclude the options where they are homozygous
+		## and the same
+
+		my $adiv = scalar(keys(%adonor));
+		my $bdiv = scalar(keys(%bdonor));
+		my $agen = $a_donor_gntypes[0];
+		my $bgen = $b_donor_gntypes[0];
+
+		if ($agen ne $bgen || ($adiv == 1 && $bdiv == 1)) {
 		    
 		    ## Check that they don't have missing data
 		    ## Missing could be '-' or 'N'
 
-		    if ($a_donor_gntypes[0] !~ m/(\-|N)/) { 
+		    if ($agen !~ m/(\-|N)/) { 
 		
-			if ($b_donor_gntypes[0] !~ m/(\-|N)/) {
+			if ($bgen !~ m/(\-|N)/) {
 
 			    ## Check if they are homozygous 
 		    
@@ -1297,9 +1368,149 @@ sub parse_vcf {
 	    
 		## Now it will check if each of the individuals is
 		## A, B or H
+		## The genotype encoding:
+                ## <aaxbb> - aa, ab, bb, --
+		## <abxcd> - ac, ad, bc, bd, -- (no dominance allowed)
+		## <efxeg> - ee, ef, eg, fg, -- (no dominance allowed)
+		## <hkxhk> - hh, hk, kk, h-, k-
+		## <lmxll> - ll, lm, --
+		## <nnxnp> - nn, np, -- 
+		## Then it can be translated to A, B and H
 
+		## We will store an index that it will depends of the
+		## hits of a pop with its progenitors in a double hash
+		## structure. E.g. ac for abxcd will encode 1000+0010
+
+
+		## It will store all this information in a hash
+		my %gn_bytype = (
+		    'axb' => {
+			'1010'   => ['aa', 'A'],
+			'0101'   => ['bb', 'B'],
+			'00'   => ['--', '-'] },
+		    'aaxbb' => { 
+			'1010' => ['aa', 'A' ], 
+			'0101' => ['bb', 'B' ], 
+			'1001' => ['ab', 'H' ],
+			'0110' => ['ab', 'H' ], 
+			'00'   => ['--', '-' ] },
+		    'abxcd' => {
+			'10000010' => ['ac', 'C'],
+			'10000001' => ['ad', 'D'],
+			'01000010' => ['bc', 'E'],
+			'01000001' => ['bd', 'F'], },
+		    'efxeg' => { 
+			'10100100' => ['ef', 'C'],
+			'10010100' => ['ef', 'C'],
+			'10000110' => ['ef', 'C'],
+			'10000101' => ['ef', 'C'],
+			'10100001' => ['eg', 'D'],
+			'01100001' => ['eg', 'D'],
+			'00101001' => ['eg', 'D'],
+			'00100101' => ['eg', 'D'],
+			'10101010' => ['ee', 'E'],
+                        '10011001' => ['ee', 'E'],
+                        '01100110' => ['ee', 'E'],
+                        '01010101' => ['ee', 'E'],
+			'01000001' => ['fg', 'F'], 
+                        '01000010' => ['fg', 'F'],
+                        '10000001' => ['fg', 'F'],
+                        '10000010' => ['fg', 'F'],},
+		    'hkxhk' => {
+			'10100101' => ['hk', 'H'], 
+			'10101010' => ['hh', 'A'],
+			'01010101' => ['kk', 'B'],
+			'0101'     => ['h-', 'C'],	
+			'1010'     => ['k-', 'D'], },
+		    'lmxll' => {
+			'101010' => ['lm', 'H'],
+			'100011' => ['lm', 'H'],
+			'101101' => ['ll', 'A'], 
+			'011011' => ['ll', 'A'], 
+			'000'    => ['--', '-'] },
+		    'nnxnp' => {
+			'110110' => ['nn', 'A'],
+			'101101' => ['nn', 'A'],
+			'110001' => ['np', 'H'], 
+			'010101' => ['np', 'H'],
+			'000'    => ['--', '-'] },
+		    'nxn'   => {
+			'0'      => ['--', 'X'] } 
+		);
+
+		## First, identify the parental source
+		my %adonor = (); 
+		foreach my $ad (split(/,/, $a_donor_gntypes[0])) {
+
+		    $adonor{$ad} = 1;
+		}
+                my %bdonor = (); 
+		foreach my $bd (split(/,/, $b_donor_gntypes[0])) {
+
+		    $bdonor{$bd} = 1;
+		}
+
+		## We will define the type according three parameters
+		## heterozygosity A, heterozygosity B and shared alleles
+
+		my %protype = (
+		    '000' => 'aaxbb',
+		    '110' => 'abxcd',
+		    '111' => 'efxeg',
+		    '112' => 'hkxhk',
+		    '101' => 'lmxll',
+		    '011' => 'nnxnp',
+		    '999' => 'nxn'
+		);
+
+		my $indtype = '';
+		my $a_het = 0;
+		my $b_het = 0;
+		if (scalar(keys(%adonor)) == 2) {
+
+		    $a_het = 1;
+		}  
+                if (scalar(keys(%bdonor)) == 2) {
+
+                    $b_het = 1;
+                }
+
+		my $ab_shared = 0;
+		foreach my $a_allele (sort(keys(%adonor))) {
+
+		    foreach my $b_allele (sort(keys(%bdonor))) {
+
+			if ($a_allele eq $b_allele) {
+
+			    $ab_shared++;
+			}
+		    }
+		}		
+
+		my $typeidx = join("", ($a_het, $b_het, $ab_shared)); 
+
+		## For axb type, the tools will not make distintions between
+		## both. To force it it will get the cross
+		my @crosses = sort(keys(%crosses));
+		
+		if ($crosses[0] eq 'axb' && $typeidx eq 'aaxbb') {
+
+		    $typeidx = 'axb';
+		}
+
+		## Retrieve the allowed indexes for specific populations
+		unless (exists $crosses{$protype{$typeidx}}) {
+
+		    if (!$opt_I) {
+
+		    	$typeidx = '999';
+		    }
+		}
+
+		
 		foreach my $ind (keys %genotypes) {
 
+		    ##print STDERR "TEST01: A_DONOR=$test1\tB_DONOR=$test2\tIND_GENOTYPE=$genotypes{$ind}\n";
 		    ## Check that the individual is not excluded
 
 		    unless (exists $excl{$ind}) {
@@ -1310,38 +1521,65 @@ sub parse_vcf {
 			
 				my $gtype = '-';
 
-				my @a_donor_n = split(//, $a_donor_gntypes[0]);
-				my @b_donor_n = split(//, $b_donor_gntypes[0]);
-
-				my @het = sort($a_donor_n[0], $b_donor_n[0]);
-				my $het = join("", @het);
-
-				if ($genotypes{$ind} =~ m/(-|N)/) {
+				my @genohits = (); 
+				foreach my $i_allele (sort(split(/,/, $genotypes{$ind}))) {
 				
-				    $gtype = '-';
+				    foreach my $a_allele (sort(keys(%adonor))) {
+					
+					if ($a_allele eq $i_allele) {
+                                        
+					    push(@genohits, 1);   
+					}
+                                        else {
+                                        
+					    push(@genohits, 0);
+					}
+				    }
+				    foreach my $b_allele (sort(keys(%bdonor))) {
+
+                                        if ($b_allele eq $i_allele) {
+
+                                            push(@genohits, 1);
+                                        }
+                                        else {
+
+                                            push(@genohits, 0);
+                                        }
+                                    }
 				}
-				elsif ($genotypes{$ind} eq $a_donor_gntypes[0]){
+
+				my $geno8idx = join("", @genohits);
+								
+				my @gtype = ("--", "X");
+				my %genolib = %{$gn_bytype{$protype{$typeidx}}};
+				if (exists $genolib{$geno8idx}) {				
+
+				    @gtype = @{$genolib{$geno8idx}};
+				}				
 			    
-				    $gtype = 'A';
+				$abh_geno{$ind} = $gtype[1];
+				if ($opt_F) {
+
+				    $abh_geno{$ind} = $gtype[0];
 				}
-				elsif ($genotypes{$ind} eq $b_donor_gntypes[0]){
-			    
-				    $gtype = 'B';
-				}
-				elsif ($genotypes{$ind} eq $het) {
-				    
-				    $gtype = 'H';
-				}
-				else {
-				    
-				    $gtype = 'X';
-				}
-			    
-				$abh_geno{$ind} = $gtype;
+				##print STDERR "TEST: [$geno8idx]\t$typeidx\t$protype{$typeidx}\t@gtype\n";
+
 			    }
-			}
+			    else {
+
+			        ##print STDERR "TEST-B_DONOR: $ind\t$b_donor{$ind}\n";
+			    }
+		        }
+		        else {
+
+			    ##print STDERR "TEST-A_DONOR: $ind\t$a_donor{$ind}\n";
+		        }
 		    }
-		}
+		    else {
+
+		        ##print STDERR "TEST-EXCL: $ind\t$excl{$ind}\n";
+                    }
+		}	
 
 		## If it meet the optical donor conditions, it will add the
 		## marker to the selection.
