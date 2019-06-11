@@ -403,12 +403,14 @@ foreach my $index (@indexes) {
     ## Now it will create the command to run
     my @freebayes_cmd = ($exepath{'freebayes'}, "-b", $mainbam, "-f", $reffasta, "-v", $outfile, "-r", $index);
 
-    foreach my $freebayes_arg (sort %freebayes_args) {
+    foreach my $freebayes_arg (sort keys %freebayes_args) {
 
         push(@freebayes_cmd, ($freebayes_arg, $freebayes_args{$freebayes_arg}));
     }
 
     my $freebayes_cmd = join(" ", @freebayes_cmd);
+    my $test_cmd = join("|", @freebayes_cmd);
+    print STDERR "TEST: $test_cmd\n";	
 
     ## Now it will pack the commands
     if ($j <= $threads) {
