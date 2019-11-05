@@ -1,0 +1,458 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ GetPrimaryMRNAFromGFF
+ Script to get the primary transcript (mRNA) from a GFF3 file
+
+=cut
+
+=head1 SYPNOSIS
+
+ GetPrimaryMRNAFromGFF [-h] -g <gff3_file> [-L] [-E] [-V]
+
+
+=head2 I<Flags:>
+
+=over
+
+=item -g
+
+B<gff3_file>              gff3 input file (mandatory)
+
+=item -L
+
+B<primary_as_longest>     select the primary transcript as the longest isoform
+
+=item -E
+
+B<primary_as_max_exons>   select the primary transcript as the one with more exons
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+   This script selects one isoform per gene from a GFF file. The isoform can be selected based in the 
+ longest isoform (-L) or the isoform with more exons (-E). If more than one isoform have the longest
+ sequence or the higher number of exons, the script will select the first one in the GFF file.  
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely Gomez.
+  (aureliano.bombarely@unimi.it).
+
+=cut
+
+=head1 METHODS
+
+ GetPrimaryMRNAFromGFF
+
+=cut
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use Math::BigFloat;
+use Bio::SeqIO;
+
+our ($opt_g, $opt_L, $opt_E, $opt_V, $opt_h);
+
+getopts("g:LEVh");
+
+if (!$opt_g && !$opt_L && !$opt_E && !$opt_V && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+if ($opt_h) {
+    help();
+}
+
+## Print header
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GetPrimaryMRNAFromGFF Starts ($date)      ##";
+print STDERR "\n############################################################\n";
+
+## STEP0: Check arguments ####################################################
+
+print_header("Step 0: Checking arguments");
+
+## Check variables.
+
+my $gff_file = $opt_g ||
+    die("DATA ARGUMENT: -g <gff3_file> was not supplied.\n");
+
+print STDERR "\tGFF file: $gff_file\n"; 
+
+print_header("Step 1: Processing GFF3 file");
+
+my $l = 0;
+my @gff = ();
+my @gfffields = ("seqID", "source", "type", "start", "end", "score", "strand", 
+                 "frame", "attribute"); 
+
+my %idx2genes = ();
+my %genes2idx = ();
+my %gene2mrna = ();
+my %gene_preferred_mrna = ();
+
+my %idx2mrna = ();
+my %mrna2idx = ();
+my %mrna2gene = ();
+my %mrna_properties = ();
+
+my %idx2psgenes = ();
+my %psgenes2idx = ();
+
+my %cnttype = ();
+my %seltype = ();
+
+open my $gfffh, '<', $gff_file;
+while (<$gfffh>) {
+    
+    chomp($_);
+
+    ## Add all the lines to an array
+
+    if ($_ =~ m/^#/) {
+
+        push(@gff, {"comment" => $_});
+    }
+    else {
+    
+	my %line = ();
+	my $f = 0;
+        foreach my $field (split(/\t/, $_)) {
+	
+           if ($f < 8) {
+	   
+	       $line{$gfffields[$f]} = $field;
+	       if ($gfffields[$f] eq 'type') {
+
+                   if (exists $cnttype{$field}) {
+
+                       $cnttype{$field}++;
+                   }
+                   else {
+ 
+                       $cnttype{$field} = 1;
+                       $seltype{$field} = 0;
+                   }
+               }
+	   }
+           else {
+
+               my %attributes = ();
+               foreach my $attr_fields (split(/;/, $field)) {
+
+                   if ($attr_fields =~ m/^(.+)=(.+)$/) {
+
+                       $attributes{$1} = $2;
+	           }
+               }
+               $line{$gfffields[$f]} = \%attributes;
+           }
+           $f++;
+        }
+
+        $line{"dataline"} = $_;
+        push(@gff, {"data" => \%line});
+
+	my %typetype = (
+	    'gene'       => 1,
+	    'transcript' => 2,
+	    'mRNA'       => 2,
+	    'snoRNA'     => 2,
+            'lncRNA'     => 2,
+            'pseudogene' => 4,
+	    'exon'       => 3
+	);
+
+	if (exists $typetype{$line{"type"}}) {
+	    if ($typetype{$line{"type"}} == 1) {
+
+                $idx2genes{$l} = $line{"attribute"}->{"ID"};
+	        $genes2idx{$line{"attribute"}->{"ID"}} = $l;
+                $gene2mrna{$line{"attribute"}->{"ID"}} = [];
+                $gene_preferred_mrna{$line{"attribute"}->{"ID"}} = '';
+            }
+	    elsif ($typetype{$line{"type"}} == 2) {
+	    
+                my $mrnaid = $line{"attribute"}->{"ID"};
+                my $geneid = $line{"attribute"}->{"Parent"};
+
+	        if ($mrnaid =~ m/.+/ && $geneid =~ m/.+/) {
+	    
+                    $idx2mrna{$l} = $mrnaid;
+                    $mrna2idx{$mrnaid} = $l;
+                    $mrna2gene{$mrnaid} = $geneid;
+                    push(@{$gene2mrna{$geneid}}, $mrnaid); 
+                    $mrna_properties{$mrnaid} = { "length" => 0, "exon_n" => 0 };
+                }
+                else {
+
+                   if ($opt_V) {
+                       print STDERR "\tWARNING: line $l (type=$line{'type'}) does not have ID and/or Parent attributes\n";
+                   }
+                }
+            }
+            elsif ($typetype{$line{"type"}} == 3) {
+
+                my $parent_id = $line{"attribute"}->{"Parent"};
+		unless ($psgenes2idx{$parent_id}) {
+
+                    $mrna_properties{$parent_id}->{"exons_n"}++;
+
+	            my $length = $line{"end"} - $line{"start"};
+                    $mrna_properties{$parent_id}->{"length"} += $length;
+                }
+            }
+ 	    if ($typetype{$line{"type"}} == 4) {
+
+                $idx2psgenes{$l} = $line{"attribute"}->{"ID"};
+                $psgenes2idx{$line{"attribute"}->{"ID"}} = $l;
+            }
+        }
+    }
+    $l++;	
+}
+print STDERR "\n\tDone. $l lines have been parsed.\n\n";
+
+print_header("Step 2: Analysing isoforms");
+
+foreach my $geneid (sort keys %gene2mrna) {
+
+    my $pref_mrnaid = '';
+    my %mrnabyexons = ();
+    my %mrnabylength = ();	    
+
+    my @mrnas = @{$gene2mrna{$geneid}};
+    if (scalar(@mrnas) > 0) {
+
+        foreach my $mrnaid (sort @{$gene2mrna{$geneid}}) {
+
+            $mrnabyexons{$mrnaid} = $mrna_properties{$mrnaid}->{"exons_n"};
+            $mrnabylength{$mrnaid} = $mrna_properties{$mrnaid}->{"length"};
+        }
+        my @sorted_by_exons = sort { $mrnabyexons{$b} <=> $mrnabyexons{$a} } keys %mrnabyexons;
+        my @sorted_by_length = sort { $mrnabylength{$b} <=> $mrnabylength{$a} } keys %mrnabylength;
+
+	## Check how many mRNAs have the max. exons and the max. length
+        my $max_exons = $mrnabyexons{$sorted_by_exons[0]};
+	my $multiple_max_exons = 0;
+        my %multiple_max_exons_by_length = ();
+	foreach my $mrnaid4e (keys %mrnabyexons) {
+
+           if ($mrnabyexons{$mrnaid4e} == $max_exons) {
+
+               $multiple_max_exons++;
+               $multiple_max_exons_by_length{$mrnaid4e} = $mrnabylength{$mrnaid4e};
+           }
+        }
+
+	my $max_length = $mrnabylength{$sorted_by_length[0]};
+        my $multiple_max_length = 0;
+        foreach my $mrnaid4l (keys %mrnabylength) {
+
+           if ($mrnabylength{$mrnaid4l} == $max_length) {
+
+               $multiple_max_length++;
+           }
+        }
+
+	## Now it will take the decision
+
+	if ($opt_E) {
+	
+	    if ($multiple_max_exons > 0) {	
+
+                ## It will get the longest 
+		$gene_preferred_mrna{$geneid} = $sorted_by_length[0];
+            }
+	    else {
+		
+		## It will get the one with more exons 
+                $gene_preferred_mrna{$geneid} = $sorted_by_exons[0];
+            }
+        }
+	elsif ($opt_L) {
+
+	    ## It will get the longest (or any random longest)
+            $gene_preferred_mrna{$geneid} = $sorted_by_length[0];	
+        }
+	else {
+
+	    ## By default it will get the ones with a higher number of exons and then get the longest	
+	    my @sorted_by_length_ex = sort { $multiple_max_exons_by_length{$b} <=> $multiple_max_exons_by_length{$a} } keys %multiple_max_exons_by_length;
+            $gene_preferred_mrna{$geneid} = $sorted_by_length_ex[0];
+        }
+    }
+}
+
+print_header("Step 3: Printing new GFF3");
+
+my $out = $gff_file . '.onlyprimarytranscripts.gff3';
+open my $ofh, '>', $out;
+
+foreach my $hashref_line (@gff) {
+
+    my %hashline = %{$hashref_line};
+    if ($hashline{'comment'}) {
+
+        print $ofh "$hashline{'comment'}\n";
+    }
+    else {
+
+	## Define two types of checks mRNAs and derived
+        my %checktype = (
+	    'transcript'      => 1,
+	    'mRNA'            => 1,
+            'exon'            => 2, 
+	    'CDS'             => 2,
+            'five_prime_UTR'  => 2,
+	    'three_prime_UTR' => 2
+	);
+
+
+        my %line = %{$hashref_line->{"data"}};
+	my $type = $line{"type"};
+	if (exists $checktype{$type}) {
+	   
+	    if ($checktype{$type} == 1 ) {
+
+		my $pgeneid = $line{"attribute"}->{"Parent"};
+		my $cmrnaid = $line{"attribute"}->{"ID"};
+		my $key_list = join(",", %{$line{"attribute"}});
+	    	if ($cmrnaid eq $gene_preferred_mrna{$pgeneid}) {
+
+		    print $ofh "$line{'dataline'}\n";
+		    $seltype{$type}++;
+            	}
+       	    }
+	    elsif ($checktype{$type} == 2 ) {
+
+	        my $pmrnaid = $line{"attribute"}->{"Parent"};
+                if (exists $mrna2gene{$pmrnaid}) {
+	    	
+		    my $pgeneid = $mrna2gene{$pmrnaid};
+		    
+	            if ($pmrnaid eq $gene_preferred_mrna{$pgeneid}) {
+
+ 	                print $ofh "$line{'dataline'}\n";
+                        $seltype{$type}++;
+            	    }
+                }
+                else {
+
+	            print $ofh "$line{'dataline'}\n";
+                    $seltype{$type}++;
+                }
+            }
+	}
+	else {
+
+            print $ofh "$line{'dataline'}\n";
+            $seltype{$type}++;
+        }
+    }
+}
+
+print STDERR "\tSummary of selected elements:\n";
+foreach my $type (sort keys %seltype) {
+
+    print STDERR "\t\t$seltype{$type} $type features have been selected from $cnttype{$type} found in the input\n";
+
+}
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## GetPrimaryMRNAFromGFF Ends   ($date)      ##\n";
+print STDERR "############################################################\n\n";
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+      This script selects one isoform per gene from a GFF file. 
+      The isoform can be selected based in the longest isoform 
+      (-L) or the isoform with more exons (-E). If more than 
+      one isoform have the longest sequence or the higher number 
+      of exons, the script will select the first one in the GFF 
+      file.
+
+    Usage:
+     
+       GetPrimaryMRNAFromGFF [-h] -g <gff3_file> [-L|-E] [-V]
+      
+    Flags:
+ 
+      -g <gff3_file>              gff3 file (mandatory)
+      -L <primary_as_longest>     select the primary transcript as the longest isoform
+      -E <primary_as_max_exons>   select the primary transcript as the one with more exons
+      -V <be_verbose>             be verbose and print status messages
+      -h <help>                   print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+
+  Desc: print a section head
+
+  Ret: None
+
+  Args: Message to print in the header
+
+  Side_Effects: None
+
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+####
+1; #
+####
