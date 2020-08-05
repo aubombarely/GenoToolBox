@@ -1,0 +1,588 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ CollectMultiSOAPStats
+ Script to collect stats from multiple *.scafStatistics files
+
+=cut
+
+=head1 SYPNOSIS
+
+ CollectMultiSOAPStats [-h] -d <assembly_directory> [-R] [-g <estimated_genome_size>] 
+                       [-c <expected_number_chromosomes>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -d
+
+B<assembly_directory>   Directory with the assembly files (mandatory)
+
+=item -R
+
+B<rank_assemblies>      Rank assemblies (optional)
+
+=item -g
+
+B<est_genome_size>      Estimated genome size in bp for calculate ranks (optional)
+
+=item -c
+
+B<exp_chromosomes>      Expected number of chromosomes for calculate ranks (optional)
+
+=item -h
+
+B<help>                 Print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+  
+ This script collect different stats from different *.scafStatistics files 
+ produced by SOAPdenovo and produce a final table with different stats for
+ the different assemblies. It will extract the names from the filename.
+
+ It also have the option to rank the different assemblies as the sum of the
+ following ranks:
+   * %completness ((TotalSize/EstimatedSize)*10)
+   * fragmentation ((NumScaffolds - NumChromosomes)/NumChromosomes)
+   * LongestScaffold
+   * Scaffolds>1Mb
+   * Scaffolds>100Kb
+   * Scaffolds>10Kb
+    
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aureliano.bombarely@unimi.it).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use File::Spec::Functions;
+use Getopt::Std;
+use Math::BigFloat;
+use List::Util qw(sum);
+
+our ($opt_d, $opt_R, $opt_g, $opt_c, $opt_h);
+getopts("d:Rg:c:h");
+
+if (!$opt_d && !$opt_R && !$opt_g && !$opt_c && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+my $dir = 0;
+if (!$opt_d) {
+
+    die("\nERROR: No -d <input_dir> argument was supplied.\n"); 
+}
+else {
+
+   $dir = $opt_d;
+   unless (-d $dir) {
+
+      die("\nERROR: directory $dir does not exists.\n");
+   }
+}
+
+my $gsize = "";
+my $chr_n = "";
+
+if ($opt_R) {
+
+    if (!$opt_g) {
+
+        die("ERROR: Ranking mode enabled but -g <genome_size> parameter was not supplied.\n"); 
+    }
+    else {
+
+        if ($opt_g !~ m/^\d+$/) {
+ 
+            die("ERROR: -g <genome_size> should have a numeric value.\n"); 
+        }
+	else {
+
+            $gsize = $opt_g;
+        }
+    }	
+    if (!$opt_c) {
+
+        die("ERROR: Ranking mode enabled but -c <chromosome_number> parameter was not supplied.\n");
+    }
+    else {
+
+        if ($opt_c !~ m/^\d+$/) {
+
+            die("ERROR: -c <chromosome_number> should have a numeric value.\n");
+        }
+        else {
+
+            $chr_n = $opt_c;
+        }
+    }
+
+}
+
+
+########################
+## parameters to get  ## 
+########################
+## First Size_includeN => ScfTotalSize
+## First Size_withoutN => CtgTotalSize
+## Scaffold_Num	       => ScfTotalNumber
+## Contig_Num          => CtgTotalNumber
+## First Mean_Size     => ScfMeanLength
+## Second Mean_Size    => CtgMeanLength
+## First Longest_Seq   => ScfLongest
+## Second Longest_Seq  => CtgLongest
+## scaffolds>100       => ScfN100B & ScfP100B
+## scaffolds>500       => ScfN500B & ScfP500B
+## scaffolds>1K        => ScfN001K & ScfP001K
+## scaffolds>10K       => ScfN010K & ScfP010K
+## scaffolds>100K      => ScfN100K & ScfP100K
+## scaffolds>1M        => ScfN001M & ScfP001M
+## First N10	       => Scf_L10 & Scf_N10
+## First N50	       => Scf_L50 & Scf_N50
+## First N90           => Scf_L90 & Scf_N90
+## Contig>100          => CtgN100B & CtgP100B
+## Contig>500          => CtgN500B & CtgP500B
+## Contig>1K           => CtgN001K & CtgP001K
+## Contig>10K          => CtgN010K & CtgP010K
+## Contig>100K         => CtgN100K & CtgP100K
+## Contig>1M           => CtgN001M & CtgP001M
+## Second N10          => Ctg_L10 & Ctg_N10
+## Second N50          => Ctg_L50 & Ctg_N50
+## Second N90          => Ctg_L90 & Ctg_N90
+## Number_of_contigs_in_scaffolds                => CtgInScf
+## Number_of_contigs_not_in_scaffolds(Singleton) => CtgNotScf
+## Average_number_of_contigs_per_scaffold        => Ctg/Scf
+
+## Additionally it will calculate
+## %completness ((ScfTotalSize/EstimatedSize)*100) => CompletnessPerc
+## fragmentation ((ScfTotalNumber - NumChromosomes)/NumChromosomes) => Fragmentation
+
+## The data structure will be a hash of hashes
+my @info = ("ScfTotalSize", "CtgTotalSize", "ScfTotalNumber", "CtgTotalNumber", 
+	"ScfMeanLength", "CtgMeanLength", "ScfLongest", "CtgLongest", 
+	"ScfN100B", "ScfP100B", "ScfN500B", "ScfP500B", "ScfN001K", 
+	"ScfP001K", "ScfN010K", "ScfP010K", "ScfN100K", "ScfP100K", 
+	"ScfN001M", "ScfP001M", "Scf_L10", "Scf_N10", "Scf_L50", "Scf_N50", 
+	"Scf_L90", "Scf_N90", "CtgN100B", "CtgP100B", "CtgN500B", "CtgP500B", 
+ 	"CtgN001K", "CtgP001K", "CtgN010K", "CtgP010K", "CtgN100K", "CtgP100K", 
+	"CtgN001M", "CtgP001M", "Ctg_L10", "Ctg_N10", "Ctg_L50", "Ctg_N50", 
+	"Ctg_L90", "Ctg_N90", "CtgInScf", "CtgNotScf", "Ctg/Scf", 
+	"CompletnessPerc", "Fragmentation");
+
+my %stats = ();
+foreach my $stat_info (@info) {
+
+    $stats{$stat_info} = {};
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## CollectMultiSOAPStats ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+opendir(my $general_dh, $dir) || die("ERROR: -d $dir can not be opened: $!");
+while (readdir $general_dh) {
+
+    my $subdir = catdir($dir, $_);
+    if ($_ !~ m/^\./ && -d $subdir) {
+
+        opendir(my $sub_dh, $subdir) || die("ERROR: subdir $subdir can not be opened: $!");
+        while (readdir $sub_dh) {
+
+            my $filename = $_;
+            if ($filename =~ m/.scafStatistics$/) {
+
+                ## Retrieve a shortname
+                my $sname = $filename;
+                if ($filename =~ m/(k\d+).scafStatistics$/i) {
+ 
+                    $sname = $1;   
+                }
+		
+		my $filenamepath = catfile($subdir, $filename);
+                open my $fh, '<', $filenamepath;
+                while (<$fh>) {
+ 
+                    chomp($_);
+		    if ($_ =~ m/Size_includeN\s+(\d+)/) {
+
+    			unless (exists $stats{"ScfTotalSize"}->{$sname}) {
+
+                            $stats{"ScfTotalSize"}->{$sname} = $1;
+                            if ($opt_g) {
+
+                                my $comp = Math::BigFloat->new($1*100/$gsize)->bfround(-2);
+				$stats{"CompletnessPerc"}->{$sname} = $comp;
+                            }
+			    else {
+
+				$stats{"CompletnessPerc"}->{$sname} = "NA";
+                            }
+                        }
+		    }
+		    elsif ($_ =~ m/Size_withoutN\s+(\d+)/) {
+
+		        $stats{"CtgTotalSize"}->{$sname} = $1;
+		    }
+		    elsif ($_ =~ m/Scaffold_Num\s+(\d+)/) {
+
+                        $stats{"ScfTotalNumber"}->{$sname} = $1;
+			if ($opt_c) {
+
+			    my $frag = Math::BigFloat->new(($1 - $chr_n)/$chr_n)->bfround(-2);
+			    $stats{"Fragmentation"}->{$sname} = $frag;
+                        }
+	                else {
+
+			    $stats{"FragmentationPerc"}->{$sname} = "NA";
+                        }
+		    }
+		    elsif ($_ =~ m/Contig_Num\s+(\d+)/) {
+
+                        $stats{"CtgTotalNumber"}->{$sname} = $1;
+                    }
+		    elsif ($_ =~ m/Mean_Size\s+(\d+)/) {
+
+                        unless (exists $stats{"ScfMeanLength"}->{$sname}) {
+
+                            $stats{"ScfMeanLength"}->{$sname} = $1;
+                        }
+			else {
+
+			    $stats{"CtgMeanLength"}->{$sname} = $1;
+                        }
+                    }
+		    elsif ($_ =~ m/Longest_Seq\s+(\d+)/) {
+
+                        unless (exists $stats{"ScfLongest"}->{$sname}) {
+
+                            $stats{"ScfLongest"}->{$sname} = $1;
+                        }
+                        else {
+
+                            $stats{"CtgLongest"}->{$sname} = $1;
+                        }
+                    }
+		    elsif ($_ =~ m/(\w+)>100\s+(\d+)\s+(\d+\.\d+)%/) {
+
+			if ($1 eq "scaffolds") {
+ 	                    $stats{"ScfN100B"}->{$sname} = $2;
+		            $stats{"ScfP100B"}->{$sname} = $3;
+                        }
+                        else {
+                            $stats{"CtgN100B"}->{$sname} = $2;
+                            $stats{"CtgP100B"}->{$sname} = $3; 
+                        }
+                    }
+                    elsif ($_ =~ m/(\w+)>500\s+(\d+)\s+(\d+\.\d+)%/) {
+
+                        if ($1 eq "scaffolds") {
+                            $stats{"ScfN500B"}->{$sname} = $2;
+                            $stats{"ScfP500B"}->{$sname} = $3;
+                        }
+                        else {
+                            $stats{"CtgN500B"}->{$sname} = $2;
+                            $stats{"CtgP500B"}->{$sname} = $3;
+                        }
+                    }
+                    elsif ($_ =~ m/(\w+)>1K\s+(\d+)\s+(\d+\.\d+)%/) {
+
+                        if ($1 eq "scaffolds") {
+                            $stats{"ScfN001K"}->{$sname} = $2;
+                            $stats{"ScfP001K"}->{$sname} = $3;
+                        }
+                        else {
+                            $stats{"CtgN001K"}->{$sname} = $2;
+                            $stats{"CtgP001K"}->{$sname} = $3;
+                        }
+
+                    }
+                    elsif ($_ =~ m/(\w+)>10K\s+(\d+)\s+(\d+\.\d+)%/) {
+
+                        if ($1 eq "scaffolds") {
+                            $stats{"ScfN010K"}->{$sname} = $2;
+                            $stats{"ScfP010K"}->{$sname} = $3;
+                        }
+                        else {
+                            $stats{"CtgN010K"}->{$sname} = $2;
+                            $stats{"CtgP010K"}->{$sname} = $3;
+                        }
+                    }
+                    elsif ($_ =~ m/(\w+)>100K\s+(\d+)\s+(\d+\.\d+)%/) {
+
+                        if ($1 eq "scaffolds") {
+                            $stats{"ScfN100K"}->{$sname} = $2;
+                            $stats{"ScfP100K"}->{$sname} = $3;
+                        }
+                        else {
+                            $stats{"CtgN100K"}->{$sname} = $2;
+                            $stats{"CtgP100K"}->{$sname} = $3;
+                        }
+                    }
+                    elsif ($_ =~ m/(\w+)>1M\s+(\d+)\s+(\d+\.\d+)%/) {
+
+                        if ($1 eq "scaffolds") {
+                            $stats{"ScfN001M"}->{$sname} = $2;
+                            $stats{"ScfP001M"}->{$sname} = $3;
+                        }
+                        else {
+                            $stats{"CtgN001M"}->{$sname} = $2;
+                            $stats{"CtgP001M"}->{$sname} = $3;
+                        }
+                    }
+		    elsif ($_ =~ m/N10\s+(\d+)\s+(\d+)/) {
+
+                        unless (exists $stats{"Scf_L10"}->{$sname}) {
+
+                            $stats{"Scf_L10"}->{$sname} = $1;
+                            $stats{"Scf_N10"}->{$sname} = $2;
+                        }
+                        else {
+
+                            $stats{"Ctg_L10"}->{$sname} = $1;
+                            $stats{"Ctg_N10"}->{$sname} = $2;
+                        }
+                    }
+                    elsif ($_ =~ m/N50\s+(\d+)\s+(\d+)/) {
+
+                        unless (exists $stats{"Scf_L50"}->{$sname}) {
+
+                            $stats{"Scf_L50"}->{$sname} = $1;
+                            $stats{"Scf_N50"}->{$sname} = $2;
+                        }
+                        else {
+
+                            $stats{"Ctg_L50"}->{$sname} = $1;
+                            $stats{"Ctg_N50"}->{$sname} = $2;
+                        }
+                    }
+                    elsif ($_ =~ m/N90\s+(\d+)\s+(\d+)/) {
+
+                        unless (exists $stats{"Scf_L90"}->{$sname}) {
+
+                            $stats{"Scf_L90"}->{$sname} = $1;
+                            $stats{"Scf_N90"}->{$sname} = $2;
+                        }
+                        else {
+
+                            $stats{"Ctg_L90"}->{$sname} = $1;
+                            $stats{"Ctg_N90"}->{$sname} = $2;
+                        }
+                    }
+                    elsif ($_ =~ m/Number_of_contigs_in_scaffolds\s+(\d+)/) {
+
+                        $stats{"CtgInScf"}->{$sname} = $1;
+                    }
+                    elsif ($_ =~ m/Number_of_contigs_not_in_scaffolds\(Singleton\)\s+(\d+)/) {
+
+                        $stats{"CtgNotScf"}->{$sname} = $1;
+                    }
+                    elsif ($_ =~ m/Average_number_of_contigs_per_scaffold\s+(.+)/) {
+
+                        $stats{"Ctg/Scf"}->{$sname} = $1;
+                    }
+                }
+		close($fh); 
+            }
+        }
+	closedir $sub_dh;
+    }
+}
+closedir $general_dh;
+
+###############################################################################
+## RANK ASSEMBLIES
+###############################################################################
+
+if ($opt_R) {
+
+    my @info2rank_l = ("ScfMeanLength", "ScfLongest", "CtgLongest", "ScfP010K", "ScfP100K", "ScfP001M");
+    my @info2rank_s = ("Fragmentation");
+
+    my %ranks = ();
+    foreach my $name (sort keys %{$stats{"ScfTotalSize"}}) {
+
+        $ranks{$name} = 0;
+    }
+
+    foreach my $ir2l (@info2rank_l) {
+        my $rank_ir2l = 0;
+	my %ir2l_hash = %{$stats{$ir2l}};
+	my $sum_val = sum(values(%ir2l_hash));
+        foreach my $name (sort { $ir2l_hash{$b} <=> $ir2l_hash{$a} } keys %ir2l_hash) {
+
+            $rank_ir2l++;
+	    if ($sum_val > 0) {
+                $ranks{$name} += $rank_ir2l;
+            }
+        }
+    }
+
+    foreach my $ir2s (@info2rank_s) {
+        my $rank_ir2s = 0;
+        my %ir2s_hash = %{$stats{$ir2s}};
+        foreach my $name (sort { $ir2s_hash{$b} <=> $ir2s_hash{$a} } keys %ir2s_hash) {
+
+            $rank_ir2s++;
+            $ranks{$name} += $rank_ir2s;
+        }
+    }
+
+    my %comp_dist = ();
+    foreach my $tname (sort keys %{$stats{"CompletnessPerc"}}) {
+
+	my $val = $stats{"CompletnessPerc"}->{$tname};
+	my $comp_p = $stats{"CompletnessPerc"}->{$tname};
+	my $number = Math::BigFloat->new(100);
+	$number->bsub($comp_p);
+	$number->babs();
+        $comp_dist{$tname} = $number->bfround(-2);;
+   }
+   my $rank_comp = 0;
+   foreach my $fname (sort { $comp_dist{$a} <=> $comp_dist{$b} } keys %comp_dist) {
+
+        $rank_comp++;
+        $ranks{$fname} += $rank_comp;
+   }
+
+   push(@info, "SCORE", "RANK"); 
+   my $abs_rank = 0;
+   $stats{"RANK"} = {};
+   foreach my $name (sort { $ranks{$a} <=> $ranks{$b} } keys %ranks) {
+ 
+        $abs_rank++;
+        print STDERR "Ranking Order: $abs_rank\t$name\tScore=$ranks{$name}\n";
+	$stats{"SCORE"}->{$name} = $ranks{$name};
+        $stats{"RANK"}->{$name} = $abs_rank;
+   }
+}
+
+
+###############################################################################
+## PRODUCE THE OUTPUT
+###############################################################################
+
+my @header = ("#STAT");
+foreach my $name (sort keys %{$stats{"ScfTotalSize"}}) {
+
+    push(@header, $name); 
+} 
+my $p_header = join("\t", @header); 
+print STDOUT "$p_header\n";
+
+foreach my $inf (@info) {
+
+    my %dat = %{$stats{$inf}};
+    my @p_info = ($inf);
+    foreach my $names (sort keys %dat) {
+
+        push(@p_info, $dat{$names}); 
+    }
+    my $p_info = join("\t", @p_info);
+    print STDOUT "$p_info\n"; 
+}
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## CollectMultimpleSOAPStats Ends ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+      
+     This script collect different stats from different *.scafStatistics files
+     produced by SOAPdenovo and produce a final table with different stats for
+     the different assemblies. It will extract the names from the filename.
+
+     It also have the option to rank the different assemblies as the sum of the
+     following ranks:
+       * %completness ((TotalSize/EstimatedSize)*10)
+       * fragmentation ((NumScaffolds - NumChromosomes)/NumChromosomes)
+       * LongestScaffold
+       * Scaffolds>1Mb
+       * Scaffolds>100Kb
+       * Scaffolds>10Kb
+ 
+    Usage:
+      
+      CollectMultiSOAPStats [-h] -d <assembly_directory> [-R] [-g <estimated_genome_size>]
+                            [-c <expected_number_chromosomes>]   
+      
+    Flags:
+
+      -d <assembly_directory>   Directory with the assembly files (mandatory)
+      -R <rank_assemblies>      Rank assemblies (optional)
+      -g <est_genome_size>      Estimated genome size in bp for calculate ranks (optional)
+      -c <exp_chromosomes>      Expected number of chromosomes for calculate ranks (optional)
+      -h <help>                 Print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+####
+1; #
+####
