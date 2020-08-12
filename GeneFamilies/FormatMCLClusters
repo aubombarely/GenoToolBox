@@ -1,0 +1,488 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ FormatMCLClusters
+ Script to format the MCL clusters
+
+=cut
+
+=head1 SYPNOSIS
+
+ FormatMCLClusters [-h] -i <mcl_clusters> -o <out_basename>
+                        [-c <min,max_cluster_size>]
+                        [-g <min,max_group_size>]
+                        [-Z]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<mcl_clusters>         File with the MCL clusters (one line per cluster) (mandatory)
+
+=item -o
+
+B<out_basename>         Basename for the different outputs (mandatory)
+
+=item -c
+
+B<filter_cluster_size>  Filter for minimum and maximum cluster size, comma separated (default:0,1000000)
+
+=item -g
+
+B<filter_group_size>    Filter for minimum and maximum group size, comma separated (default:0,1000000)
+
+=item -Z
+
+B<filter_non_zero>      Filter the cluster with groups with zero size (optional)
+
+=item -h
+
+B<help>                 Print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+  
+  This script parse the MCL cluster output in which each cluster is represented by 
+  one line and each line the identifiers of the members of the clusters separated 
+  by tabs. The identifiers should have the format group|unique_ID.
+
+  E.g. Nicotiana_acuminata|NiacuTA01T17221_c0_g1.p2    Nicotiana_pauciflora|NipauTA015742_c3_g1.p1
+
+  The script will produce the following outputs:
+
+  * basename.cluster_id.txt with three columns separated by a TAB. First column will be the
+    cluster_id as CL+number. The second column will be cluster size. The third column will be
+    the elements of the clusters separated by commas.
+
+  * basename.cluster_groupcount.csv. It will be a csv file with a header and one row per cluster. The
+    first column will be the cluster ID, then it will be followed by cluster_size, minimum_group_size,
+    maximum_group_size, number_of_groups_with_zero_size and non_zero_cluster. The rest will be the 
+    count of the number of elements of a specific group.
+
+  * basename.cluster_id_selected.txt. It will be a file like the first one with the clusters that
+    meet the requirements specifified by the options -c <mimimum_cluster_size,maximum_cluster_size>
+    -g <mimimum_group_size,maximum_group_size> -Z <select_non_zero_clusters>.
+
+  * basename.groups_summary.csv. It is a CSV file with the following fields: #GROUP, as group name; 
+    SIZE, as the number of total elements; CLUSTERS, as the number of clusters in which this group
+    is present and UNIQUE_CL, as the number of clusters in which this group is the only component.
+    
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aureliano.bombarely@unimi.it).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use File::Spec::Functions;
+use Getopt::Std;
+use Math::BigFloat;
+use List::Util qw(sum min max);
+
+our ($opt_i, $opt_o, $opt_g, $opt_c, $opt_Z, $opt_h);
+getopts("i:o:g:c:Zh");
+
+if (!$opt_i && !$opt_o && !$opt_g && !$opt_c && !$opt_Z && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+my $input = $opt_i;
+if (!$opt_i) {
+
+    die("\nERROR: No -i <mcl_clusters_file> argument was supplied.\n"); 
+}
+
+
+my $outbase = $opt_o;
+if (!$opt_o) {
+
+    die("\nERROR: No -o <out_basename> argument was supplied.\n");
+} 
+
+my $c_min = 0;
+my $c_max = 1000000;
+
+if ($opt_c) {
+
+    if ($opt_c =~ m/^(\d+),(\d+)$/) {
+
+      $c_min = $1;
+      $c_max = $2;
+   }
+   else {
+
+      die("\nERROR: -c <min,max_cluster_size> does not have the right format (digits,digits)\n");
+   }
+}
+
+
+my $g_min = 0;
+my $g_max = 1000000;
+
+if ($opt_g) {
+
+    if ($opt_g =~ m/^(\d+),(\d+)$/) {
+
+      $g_min = $1;
+      $g_max = $2;
+   }
+   else {
+
+      die("\nERROR: -g <min,max_group_size> does not have the right format (digits,digits)\n");
+   }
+}
+
+
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## FormatMCLClusters Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+## Parse the file and keep the following information
+my %groups = ();
+my %clusters = ();
+my %cluster_size = ();
+
+print STDERR "\t1- Parsing the file $input\n";
+open my $cfh, '<', $input;
+my $c = 0;
+while(<$cfh>) {
+
+    chomp($_);
+    $c++;
+    my @clusters = split(/\t/, $_);
+    foreach my $ind (@clusters) {
+
+        if ($ind !~ m/\|/) {
+
+            die("\nERROR: -i <mcl_cluster_file> does not have the right format. Elements should have the format \"group|ID\"\n"); 
+        }
+        my @sections = split(/\|/, $ind);
+        if (exists $groups{$sections[0]}) {
+
+            $groups{$sections[0]}++;
+        }
+        else {
+
+
+            $groups{$sections[0]} = 1;
+        }
+    }
+    $clusters{$c} = \@clusters;
+    $cluster_size{$c} = scalar(@clusters);
+}
+close($cfh);
+
+print STDERR "\t\t$c clusters have been parsed.\n";
+my @groups = sort(keys %groups);
+my $groups_n = scalar(@groups);
+print STDERR "\t\t$groups_n groups have been detected.\n";
+print STDERR "\t\tSummary of the group sizes:\n";
+
+## Create a new hash to store more information about the groups
+my %groups_ext = ();
+foreach my $gname (sort keys %groups) {
+
+    print STDERR "\t\t\t$gname\t$groups{$gname}\n";
+    $groups_ext{$gname} = [$groups{$gname}, 0, 0];
+}
+
+print STDERR "\n\t2- Analyzing the cluster composition\n";
+
+## Analyze the clusters 
+my @comp_header = ("#CLID", "size", "min", "max", "zero_grp_n", "has_zero_grp", "is_monogroup", @groups);
+my $header = join(",", @comp_header);
+
+my $max_clsize = 0;
+my $max_clsize_id = "";
+my $monogroups = 0;
+my $nonzerogroups = 0;
+my $c1 = 0;
+
+my $cl_format = length($c);
+my %cluster_comp = ();
+
+my %selected_clusters = ();
+
+foreach my $cl (sort {$a <=> $b} keys %clusters) {
+
+    ## define a cl_id
+    my $cl_id = "CL".sprintf("%0".$cl_format."s", $cl);
+
+    ## Define the selected switch
+    my $selected = 1;
+
+    $c1++;
+    ## Create a count hash
+    my %comp = ();
+    foreach my $group (@groups) {
+
+        $comp{$group} = 0;
+    }
+
+    ## Fill the hash
+    foreach my $ind (@{$clusters{$cl}}) { 
+
+        my @sec = split(/\|/, $ind);
+        $comp{$sec[0]}++;
+    }
+
+    ## Check if each of the groups is represented
+    ## and add the info to the groups_ext hash
+
+    foreach my $gr (sort keys %groups_ext) {
+
+        if ($comp{$gr} > 0) {
+
+            $groups_ext{$gr}->[1]++;
+        }
+    }
+
+    my $sum = sum(values(%comp));
+    my $min = min(values(%comp));
+    my $max = max(values(%comp));
+    if ($max > $max_clsize) {
+
+        $max_clsize = $max;
+        $max_clsize_id = $cl_id;
+    }
+    my $zero_cl = 0;
+    foreach my $gr (sort keys %comp) {
+
+        if ($comp{$gr} < $g_min || $comp{$gr} > $g_max) {
+
+            $selected = 0;
+        }
+        if ($comp{$gr} == 0) {
+
+            $zero_cl++;
+        }
+    }
+    my $non_zero = 0;
+    if ($zero_cl > 0) {
+
+        $non_zero = 1;
+        if ($opt_Z) {
+
+            $selected = 0;
+        } 
+    }
+    else {
+
+        $nonzerogroups++;
+    }
+
+    my $single_group_cl = 0;
+    if ($zero_cl + 1 == scalar(keys %comp)) {
+
+        $single_group_cl = 1;
+        $monogroups++;
+
+        ## Check the species for which it is unique
+        ## and add it to the group_ext count
+
+        foreach my $gr (sort keys %comp) {
+
+            if ($comp{$gr} > 0) {
+
+                 $groups_ext{$gr}->[2]++;
+            }
+        }
+    }
+
+    my @line = ($cl_id, $sum, $min, $max, $zero_cl, $non_zero, $single_group_cl);
+
+    if ($sum < $c_min || $sum > $c_max) {
+
+       $selected = 0;
+    }
+
+    foreach my $gr (sort keys %comp) {
+
+        push(@line, $comp{$gr}); 
+    }
+
+    $cluster_comp{$cl_id} = \@line;
+    if ($selected == 1) {
+
+        $selected_clusters{$cl_id} = 1;
+    }
+}
+
+print STDERR "\n\t\t$c1 clusters have been processed.\n";
+print STDERR "\t\tThe biggest cluster size is $max_clsize ($max_clsize_id)\n";
+print STDERR "\t\t$nonzerogroups clusters have at least one element in all the groups\n";
+print STDERR "\t\t$monogroups clusters are composed by only one group (group specific)\n";
+
+my $sel_n = scalar(keys %selected_clusters);
+print STDERR "\t\t$sel_n clusters meet the selection requirements\n"; 
+
+print STDERR "\n\t3- Producing the outputs\n";
+
+## Create a group summary table table
+
+my $grp_summary_filename = $outbase . ".groups_summary.csv";
+open my $gs_fh, '>', $grp_summary_filename;
+my @header2 = ("#GROUP", "SIZE", "CLUSTERS", "UNIQUE_CL");
+my $header2_line = join(",", @header2);
+print $gs_fh "$header2_line\n";
+foreach my $grp (sort keys %groups_ext) {
+
+   my @line = @{$groups_ext{$grp}};
+   unshift(@line, $grp);
+   my $pline = join(",", @line);
+   print $gs_fh "$pline\n";
+}
+print STDERR "\n\t\t* $grp_summary_filename created.\n";
+
+my $clusters_comp = $outbase . ".cluster_id.txt";
+my $clusters_comp_sel = $outbase . ".cluster_id_selected.txt";
+open my $cc_fh, '>', $clusters_comp;
+open my $ccs_fh, '>', $clusters_comp_sel;
+
+foreach my $cl (sort {$a <=> $b} keys %clusters) {
+
+    ## define a cl_id
+    my $cl_id = "CL".sprintf("%0".$cl_format."s", $cl);
+    my $comp = join(",", @{$clusters{$cl}});
+    print $cc_fh "$cl_id\t$cluster_size{$cl}\t$comp\n";
+
+    if (exists $selected_clusters{$cl_id}) {
+
+        print $ccs_fh "$cl_id\t$cluster_size{$cl}\t$comp\n";
+    }
+}
+print STDERR "\n\t\t* $clusters_comp created.\n";
+print STDERR "\n\t\t* $clusters_comp_sel created.\n";
+
+my $clusters_count_file = $outbase . ".cluster_groupcount.csv";
+open my $ccn_fh, '>', $clusters_count_file;
+print $ccn_fh "$header\n";
+foreach my $clid (sort keys %cluster_comp) {
+
+    my $pline = join(",", @{$cluster_comp{$clid}});
+    print $ccn_fh "$pline\n";
+}
+print STDERR "\n\t\t* $clusters_count_file created.\n";
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## FormatMCLClusters Ends ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+      This script parse the MCL cluster output in which each cluster is represented by
+      one line and each line the identifiers of the members of the clusters separated
+      by tabs. The identifiers should have the format group|unique_ID.
+
+      E.g. Nicotiana_acuminata|NiacuTA01T17221_c0_g1.p2    Nicotiana_pauciflora|NipauTA015742_c3_g1.p1
+
+      The script will produce the following outputs:
+
+      * basename.cluster_id.txt with three columns separated by a TAB. First column will be the
+        cluster_id as CL+number. The second column will be cluster size. The third column will be
+        the elements of the clusters separated by commas.
+
+      * basename.cluster_groupcount.csv. It will be a csv file with a header and one row per cluster. The
+        first column will be the cluster ID, then it will be followed by cluster_size, minimum_group_size,
+        maximum_group_size, number_of_groups_with_zero_size and non_zero_cluster. The rest will be the
+        count of the number of elements of a specific group.
+  
+      * basename.cluster_id_selected.txt. It will be a file like the first one with the clusters that
+        meet the requirements specifified by the options -c <mimimum_cluster_size,maximum_cluster_size>
+        -g <mimimum_group_size,maximum_group_size> -Z <select_non_zero_clusters>.
+
+        * basename.groups_summary.csv. It is a CSV file with the following fields: #GROUP, as group name; 
+          SIZE, as the number of total elements; CLUSTERS, as the number of clusters in which this group
+          is present and UNIQUE_CL, as the number of clusters in which this group is the only component.
+
+    Usage:
+      
+      FormatMCLClusters [-h] -i <mcl_clusters> -o <out_basename>
+                        [-c <min,max_cluster_size>]
+                        [-g <min,max_group_size>]
+                        [-Z]
+
+      
+    Flags:
+
+      -i <mcl_clusters>         File with the MCL clusters (one line per cluster) (mandatory)
+      -o <out_basename>         Basename for the different outputs (mandatory)
+      -c <filter_cluster_size>  Filter for minimum and maximum cluster size, comma separated (default:0,1000000)
+      -g <filter_group_size>    Filter for minimum and maximum group size, comma separated (default:0,1000000)
+      -Z <filter_non_zero>      Filter the cluster with groups with zero size (optional)
+      -h <help>                 Print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+####
+1; #
+####
