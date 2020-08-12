@@ -1,0 +1,319 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ ExtractFastaByClusters
+ Script to extract sequences by clusters
+
+=cut
+
+=head1 SYPNOSIS
+
+ ExtractFastaByClusters [-h] -i <input_cluster_file> -o <output_dir> 
+                             -f <fasta_file> -g <group_id_equivalences>
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<input_cluster_file>   Cluster file with three fields, CLID, size and members (mandatory)
+
+=item -o
+
+B<output_dir>           Name of the output directory (mandatory)
+
+=item -f
+
+B<fasta_file>           Fasta fil;e with all the sequences (mandatory)
+
+=item -g
+
+B<group_id_equiv>       File with two columns for the renaming (mandatory)
+
+=item -h
+
+B<help>                 Print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+  This script extract the sequences of a FASTA file creating one file per
+  cluster. Additionally it will rename the sequence ID to 10 characters using the
+  -g <group_id_equivances> file. It will produce a file named "original2new_ids.txt"
+  with four columns: OldID, NewID, ClusterID and Group 
+  
+  E.g. of -g <group_id_equiv> file
+
+  Nicotiana_bethamiana	Nben
+  Nicotiana_sylvestris  Nsyl
+    
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aureliano.bombarely@unimi.it).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use File::Spec::Functions;
+use Getopt::Std;
+use Math::BigFloat;
+use List::Util qw(sum min max);
+use Bio::SeqIO;
+
+our ($opt_i, $opt_o, $opt_f, $opt_g, $opt_h);
+getopts("i:o:f:g:h");
+
+if (!$opt_i && !$opt_o && !$opt_f && !$opt_g && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+
+my $input = $opt_i;
+if (!$opt_i) {
+
+    die("\nERROR: No -i <input_clusters_file> argument was supplied.\n"); 
+}
+
+
+my $outdir = $opt_o;
+if (!$opt_o) {
+
+    die("\nERROR: No -o <outdir> argument was supplied.\n");
+} 
+unless (-d $outdir) {
+
+    die("\nERROR: -o <outdir> does not exist.\n");
+}
+
+my $fasta_file = $opt_f;
+if (!$opt_f) {
+
+    die("\nERROR: No -f <fasta_file> argument was supplied.\n");
+}
+
+my $equiv_file = $opt_g;
+if (!$opt_g) {
+
+    die("\nERROR: No -g <group_id_equiv> argument was supplied.\n");
+}
+
+
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## ExtractFastaByClusters Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+## First will parse the equivalence file and store the sequences in a hash
+## for a quick access.
+
+print_header("1- Parsing -g $equiv_file");
+
+my $c1 = 0;
+my %equiv = ();
+open my $e_fh, '<', $equiv_file;
+while(<$e_fh>) {
+
+    chomp($_);
+    $c1++;
+
+    my @fields = split(/\t/, $_); 
+    if (scalar(@fields) != 2) {
+   
+        die("\nPARSING ERROR: $c1 line does not have 2 columns.\n");
+    }
+    if (exists $equiv{$fields[0]}) {
+
+        die("\nPARSING ERROR: $c1 line contains a non unique ID.\n");
+    }
+    else  {
+    
+        $equiv{$fields[0]} = $fields[1];
+    }
+}
+
+print STDERR "\t$c1 lines have been parsed\n"; 
+
+## Second it will parse the FASTA file and store in a hash for a quick access
+
+print_header("2- Parsing -f $fasta_file");
+
+my %seq = ();
+my $seqio = Bio::SeqIO->new( -file => $fasta_file, -format => "fasta"); 
+
+my $c2 = 0;
+while( my $seqobj = $seqio->next_seq()) {
+
+    $c2++;
+    my $id = $seqobj->id();
+    $seq{$id} = $seqobj;
+}
+
+print STDERR "\t$c2 sequences have been parsed\n";
+
+print_header("3- Parsing -i $input and producing the output");
+
+my $c3 = 0;
+my %g_count = ();
+my %id_eq = ();
+
+open my $c_fh, '<', $input;
+while(<$c_fh>) {
+
+    $c3++;
+    chomp($_);
+
+    my @fields = split(/\t/, $_);
+    if (scalar(@fields) != 3) {
+
+        die("\nPARSING ERROR: $c1 line does not have 3 columns.\n");
+    }
+
+    my @seqids = split(/,/, $fields[2]);
+
+    my $outfile = $fields[0] . ".unaligned.fasta";
+    my $outfilepath = catfile($outdir, $outfile);
+    my $newseqio = Bio::SeqIO->new( -file => ">$outfilepath", -type => "fasta");
+    foreach my $oldid (@seqids) {
+
+        unless (exists $seq{$oldid}) {
+
+            die("\nERROR: $oldid SeqID does not exist in the FASTA file.\n");
+        }
+        my $seqobj = $seq{$oldid};
+        my @splitid = split(/\|/, $oldid);
+        unless (exists $equiv{$splitid[0]}) {
+
+            die("\nERROR: $oldid ID may not have the right format (group|id) or the group does not exists at the $equiv_file");
+        }
+        my $newroot = $equiv{$splitid[0]};
+        if (exists $g_count{$newroot}) {
+
+            $g_count{$newroot}++;
+        }
+        else {
+
+            $g_count{$newroot} = 1;
+        }
+
+        my $newid = $newroot . sprintf("%06s", $g_count{$newroot});
+        $id_eq{$oldid} = [$newid, $fields[0], $splitid[0]];
+
+        ## Now if will change the id
+        $seq{$oldid}->id($newid);
+        $newseqio->write_seq($seq{$oldid});
+    }
+}
+
+print STDERR "\n\t$c3 clusters have been parsed. One FASTA file has been created per cluster.\n";
+## Finally it will print the equivalence file
+
+my $out_equivid = catfile($outdir, "original2new_ids.txt");
+open my $eq_fh, '>', $out_equivid;
+foreach my $oldid (sort keys %id_eq) {
+
+    my @line = ($oldid, @{$id_eq{$oldid}});
+    my $pline = join("\t", @line);
+    print $eq_fh "$pline\n";
+}
+
+print STDERR "\n\tA ID equivalence file with name $out_equivid has been created.\n";
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## ExtractFastaByClusters Ends ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+     This script extract the sequences of a FASTA file creating one file per
+     cluster. Additionally it will rename the sequence ID to 10 characters using the
+     -g <group_id_equivances> file. It will produce a file named "original2new_ids.txt"
+     with four columns: OldID, NewID, ClusterID and Group
+  
+     E.g. of -g <group_id_equiv> file
+
+     Nicotiana_bethamiana  Nben
+     Nicotiana_sylvestris  Nsyl
+
+    Usage:
+      
+      ExtractFastaByClusters [-h] -i <input_cluster_file> -o <output_dir>
+                             -f <fasta_file> -g <group_id_equivalences>
+      
+    Flags:
+
+      -i <input_cluster_file>   Cluster file with three fields, CLID, size and members (mandatory)
+      -o <output_dir>           Name of the output directory (mandatory)
+      -f <fasta_file>           Fasta fil;e with all the sequences (mandatory)
+      -g <group_id_equiv>       File with two columns for the renaming (mandatory)
+      -h <help>                 Print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+####
+1; #
+####
