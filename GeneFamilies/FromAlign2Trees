@@ -1,0 +1,859 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ FromAlign2Trees
+ Script to align multiple sequence files and run a ML tree 
+
+=cut
+
+our $VERSION = '0.1';
+$VERSION = eval $VERSION;
+
+=head1 SYPNOSIS
+
+ FromAlign2Trees [-h] -i <fasta_file_list> -d <output_dir> -t <threads> 
+                      [-g <guidance_conf>] [-q <iqtree_conf>] [-o <outgroup_taxon>] 
+                      [-V] [-v]  
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<fasta_file_list>      File with two fields: CLID and fasta file path (mandatory)
+
+=item -d
+
+B<output_dir>           Name of the output directory (mandatory)
+
+=item -t
+
+B<threads>              Number of threads to be used by the Guidance and iQtree (default 2)
+
+=item -g
+
+B<guidance_conf>        Guidance configuration file (optional)
+
+=item -q
+
+B<iqtree_conf>          iQtree configuration file (optional)
+
+=item -o
+
+B<outgroup_taxon>       outgroup taxon (optional)
+
+=item -V
+
+B<be_verbose>           print more details of the running scripts
+
+=item -v
+
+B<version>              print script version
+
+=item -h
+
+B<help>                 Print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+  This script run two programs Guidance and iQTree on a set of FASTA files with the
+  goal of align the sequences and generate a phylogenetic tree.
+
+  The script uses as an input a tabular file with two columns: cluster_id and file
+  path to the fasta file.
+
+  The script can use configuration files for Guidance and iQtree to pass specific
+  arguments. The configuration file should have one argument per line with the 
+  format -/--argument=value (e.g. --bootstraps=100). For switch arguments with no 
+  values, the configuration file should have the word "ENABLED" (e.g. -wbt=ENABLED).
+
+  The script also can use outgroup taxa. The outgroup taxa should be 4 or more 
+  characters at the begining of each sequence ID. For example, if the sequences of
+  the outgroup are Slyc000001 and Slyc000002, the output prefiix should be "Slyc".    
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aureliano.bombarely@unimi.it).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use File::Spec;
+use File::Basename;
+use File::Copy;
+use File::Path qw(make_path remove_tree);
+use IPC::Cmd qw[can_run run];
+use Math::BigFloat;
+use Bio::SeqIO;
+use Bio::AlignIO;
+
+our ($opt_i, $opt_d, $opt_t, $opt_g, $opt_q, $opt_o, $opt_V, $opt_v, $opt_h);
+getopts("i:d:t:g:q:o:Vvh");
+
+if (!$opt_i && !$opt_d && !$opt_t && !$opt_g && !$opt_q && !$opt_o && !$opt_V && !$opt_v && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+elsif ($opt_v) {
+    print STDERR "\nFromAlign2Trees version: $VERSION\n\n";
+    exit(1);
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## FromAlign2Trees Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+## First will parse the equivalence file and store the sequences in a hash
+## for a quick access.
+
+#########################################################
+## STEP 0: ARGUMENT CHECKS                             ##
+#########################################################
+
+print_header("Step 0 - Checking arguments");
+
+## Check the input and parse the file paths
+my $input = $opt_i;
+my %fasta_list = ();
+if (!$opt_i) {
+
+    die("\nERROR: No -i <fasta_file_list> argument was supplied.\n");
+}
+else {
+
+    my $l1 = 0;
+    open my $ifh, '<', $input;
+    while(<$ifh>) {
+ 
+        chomp($_);
+        $l1++;
+        my @fields = split(/\t/, $_);
+        if (scalar(@fields) != 2) {
+
+            die("\nPARSING ERROR: Line $l1 at the file $input doesn't have two columns");
+        }
+        else {
+
+            if (-e $fields[1]) {
+
+                $fasta_list{$fields[0]} = $fields[1];
+            }
+            else {
+
+                die("\nINPUT ERROR: file $fields[1] does not exist. Please check.\n");
+            }
+        }
+    }
+}
+
+print STDERR "\tFASTA FILE LIST: $input\n";
+my $list_n = scalar(keys %fasta_list);
+print STDERR "\tFASTA FILE LIST has $list_n files.\n";
+
+## Check the output dir
+my $outdir = $opt_d;
+if (!$opt_d) {
+
+    die("\nERROR: No -d <outdir> argument was supplied.\n");
+}
+unless (-d $outdir) {
+
+    die("\nERROR: -d <outdir> does not exist.\n");
+}
+print STDERR "\tOUTDIR: $outdir\n";
+
+## Check how many CPU(s) your system has
+my $avail_cpus = `lscpu | grep "^CPU(s)"`;
+chomp($avail_cpus);
+$avail_cpus =~ s/CPU\(s\):\s+//;
+
+my $threads = $opt_t || 2;
+unless ($threads =~ m/^\d+$/) {
+
+    die("ERROR: -t <threads> is not an integer.\n");
+}
+else {
+
+    if ($threads > $avail_cpus) {
+
+        die("\nERROR: -t <threads> $threads is bigger than the max. number of available threads on the system ($avail_cpus).\n");
+    }
+    print STDERR "\tTHREADS SET TO: $threads\n";
+}
+
+my $outgroup_taxa = "";
+if ($opt_o) {
+
+    $outgroup_taxa = $opt_o;
+    print STDERR "\tTAXA OUTGROUP:\t$outgroup_taxa\n";
+}
+else {
+
+    print STDERR "\tTAXA OUTGROUP:\tNone\n";
+}
+
+
+## Check the executables:
+## It will wait until check the programs to check the freebayes arguments
+
+my %exec_list = (
+    GUIDANCE_PATH => ['guidance.pl'],
+    IQTREE_PATH   => ['iqtree'],
+    ); 
+
+my %exepath = ();
+
+foreach my $exec_key (sort keys %exec_list) {
+
+    my @execitems = @{$exec_list{$exec_key}};
+    foreach my $e_item (@execitems) {
+
+        if (exists $ENV{$exec_key}) {
+    
+            $exepath{$e_item} = File::Spec->catfile($ENV{$exec_key}, $e_item);
+            my $exe_path = can_run($exepath{$e_item});
+            if ($exe_path) {
+
+                print STDERR "\t$exec_key PATH defined for $e_item executable\n";
+            }
+            else {
+
+	        die("\n\tERROR: The PATH $ENV{$exec_key} does not contain the $e_item executable.\n");
+            }
+        }
+        else {
+    
+            my $exe_path = can_run($e_item);
+            if ($exe_path) {
+                
+                $exepath{$e_item} = $exe_path;
+                print STDERR "\t$e_item is available in the PATH ($exe_path)\n";
+            }
+            else {
+                
+                print STDERR "\nERROR: $e_item executable ($exec_key package)";
+                die(" is not accessible.\n");
+            }      
+        }       
+    }
+}
+
+## Get the permited options for Guidance
+
+## There are some options that should not be used because it will 
+## produce problems downstream to process the output
+
+my %guidance_ban = (
+    '--seqFile'      => 1,
+    '--outDir'       => 1,
+    '--proc_num'     => 1,
+    '--msaFile'      => 1,
+    '--Z_Seq_Cutoff' => 1,
+    '--Z_Col_Cutoff' => 1
+);
+
+my %guidance_defaults = (
+    '--msaProgram' => "MAFFT",
+    '--seqType'    => "codon",
+);
+
+my %guidance_allowed = (
+    '--msaProgram' => ["MAFFT", "PRANK", "CLUSTALW", "MUSCLE", "PAGAN"],
+    '--seqType'    => ["aa", "nuc", "codon"],
+    '--program'    => ["GUIDANCE", "HoT", "GUIDANCE2"],
+    '--bootstraps' => "integer",
+    '--genCode'    => [1, 15, 6, 10, 2, 5, 3, 13, 9, 14, 4],
+    '--outOrder'   => ["aligned", "as_input"], 
+    '--seqCutoff'  => "0:1",
+    '--colCutoff'  => "0:1",
+    '--mafft'      => "path",
+    '--prank'      => "path",
+    '--clustalw'   => "path",
+    '--muscle'     => "path",
+    '--pagan'      => "path",
+    '--ruby'       => "path",
+    '--dataset'    => "string",
+    '--MSA_Param'  => "string"
+);
+
+my %guidance_args = ();
+if ($opt_g) {
+
+    open my $gcf_fh, '<', $opt_g;
+    while(<$gcf_fh>) {
+
+        chomp($_);
+        if ($_ !~ m/#/) {
+
+            if ($_ =~ m/(--.+)\s*=\s*(.+)/) {
+
+                if (exists $guidance_allowed{$1}) {
+
+                    my $arg = $1;
+                    my $val = $2;
+                    if ($val =~ /^ENABLED$/i) {
+
+                        $guidance_args{$arg} = "";
+                    }
+                    else {
+
+                        $guidance_args{$arg} = $val;
+                    }
+                }
+                elsif (exists $guidance_ban{$1}) {
+ 
+                    die("\nARGUMENT BAN: $1 Guidance argument is reserved for this script. Delete from the config file\n");
+                }
+                else {
+
+                    die("\nARGUMENT UNKNOWN: $1 argument is not a Guidance argument. Please modify accordingly.\n");
+                }
+            }
+            else {
+
+                die("\nPARSING ERROR: Guidance arguments at the configuration file should have the format --argument=value\n");
+            }
+        }
+    }
+}
+
+
+
+print STDERR "\n\tGUIDANCE ARGUMENTS:\n";
+if (scalar(keys %guidance_args) > 0) {
+
+    foreach my $g_arg (sort keys %guidance_args) {
+
+        print STDERR "\t\t$g_arg\t$guidance_args{$g_arg}\n";
+    }
+}
+else {
+
+    print STDERR "\t\tNONE, the program will use the default arguments.\n";
+}
+
+## Check and add the defaults
+
+foreach my $gui_def (sort keys %guidance_defaults) {
+
+    unless (exists $guidance_args{$gui_def}) {
+
+        $guidance_args{$gui_def} = $guidance_defaults{$gui_def};
+        print STDERR "\t\t\tArgument: $gui_def, default value: $guidance_defaults{$gui_def}\n";
+    }
+}
+
+my %iqtree_ban = (
+    '-version'        => 1,
+    '-s'              => 1,
+    '-o'              => 1,
+    '-pre'            => 1,
+    '-nt'             => 1,
+    '-ntmax'          => 1,
+    '-redo'           => 1,
+    '-cptime'         => 1,
+    '--no-outfiles'   => 1
+);
+
+my %iqtree_allowed = (
+    '--msaProgram'    => ["MAFFT", "PRANK", "CLUSTALW", "MUSCLE", "PAGAN"],
+    '-st'             => ["BIN", "DNA", "AA", "NT2AA", "CODON", "MORPH"],
+    '-q'              => "partition_file",
+    '-spp'            => "partition_file",
+    '-sp'             => "partition_file",
+    '-t'              => ["start_tree_file", "BIONJ", "RANDOM"],
+    '-te'             => "user_tree_file",
+    '-seed'           => "number",
+    '-v'              => "verbose", 
+    '-vv'             => "more verbose", 
+    '-vvv'            => "top verbose",
+    '-quiet'          => "quite mode",
+    '-keep-ident'     => 1,
+    '-safe'           => 1,
+    '-mem'            => "number",
+    '--runs'          => "number",
+    '-lmap'           => "quartets",
+    '-lmclust'        => "clustfile",
+    '-wql'            => 1, 
+    '-ninit'          => "number",
+    '-ntop'           => "number",
+    '-nbest'          => "number",
+    '-n'              => "iterations",
+    '-nstop'          => "number",
+    '-pers'           => "proportion",
+    '-sprrad'         => "number",
+    '-allnni'         => 1,
+    '-g'              => "constraint_tree",
+    '-fast'           => 1,
+    '-bb'             => "replicates",
+    '-bsam'           => ["GENE", "GENESITE"],
+    '-wbt'            => 1,
+    '-wbtl'           => 1,
+    '-nm'             => "iterations",
+    '-nstep'          => "iterations",
+    '-bcor'           => "min_corr",
+    '-beps'           => "epsilon",
+    '-bnni'           => 1,
+    '-j'              => "jackknife",
+    '-b'              => "replicates",
+    '-bc'             => "replicates",
+    '-bo'             => "replicates", 
+    '-alrt'           => "replicates",
+    '-abayes'         => 1,
+    '-lbp'            => "replicates",  
+    '-m'              => [" TESTONLY", "TEST","MF", "MFP", "TESTMERGEONLY", "TESTMERGE", "MF+MERGE", "MFP+MERGE"],
+    '-rcluster'       => "percent",
+    '-rclusterf'      => "percent",
+    '-rcluster-max'   => "number",
+    '-mset'           => ["raxml", "phyml", "mrbayes", "liemarkov", "liemarkovry", "liemarkovws", "liemarkovmk", "strandsymmetric"],
+    '-msub'           => ["nuclear", "mitochondrial", "chloroplast", "viral"],
+    '-mfreq'          => "state frequencies",
+    '-mrate'          => "rate-across-sties models",
+    '-cmin'           => "kmin",
+    '-cmax'           => "kmax",
+    '-merit'          => ["AIC", "AICc", "BIC"],
+    '-mtree'          => 1,
+    '-mredo'          => 1,
+    '-madd'           => "mixture models",
+    '-mdef'           => "nexus_file",
+    '-m'              => "model_name",
+    '-mwopt'          => 1,
+    '-a'              => "Gamma_shape",
+    '-amin'           => "min_shape",
+    '-gmedian'        => 1,
+    '--opt-gamma-inv' => 1,
+    '-i'              => "p_invar", 
+    '-wsr'            => 1,
+    '-mh'             => 1,
+    '-s'              => "counts_file",
+    '-nni-eval'       => "number",
+    '-ft'             => "tree_file",
+    '-fs'             => "in_freq_file",
+    '-fmax'           => 1,
+    '-t'              => "tree_file",
+    '-minsup'         => "threshold",
+    '-bi'             => "burnin",
+    '-con'            => 1,
+    '-net'            => 1,
+    '-sup'            => "target_tree",
+    '-suptag'         => "name",
+    '-rf_all'         => 1,
+    '-rf'             => "treefile2",
+    '-rf_adj'          => 1,
+    '-z'              => "trees_file",
+    '-zb'             => "replicates",
+    '-zw'             => 1,
+    '-au'             => 1,
+    '-asr'            => 1,
+    '-asr-min'        => "probability",
+    '-r'              => "num_taxa",
+    '-ru'             => "num_taxa",
+    '-rcat'           => "num_taxa",
+    '-rbal'           => "num_taxa",
+    '-rcsg'           => "num_taxa",
+    '-rlen'           => ["min_len", "mean_len", "max_len"],
+    '-wt'             => 1,
+    '-blfix'          => 1,
+    '-blscale'        => 1,
+    '-blmin'          => "numeric",
+    '-blmax'          => "numeric", 
+    '-wsr'            => 1,
+    '-wsl'            => 1,
+    '-wslr'           => 1,
+    '-wslm'           => 1,
+    '-wslmr'          => 1,
+    '-wspr'           => 1,
+    '-wspm'           => 1,
+    '-wspmr'          => 1,
+    '-wpl'            => 1,
+    '-fconst'         => "constant_patterns",
+    '-me'             => "epsilon",      
+    '--eigenlib'      => 1,
+    '-alninfo'        => 1,
+    '-czb'            => 1,
+    '--show-lh'       => 1
+);
+
+my %iqtree_args = ();
+if ($opt_q) {
+
+    open my $qcf_fh, '<', $opt_q;
+    while(<$qcf_fh>) {
+
+        chomp($_);
+        if ($_ !~ m/#/) {
+
+            if ($_ =~ m/(-.+)\s*=\s*(.+)/) {
+
+                if (exists $iqtree_allowed{$1}) {
+
+                    my $arg = $1;
+                    my $val = $2;
+                    if ($val =~ /^ENABLED$/i) {
+
+                        $iqtree_args{$arg} = "";
+                    }
+                    else {
+
+                        $iqtree_args{$arg} = $val;
+                    }
+                }
+                elsif (exists $iqtree_ban{$1}) {
+ 
+                    die("\nARGUMENT BAN: $1 iQtree argument is reserved for this script. Delete from the config file\n");
+                }
+                else {
+
+                    die("\nARGUMENT UNKNOWN: $1 argument is not a iQtree argument. Please modify accordingly.\n");
+                }
+            }
+            else {
+
+                die("\nPARSING ERROR: iQtree arguments at the configuration file should have the format -/--argument=value\n");
+            }
+        }
+    }
+}
+
+print STDERR "\n\tiQTree ARGUMENTS:\n";
+if (scalar(keys %iqtree_args) > 0) {
+
+    foreach my $q_arg (sort keys %iqtree_args) {
+
+        print STDERR "\t\t$q_arg\t$iqtree_args{$q_arg}\n";
+    }
+}
+else {
+
+    print STDERR "\t\tNONE, the program will use the default arguments.\n";
+}
+
+
+#########################################################
+## STEP 1: RUN GUIDANCE                                ##
+#########################################################
+##
+## The basic guidance command is something like:
+## guidance.pl --seqFile <myfile.fasta> --msaProgram MAFFT --seqType aa --outDir <myfile_guidance> --proc_num <threads>
+
+## It will store the output files in a hash
+
+print_header("Step 1 - Running Guidance");
+
+my %guidance_dirs = ();
+
+## First, create a directory for the guidance outputs
+my $dir01_guidance = File::Spec->catfile($outdir, "01_GuidanceOut");
+my $log01_guidance = File::Spec->catfile($outdir, "run01_guidance.log");
+
+if (-d $dir01_guidance) {
+
+    opendir( my $dir01_fh, $dir01_guidance);
+    while(readdir $dir01_fh) {
+
+        my $subdir01 = File::Spec->catfile($dir01_guidance, $_);
+        my $subdir01_abs = File::Spec->rel2abs($subdir01);    
+        if ($_ =~ m/(.+)_GuidanceAlign/) {
+
+            my $gid = $1;
+            $guidance_dirs{$gid} = $subdir01_abs;
+        }
+    }
+    closedir($dir01_fh);
+
+    print STDERR "\tGuidance directory detected.\n";
+    my $gui_files_n = scalar(keys %guidance_dirs);
+
+    if ($gui_files_n > 0) {
+
+        print STDERR "\t$gui_files_n files have been added to the pipeline.\n";
+    }
+    else {
+
+        die("\nERROR: No Guidance files were detected inside $dir01_guidance.\n\tPlease delete the directory and rerun the script.\n");
+    }
+}
+else {
+
+    mkdir($dir01_guidance);
+}
+
+## WARNING: Guidance requires from the absolute path for the
+## output files.
+
+if (scalar(keys %guidance_dirs > 0)) {
+
+    print STDERR "\n\tGuidance files were detected. Skipping step.\n";
+
+} 
+else {
+
+    my $dir01_guidance_abs = File::Spec->rel2abs($dir01_guidance);
+
+    open my $gui_log_fh, '>', $log01_guidance;
+
+    my ($guid_runs, $guid_ok, $guid_fails) = (0, 0, 0);
+
+    foreach my $gid (sort keys %fasta_list) {
+
+        my $clid_guidance_out = File::Spec->catfile($dir01_guidance_abs, $gid . "_GuidanceAlign");	
+
+        my @guidance_cmd = ($exepath{'guidance.pl'}, "--seqFile", $fasta_list{$gid}, "--outDir", $clid_guidance_out);
+        push(@guidance_cmd, ("--proc_num", $threads));
+
+        foreach my $guidance_arg (sort keys %guidance_args) {
+
+            push @guidance_cmd, $guidance_arg;  
+            if ($guidance_args{$guidance_arg} =~ m/.+/) {
+    
+                push @guidance_cmd, $guidance_args{$guidance_arg};
+            }
+        }
+    
+        print $gui_log_fh "RUN\tGUIDANCE\t$gid\tSTART\n";
+        my $guidance_cmd = join(" ", @guidance_cmd);
+        print $gui_log_fh "CMD $guidance_cmd\n";
+
+        $guid_runs++;
+        my @guidance01run = run( command => \@guidance_cmd, verbose => $opt_V );
+        if ($guidance01run[1]) {
+
+            print $gui_log_fh "RUN\tGUIDANCE\t$gid\tFAIL\n";
+            print $gui_log_fh "GUIDANCE ERROR: $guidance01run[1]\n$guidance01run[4]\n\n";
+            $guid_fails++;
+        }
+        else {
+
+            print $gui_log_fh "RUN\tGUIDANCE\t$gid\tFINISHED\n";
+            print $gui_log_fh "GUIDANCE EXECUTION MESSAGE: $guidance01run[0]\n\n";
+            $guidance_dirs{$gid} = $clid_guidance_out;
+            $guid_ok++;
+        }
+    }
+
+    print STDERR "\tGuidance runs finished\n";
+    print STDERR "\t\t$guid_runs processes have been run of which $guid_fails failed and $guid_ok succeed\n";
+}
+
+#########################################################
+## STEP 2: CHANGE FORMATS                              ##
+#########################################################
+
+#echo "1.3- Changing names for GF_013879"
+#date
+#echo "=============================="
+## -i GF_013879.mafft.aln 
+## -o GF_013879.mafft.fname.aln
+## -e GF_013879.mafft.fname.equiv.txt
+#
+#echo "1.4- Reformatting the alignment file for GF_013879"
+#date
+#echo "=============================="
+#bp_sreformat -if fasta -of phylip -i /data/bombarelya/Suaveolentes/00_sources/All_species/wgd_ksd/mafft_guid/GF_013879.mafft.fname.aln -o /data/bombarelya/Suaveolentes/00_sources/All_species/wgd_ksd/mafft_guid/GF_013879.mafft.phy --msa
+
+## Guidance produces the alignment with some in house names
+## Additionally, iQtree requires phylip format instead fasta
+## so this step will perform both tasks
+
+print_header("Step 2 - Formatting Guidance alignments");
+
+my %guiform_dirs = ();
+
+## First, create a directory for the guidance outputs
+my $dir02_guiform = File::Spec->catfile($outdir, "02_GuidanceFormatted");
+my $log02_guiform = File::Spec->catfile($outdir, "run02_guidance_formatting.log");
+
+if (-d $dir02_guiform) {
+
+    opendir( my $dir02_fh, $dir02_guiform);
+    while(readdir $dir02_fh) {
+
+        my $subdir02 = File::Spec->catfile($dir02_guiform, $_);
+        my $subdir02_abs = File::Spec->rel2abs($subdir02);
+        if ($_ =~ m/(.+).guidance_aln.phy/) {
+
+            my $gid = $1;
+            $guiform_dirs{$gid} = $subdir02_abs;
+        }
+    }
+    closedir($dir02_fh);
+
+    print STDERR "\tGuidance formatting directory detected.\n";
+    my $guif_files_n = scalar(keys %guiform_dirs);
+
+    if ($guif_files_n > 0) {
+
+        print STDERR "\t$guif_files_n files have been added to the pipeline.\n";
+    }
+    else {
+
+        die("\nERROR: No Guidance formatted files were detected inside $dir02_guiform.\n\tPlease delete the directory and rerun the script.\n");
+    }
+}
+else {
+
+    mkdir($dir02_guiform);
+}
+
+if (scalar(keys %guiform_dirs > 0)) {
+
+    print STDERR "\nGuidance formatted files were detected. Skipping step.\n";
+
+}
+else {
+
+    open my $guif_log_fh, '>', $log02_guiform;
+
+    ## Now it will go file by file and change format from fasta msa to phylip
+    
+    foreach my $gid (sort keys %guidance_dirs) {
+
+        my $target_file = File::Spec->catfile($guidance_dirs{$gid}, "MSA.MAFFT.Without_low_SP_Col.With_Names");
+        my $out_file = File::Spec->catfile($dir02_guiform, $gid .".guidance_aln.phy");
+        my $equiv_file = File::Spec->catfile($dir02_guiform, $gid .".guidance.id_equivalence.txt");
+        open my $eqfh, '>', $equiv_file;
+
+        my $seqn = 0;
+        
+        my $old_align_obj = Bio::AlignIO->new(-file   => $target_file,
+                                              -format => 'fasta');
+
+        my $new_align_obj = Bio::AlignIO->new(-file   => ">$out_file" ,
+                                              -format => 'phylip');
+ 
+        while ( my $aln = $old_align_obj->next_aln() ) {
+        
+            foreach my $seq ($aln->each_seq) {
+    
+                my $seqid = $seq->id();
+                if (length($seqid) > 10) { 
+  
+                    $seqn++;
+                    my @break_id = split(//, $seqid);
+                    my $prefix = join("", @break_id[0..4]);
+                    my $newid = $prefix.sprintf("%05s", $seqn);
+                    print $eqfh "$seqid\t$seqid\n";
+                    $seq->id($newid);
+                }
+		else {
+
+                    print $eqfh "$seqid\t$seqid\n";
+                }
+            }
+
+            $new_align_obj->write_aln($aln);
+        }
+
+        $guiform_dirs{$gid} = $out_file;
+    }
+}
+
+my $phylip_n = scalar(keys %guiform_dirs);
+print STDERR "\t$phylip_n files have been converted to phylip format.\n";
+
+
+#########################################################
+## STEP 3: RUN IQTREE                                  ##
+#########################################################
+
+## Once Guidance runs, the script will select the alignment
+## files and run iqTree
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## FromAlign2Trees Ends ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+
+    Usage:
+      
+       FromAlign2Trees [-h] -i <fasta_file_list> -d <output_dir> -t <threads>
+                      [-g <guidance_conf>] [-q <iqtree_conf>] [-o <outgroup_taxon>]
+                      [-V] [-v]
+      
+    Flags:
+
+      -i <fasta_file_list>      File with two fields: CLID and fasta file path (mandatory)
+      -d <output_dir>           Name of the output directory (mandatory)
+      -t <threads>              Number of threads to be used by the Guidance and iQtree (default 2)
+      -g <guidance_conf>        Guidance configuration file (optional)
+      -q <iqtree_conf>          iQtree configuration file (optional)
+      -o <outgroup_taxon>       outgroup taxon (optional)
+      -V <be_verbose>           print more details of the running scripts
+      -v <version>              print script version
+      -h <help>                 Print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+
+
+####
+1; #
+####
