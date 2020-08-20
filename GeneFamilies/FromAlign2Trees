@@ -12,9 +12,9 @@ $VERSION = eval $VERSION;
 
 =head1 SYPNOSIS
 
- FromAlign2Trees [-h] -i <fasta_file_list> -d <output_dir> -t <threads> 
+ FromAlign2Trees [-h] -i <fasta_file_list> -d <output_dir> -t <threads> [-s <seqtype>]
                       [-g <guidance_conf>] [-q <iqtree_conf>] [-o <outgroup_taxon>] 
-                      [-V] [-v]  
+                      [-G] [-V] [-v]   
 
 =head2 I<Flags:>
 
@@ -33,6 +33,10 @@ B<output_dir>           Name of the output directory (mandatory)
 
 B<threads>              Number of threads to be used by the Guidance and iQtree (default 2)
 
+=item -s
+
+B<seq_type>             Sequence type (options: DNA, CDS, PEP, default DNA)
+
 =item -g
 
 B<guidance_conf>        Guidance configuration file (optional)
@@ -44,6 +48,10 @@ B<iqtree_conf>          iQtree configuration file (optional)
 =item -o
 
 B<outgroup_taxon>       outgroup taxon (optional)
+
+=item -G
+
+B<guidance_corrected>   use guidance corrected laignments (optional)
 
 =item -V
 
@@ -78,6 +86,13 @@ B<help>                 Print the help
   characters at the begining of each sequence ID. For example, if the sequences of
   the outgroup are Slyc000001 and Slyc000002, the output prefiix should be "Slyc".    
 
+  Guidance produces several types of output. The ones that this script takes are:
+   * MSA.<aligner>.aln.With_Names, a consensus alignment.
+   * MSA.<aligner>.Without_low_SP_Col.With_Names, a edited alignment with conflictive
+     nucleotides (or aminoacids) removed. This option is activated with the argument
+     -G. If this option is activated, the formating step (2) will remove the taxa with
+     only gaps.
+
 =cut
 
 =head1 AUTHORS
@@ -102,10 +117,10 @@ use Math::BigFloat;
 use Bio::SeqIO;
 use Bio::AlignIO;
 
-our ($opt_i, $opt_d, $opt_t, $opt_g, $opt_q, $opt_o, $opt_V, $opt_v, $opt_h);
-getopts("i:d:t:g:q:o:Vvh");
+our ($opt_i, $opt_d, $opt_s, $opt_t, $opt_g, $opt_q, $opt_o, $opt_G, $opt_V, $opt_v, $opt_h);
+getopts("i:d:s:t:g:q:o:GVvh");
 
-if (!$opt_i && !$opt_d && !$opt_t && !$opt_g && !$opt_q && !$opt_o && !$opt_V && !$opt_v && !$opt_h) {
+if (!$opt_i && !$opt_d && !$opt_s && !$opt_t && !$opt_g && !$opt_q && !$opt_o && !$opt_G && !$opt_V && !$opt_v && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -178,6 +193,24 @@ unless (-d $outdir) {
     die("\nERROR: -d <outdir> does not exist.\n");
 }
 print STDERR "\tOUTDIR: $outdir\n";
+
+## Define the sequence type
+my %allow_seqtypes = (
+    "DNA" => 1,
+    "CDS" => 2,
+    "PEP" => 3
+);
+
+my $seqtype = $opt_s || "DNA";
+unless (exists $allow_seqtypes{$seqtype}) {
+
+    my $allows = join(",", sort keys %allow_seqtypes);
+    die("\nERROR: -s <seqtype> does not have an allowed value ($allows).\n");
+}
+else {
+
+    print STDERR "\tSEQTYPE: $seqtype\n";
+}
 
 ## Check how many CPU(s) your system has
 my $avail_cpus = `lscpu | grep "^CPU(s)"`;
@@ -266,17 +299,16 @@ my %guidance_ban = (
     '--proc_num'     => 1,
     '--msaFile'      => 1,
     '--Z_Seq_Cutoff' => 1,
-    '--Z_Col_Cutoff' => 1
+    '--Z_Col_Cutoff' => 1,
+    '--seqtype'      => 1
 );
 
 my %guidance_defaults = (
     '--msaProgram' => "MAFFT",
-    '--seqType'    => "codon",
 );
 
 my %guidance_allowed = (
     '--msaProgram' => ["MAFFT", "PRANK", "CLUSTALW", "MUSCLE", "PAGAN"],
-    '--seqType'    => ["aa", "nuc", "codon"],
     '--program'    => ["GUIDANCE", "HoT", "GUIDANCE2"],
     '--bootstraps' => "integer",
     '--genCode'    => [1, 15, 6, 10, 2, 5, 3, 13, 9, 14, 4],
@@ -360,6 +392,16 @@ foreach my $gui_def (sort keys %guidance_defaults) {
     }
 }
 
+
+if ($opt_G) {
+
+    print STDERR "\t\tGuidance alignment file to select: MSA.MAFFT.Without_low_SP_Col.With_Names\n";
+}
+else {
+
+    print STDERR "\t\tGuidance alignment file to select: MSA.MAFFT.aln.With_Names\n";
+}
+
 my %iqtree_ban = (
     '-version'        => 1,
     '-s'              => 1,
@@ -369,12 +411,12 @@ my %iqtree_ban = (
     '-ntmax'          => 1,
     '-redo'           => 1,
     '-cptime'         => 1,
-    '--no-outfiles'   => 1
+    '--no-outfiles'   => 1,
+    '-st'             => 1
 );
 
 my %iqtree_allowed = (
     '--msaProgram'    => ["MAFFT", "PRANK", "CLUSTALW", "MUSCLE", "PAGAN"],
-    '-st'             => ["BIN", "DNA", "AA", "NT2AA", "CODON", "MORPH"],
     '-q'              => "partition_file",
     '-spp'            => "partition_file",
     '-sp'             => "partition_file",
@@ -545,6 +587,25 @@ else {
     print STDERR "\t\tNONE, the program will use the default arguments.\n";
 }
 
+## Add the seqtype to Guidance and iQtree
+
+if ($seqtype eq "DNA") {
+
+    $guidance_args{'--seqtype'} = "nuc";
+    $iqtree_args{'-st'} = "DNA";
+}
+elsif ($seqtype eq "CDS") {
+
+    $guidance_args{'--seqtype'} = "codon";
+    $iqtree_args{'-st'} = "CODON";
+}
+elsif ($seqtype eq "PEP") {
+
+    $guidance_args{'--seqtype'} = "aa";
+    $iqtree_args{'-st'} = "AA";
+}
+
+
 
 #########################################################
 ## STEP 1: RUN GUIDANCE                                ##
@@ -656,18 +717,6 @@ else {
 ## STEP 2: CHANGE FORMATS                              ##
 #########################################################
 
-#echo "1.3- Changing names for GF_013879"
-#date
-#echo "=============================="
-## -i GF_013879.mafft.aln 
-## -o GF_013879.mafft.fname.aln
-## -e GF_013879.mafft.fname.equiv.txt
-#
-#echo "1.4- Reformatting the alignment file for GF_013879"
-#date
-#echo "=============================="
-#bp_sreformat -if fasta -of phylip -i /data/bombarelya/Suaveolentes/00_sources/All_species/wgd_ksd/mafft_guid/GF_013879.mafft.fname.aln -o /data/bombarelya/Suaveolentes/00_sources/All_species/wgd_ksd/mafft_guid/GF_013879.mafft.phy --msa
-
 ## Guidance produces the alignment with some in house names
 ## Additionally, iQtree requires phylip format instead fasta
 ## so this step will perform both tasks
@@ -714,7 +763,7 @@ else {
 
 if (scalar(keys %guiform_dirs > 0)) {
 
-    print STDERR "\nGuidance formatted files were detected. Skipping step.\n";
+    print STDERR "\n\tGuidance formatted files were detected. Skipping step.\n";
 
 }
 else {
@@ -725,7 +774,13 @@ else {
     
     foreach my $gid (sort keys %guidance_dirs) {
 
-        my $target_file = File::Spec->catfile($guidance_dirs{$gid}, "MSA.MAFFT.Without_low_SP_Col.With_Names");
+        my $align_file = "MSA.MAFFT.aln.With_Names";
+        if ($opt_G) {
+
+  	    $align_file = "MSA.MAFFT.Without_low_SP_Col.With_Names"; 
+        }
+
+        my $target_file = File::Spec->catfile($guidance_dirs{$gid}, $align_file);
         my $out_file = File::Spec->catfile($dir02_guiform, $gid .".guidance_aln.phy");
         my $equiv_file = File::Spec->catfile($dir02_guiform, $gid .".guidance.id_equivalence.txt");
         open my $eqfh, '>', $equiv_file;
@@ -740,21 +795,35 @@ else {
  
         while ( my $aln = $old_align_obj->next_aln() ) {
         
-            foreach my $seq ($aln->each_seq) {
+            foreach my $seqobj ($aln->each_seq) {
     
-                my $seqid = $seq->id();
-                if (length($seqid) > 10) { 
-  
-                    $seqn++;
-                    my @break_id = split(//, $seqid);
-                    my $prefix = join("", @break_id[0..4]);
-                    my $newid = $prefix.sprintf("%05s", $seqn);
-                    print $eqfh "$seqid\t$seqid\n";
-                    $seq->id($newid);
-                }
-		else {
+                my $seqid = $seqobj->id();
+                my $seqlength = $seqobj->length();
+                my $nogaps = $seqobj->seq();
+                $nogaps =~ s/-//g;
+                
+                my $nogaps_length = length($nogaps);
 
-                    print $eqfh "$seqid\t$seqid\n";
+                if ($nogaps_length > 0) {
+
+                    if (length($seqid) > 10) { 
+  
+                        $seqn++;
+                        my @break_id = split(//, $seqid);
+                        my $prefix = join("", @break_id[0..4]);
+                        my $newid = $prefix.sprintf("%05s", $seqn);
+                        print $eqfh "$seqid\t$seqid\n";
+                        $seqobj->id($newid);
+                    }
+		    else {
+
+                        print $eqfh "$seqid\t$seqid\n";
+                    }
+                }
+                else {
+        
+                    print STDERR "\nWarning: $seqid has not nucleotides from $gid. Removing from alignment.\n";
+                    $aln->remove_seq($seqobj);
                 }
             }
 
@@ -763,11 +832,10 @@ else {
 
         $guiform_dirs{$gid} = $out_file;
     }
+
+    my $phylip_n = scalar(keys %guiform_dirs);
+    print STDERR "\n\t$phylip_n files have been converted to phylip format.\n";
 }
-
-my $phylip_n = scalar(keys %guiform_dirs);
-print STDERR "\t$phylip_n files have been converted to phylip format.\n";
-
 
 #########################################################
 ## STEP 3: RUN IQTREE                                  ##
@@ -775,6 +843,121 @@ print STDERR "\t$phylip_n files have been converted to phylip format.\n";
 
 ## Once Guidance runs, the script will select the alignment
 ## files and run iqTree
+
+print_header("Step 3 - Run iQtrees - Optimize the model");
+
+my %iqtreemodel_dirs = ();
+
+## First, create a directory for the guidance outputs
+my $dir03_iqtreem = File::Spec->catfile($outdir, "03_iQtreeModel");
+my $log03_iqtreem = File::Spec->catfile($outdir, "run03_iQtreeModel.log");
+
+if (-d $dir03_iqtreem) {
+
+    opendir( my $dir03_fh, $dir03_iqtreem);
+    while(readdir $dir03_fh) {
+
+        my $subdir03 = File::Spec->catfile($dir03_iqtreem, $_);
+        my $subdir03_abs = File::Spec->rel2abs($subdir03);
+        if ($_ =~ m/(.+)_iQtreeModels/) {
+
+            my $gid = $1;
+            my $clid_iqtreem_pre = File::Spec->catfile($subdir03_abs, $gid . "_iqtree_models");
+            $iqtreemodel_dirs{$gid} = $clid_iqtreem_pre;
+        }
+    }
+    closedir($dir03_fh);
+
+    print STDERR "\tiQtree model directory detected.\n";
+    my $iqtreem_files_n = scalar(keys %iqtreemodel_dirs);
+
+    if ($iqtreem_files_n > 0) {
+
+        print STDERR "\t$iqtreem_files_n files have been added to the pipeline.\n";
+    }
+    else {
+
+        die("\nERROR: No iQTree files were detected inside $dir03_iqtreem.\n\tPlease delete the directory and rerun the script.\n");
+    }
+}
+else {
+
+    mkdir($dir03_iqtreem);
+}
+
+if (scalar(keys %iqtreemodel_dirs > 0)) {
+
+    print STDERR "\n\tiQtree models files were detected. Skipping step.\n";
+
+}
+else {
+
+    my $dir03_iqtreem_abs = File::Spec->rel2abs($dir03_iqtreem);
+
+    open my $iqtreem_log_fh, '>', $log03_iqtreem;
+
+    my ($iqtreem_runs, $iqtreem_ok, $iqtreem_fails) = (0, 0, 0);
+
+    foreach my $gid (sort keys %guiform_dirs) { 
+
+        my $clid_iqtreem_out = File::Spec->catfile($dir03_iqtreem_abs, $gid . "_iQtreeModels");
+        mkdir($clid_iqtreem_out);
+        my $clid_iqtreem_pre = File::Spec->catfile($clid_iqtreem_out, $gid . "_iqtree_models");
+
+        my @iqtreem_cmd = ($exepath{'iqtree'}, "-s", $guiform_dirs{$gid}, "-pre", $clid_iqtreem_pre);
+        push(@iqtreem_cmd, ("-nt", $threads));
+
+        foreach my $iqtree_arg (sort keys %iqtree_args) {
+
+            push @iqtreem_cmd, $iqtree_arg;
+            if ($iqtree_args{$iqtree_arg} =~ m/.+/) {
+
+                push @iqtreem_cmd, $iqtree_args{$iqtree_arg};
+            }
+        }
+
+        print $iqtreem_log_fh "RUN\tIQTREE (MODEL)\t$gid\tSTART\n";
+        my $iqtreem_cmd = join(" ", @iqtreem_cmd);
+        print $iqtreem_log_fh "CMD $iqtreem_cmd\n";
+
+        $iqtreem_runs++;
+        my @iqtreem02run = run( command => \@iqtreem_cmd, verbose => $opt_V );
+        if ($iqtreem02run[1]) {
+
+            print $iqtreem_log_fh "RUN\tIQTREE (MODEL)\t$gid\tFAIL\n";
+            print $iqtreem_log_fh "IQTREE ERROR: $iqtreem02run[1]\n";
+            foreach my $err (@{$iqtreem02run[4]}) {
+   
+                print $iqtreem_log_fh "ERROR BACKTRACE: $err\n";
+            }
+            print $iqtreem_log_fh "\n";
+            $iqtreem_fails++;
+        }
+        else {
+
+            print $iqtreem_log_fh "RUN\tIQTREE (MODEL)\t$gid\tFINISHED\n";
+            print $iqtreem_log_fh "IQTREE (MODEL) EXECUTION MESSAGE: $iqtreem02run[0]\n\n";
+            $iqtreemodel_dirs{$gid} = $clid_iqtreem_pre;
+            $iqtreem_ok++;
+        }
+    }
+
+    print STDERR "\tiQtree (model) runs finished\n";
+    print STDERR "\t\t$iqtreem_runs processes have been run of which $iqtreem_fails failed and $iqtreem_ok succeed\n";
+}
+
+print STDERR "\n\tExtracting Best model information\n";
+
+my %parsed_iqtreem = ();
+foreach my $clid (sort keys %iqtreemodel_dirs) {
+
+    my $iqtree_info_href = parse_iqtree_file($iqtreemodel_dirs{$clid}.".iqtree");
+    $parsed_iqtreem{$clid} = $iqtree_info_href;
+    my $best_model = $iqtree_info_href->{"BestFitModel"};
+    print STDERR "\t\t$clid\t$best_model\n";
+} 
+
+
 
 
 $date = `date`;
@@ -853,7 +1036,61 @@ sub print_header {
 }
 
 
+=head2 parse_iqtree_file
+
+  Usage: my $iqtree_info_hashref = parse_iqtree_file($file)
+  Desc: Function to parse the iqtree_file
+  Ret: A hash ref. with keys=iqtree_parameter, value=iqtree_value
+  Args: $file, filename with iqtree data
+  Side_Effects: die fi somethings goes wrong
+  Example: my %iqtree_info = parse_iqtree_file($file)
+
+=cut
+
+sub parse_iqtree_file {
+
+    my $file = shift();
+   
+    my %iqtree_ps = ();
+    open my $fh, '<', $file;
+    while(<$fh>) {
+
+        chomp($_);
+        if ($_ =~ m/Input\s+data:\s+(\d+)\s+sequences\s+with\s+(\d+)\s+codon\s+sites/) {
+
+            $iqtree_ps{"SeqN"} = $1;
+            $iqtree_ps{"CodonSites"} = $2;
+        }
+        elsif ($_ =~ m/Number\s+of\s+constant\s+sites:\s+(\d+)\s+\(=\s+(.+)%\s+of\s+all\s+sites\)/) {
+
+            $iqtree_ps{"ConstantSites"} = $1;
+            $iqtree_ps{"ConstantSitesPerc"} = $2;
+        }
+	elsif ($_ =~ m/Number\s+of\s+invariant\s+\(constant\s+or\s+ambiguous\s+constant\)\s+sites:\s+(\d+)\s+\(=\s+(.+)%\s+of\s+all\s+sites\)/) {
+
+            $iqtree_ps{"InvariantSites"} = $1;
+            $iqtree_ps{"InvariantSitesPerc"} = $2;
+        }
+        elsif ($_ =~ m/Number\s+of\s+parsimony\s+informative\s+sites:\s+(\d+)/) {
+
+            $iqtree_ps{"ParsimonySites"} = $1;
+	}
+        elsif ($_ =~ m/Number\s+of\s+distinct\s+site\s+patterns:\s+(\d+)/) {
+
+            $iqtree_ps{"DistinctSitePatterns"} = $1;
+        }
+        elsif ($_ =~ m/Best-fit\s+model\s+according\s+to\s+BIC:\s+(.+)/) {
+
+            $iqtree_ps{"BestFitModel"} = $1;
+        }
+    }
+
+    return \%iqtree_ps;
+}
+
 
 ####
 1; #
 ####
+
+
