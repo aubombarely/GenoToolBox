@@ -13,8 +13,9 @@ $VERSION = eval $VERSION;
 =head1 SYPNOSIS
 
  FromAlign2Trees [-h] -i <fasta_file_list> -d <output_dir> -t <threads> [-s <seqtype>]
-                      [-g <guidance_conf>] [-q <iqtree_conf>] [-o <outgroup_taxon>] 
-                      [-G] [-V] [-v]   
+                      [-g <guidance_conf>] [-q <iqtree_conf>] [-o <outgroup_taxon>]
+                      [-f <missing_taxa_cutoff_value>]
+                      [-G] [-V] [-v] [-F]   
 
 =head2 I<Flags:>
 
@@ -51,7 +52,15 @@ B<outgroup_taxon>       outgroup taxon (optional)
 
 =item -G
 
-B<guidance_corrected>   use guidance corrected laignments (optional)
+B<guidance_corrected>   use guidance corrected alignments (optional)
+
+=item -F
+
+B<filter_failed_taxa>   filter taxa that has not passed the iQtree check (optional)
+
+=item -f
+
+B<filter_aln_cutoff>    filter alignment with missing taxa ratio below this value (optional)
 
 =item -V
 
@@ -93,6 +102,12 @@ B<help>                 Print the help
      -G. If this option is activated, the formating step (2) will remove the taxa with
      only gaps.
 
+  iQtree will be run twice. In the first run the best substitution model will be
+  calculated. If there are some taxa that fail the iQtree taxa test, the can be 
+  removed using the option -F. In the second run, the phylogentic tree will be estimated
+  with the optimal model and a default boostrap of 100. The boostrat can be changed
+  in the iQtree configuration file (-q <iqtree _conf>). 
+
 =cut
 
 =head1 AUTHORS
@@ -114,13 +129,14 @@ use File::Copy;
 use File::Path qw(make_path remove_tree);
 use IPC::Cmd qw[can_run run];
 use Math::BigFloat;
+use Scalar::Util qw(looks_like_number);
 use Bio::SeqIO;
 use Bio::AlignIO;
 
-our ($opt_i, $opt_d, $opt_s, $opt_t, $opt_g, $opt_q, $opt_o, $opt_G, $opt_V, $opt_v, $opt_h);
-getopts("i:d:s:t:g:q:o:GVvh");
+our ($opt_i, $opt_d, $opt_s, $opt_t, $opt_g, $opt_q, $opt_o, $opt_G, $opt_f, $opt_F, $opt_V, $opt_v, $opt_h);
+getopts("i:d:s:t:g:q:o:Gf:FVvh");
 
-if (!$opt_i && !$opt_d && !$opt_s && !$opt_t && !$opt_g && !$opt_q && !$opt_o && !$opt_G && !$opt_V && !$opt_v && !$opt_h) {
+if (!$opt_i && !$opt_d && !$opt_s && !$opt_t && !$opt_g && !$opt_q && !$opt_o && !$opt_G && !$opt_f && !$opt_F && !$opt_V && !$opt_v && !$opt_h) {
     print "There are n\'t any tags. Print help\n\n";
     help();
 }
@@ -589,6 +605,42 @@ else {
 
 ## Add the seqtype to Guidance and iQtree
 
+## Filter option
+
+if ($opt_F) {
+
+    print STDERR "\tALIGNMENT FILTERING AFTER IQTREE MODEL: On\n";
+}
+else {
+
+    print STDERR "\tALIGNMENT FILTERING AFTER IQTREE MODEL: Off\n";
+}
+
+my $filter_missing_taxa = 1;
+if ($opt_f) {
+
+    unless (looks_like_number($opt_f)) {
+
+        die("\nERROR: -f <missing_taxa_ratio> doesn't have a numeric value.\n");
+    }
+    else {
+        if ($opt_f > 1 || $opt_f < 0) {
+
+            die("\nERROR: -f <missing_taxa_ratio> does not a value between 0 and 1.\n");
+        }
+        else {
+
+            $filter_missing_taxa = $opt_f;
+            print STDERR "\tFILTER MISSING DATA: $filter_missing_taxa\n";
+        }
+    }
+}
+else {
+
+    print STDERR "\tFILTER MISSING DATA: disabled.\n";
+}
+
+
 if ($seqtype eq "DNA") {
 
     $guidance_args{'--seqtype'} = "nuc";
@@ -946,18 +998,352 @@ else {
     print STDERR "\t\t$iqtreem_runs processes have been run of which $iqtreem_fails failed and $iqtreem_ok succeed\n";
 }
 
-print STDERR "\n\tExtracting Best model information\n";
+print STDERR "\n\tExtracting Best model information and the taxa check information\n";
 
 my %parsed_iqtreem = ();
+my %testtax_iqtreem = ();
 foreach my $clid (sort keys %iqtreemodel_dirs) {
 
     my $iqtree_info_href = parse_iqtree_file($iqtreemodel_dirs{$clid}.".iqtree");
     $parsed_iqtreem{$clid} = $iqtree_info_href;
     my $best_model = $iqtree_info_href->{"BestFitModel"};
-    print STDERR "\t\t$clid\t$best_model\n";
+    $parsed_iqtreem{$clid} = $best_model;
+
+    my $iqtree_log_hashref = parse_iqtree_log($iqtreemodel_dirs{$clid}.".log");
+    my %iqtree_log = %{$iqtree_log_hashref};
+    my ($taxa, $non_passed) = (0, 0);
+    $testtax_iqtreem{$clid} = $iqtree_log_hashref;
+    foreach my $taxid (sort keys %iqtree_log) {
+
+        $taxa++;
+        if ($iqtree_log{$taxid}->{"test_result"} eq "failed") {
+
+            $non_passed++;
+        }
+    }
+    print STDERR "\t\t$clid\t$best_model\tNon Passed Taxa: $non_passed of $taxa\n";
 } 
 
+#########################################################
+## STEP 4: FILTER ALIGNMENTS                           ##
+#########################################################
 
+## iQTree gave some information about the alignments.
+## The script will filter those taxa that are not okay.
+## It will also filter out alignments without outgroup
+## or with high percetage of missing data.
+
+## If the filter is not enabled, it will skip this step
+
+print_header("Step 4 - Filtering alignments with iQTree information");
+
+my %alnfil_dirs = ();
+my %outgroup_ids = ();
+
+## First, create a directory for the guidance outputs
+my $dir04_alnfil = File::Spec->catfile($outdir, "04_AlignmentFiltered");
+my $log04_alnfil = File::Spec->catfile($outdir, "run04_alignment_filtering.log");
+
+if (-d $dir04_alnfil) {
+
+    opendir( my $dir04_fh, $dir04_alnfil);
+    while(readdir $dir04_fh) {
+
+        my $subdir04 = File::Spec->catfile($dir04_alnfil, $_);
+        my $subdir04_abs = File::Spec->rel2abs($subdir04);
+        if ($_ =~ m/(.+).aln_filtered.phy/) {
+
+            my $gid = $1;
+            $alnfil_dirs{$gid} = $subdir04_abs;
+        }
+    }
+    closedir($dir04_fh);
+
+    print STDERR "\tAlignment filtering directory detected.\n";
+    my $alnf_files_n = scalar(keys %alnfil_dirs);
+
+    if ($alnf_files_n > 0) {
+
+        print STDERR "\t$alnf_files_n files have been added to the pipeline.\n";
+    }
+    else {
+
+        die("\nERROR: No filtered alignment files were detected inside $dir04_alnfil.\n\tPlease delete the directory and rerun the script.\n");
+    }
+}
+else {
+
+    mkdir($dir04_alnfil);
+}
+
+if (scalar(keys %alnfil_dirs > 0)) {
+
+    print STDERR "\n\tFiltered alignment files were detected. Skipping step.\n";
+
+}
+else {
+
+    open my $alnf_log_fh, '>', $log04_alnfil;
+
+    my ($rem_taxa, $rem_align) = (0, 0);
+    ## Now it will go file by file and checke several iQtree alignment options
+
+    foreach my $gid (sort keys %testtax_iqtreem) {
+
+        my %iqtree_taxacheck = %{$testtax_iqtreem{$gid}}; 
+        my $align_file = "MSA.MAFFT.aln.With_Names";
+        if ($opt_G) {
+
+            $align_file = "MSA.MAFFT.Without_low_SP_Col.With_Names";
+        }
+
+        my $target_file = File::Spec->catfile($guidance_dirs{$gid}, $align_file);
+        my $out_file = File::Spec->catfile($dir04_alnfil, $gid .".aln_filtered.phy");
+   
+        my $old_align_obj = Bio::AlignIO->new(-file   => $target_file,
+                                              -format => 'fasta');
+
+        my $remove_alignment = 0;
+
+	print $alnf_log_fh "PROCESSING $target_file\n";
+
+        while ( my $aln = $old_align_obj->next_aln() ) {
+
+            my %taxa_count = ();
+            foreach my $seqobj ($aln->each_seq) {
+
+	        my $id = $seqobj->id();
+                my @iddex = split(//, $id);
+		my $length_t = 4;
+                if ($outgroup_taxa =~ m/.+/) {
+                    $length_t = length($outgroup_taxa) - 1;
+                }
+                my $taxa = join("", @iddex[0..$length_t]);
+
+                ## Add outgroup ids
+                if ($outgroup_taxa =~ m/\w+/) {
+                    if ($taxa eq $outgroup_taxa) {
+
+                        if (exists $outgroup_ids{$gid}) {
+                        
+                            push(@{$outgroup_ids{$gid}}, $id);
+                        }
+                        else {
+
+                            $outgroup_ids{$gid} = [$id];
+                        }
+                    }
+                }
+                
+                unless (exists $taxa_count{$taxa}) {
+
+                    $taxa_count{$taxa} = 0;
+                }
+                my $taxa_check = $iqtree_taxacheck{$id}->{"test_result"};
+
+                if ($taxa_check eq "failed" && $opt_F)  {
+
+                    $aln->remove_seq($seqobj);
+		    print $alnf_log_fh "\tTAXA $id has been removed\n";
+                    $rem_taxa++;
+                }
+                else {
+
+                    $taxa_count{$taxa}++;
+                }                
+            }
+
+            ## Now it will check zero taxa or missing outgroup
+
+            if ($outgroup_taxa =~ m/\w+/) {
+                unless (exists $taxa_count{$outgroup_taxa}) {
+                
+                    print STDERR "\n\tWARNING: $outgroup_taxa does not exist in the dataset $gid. Please check.\n";
+                }
+                else {
+                    if ($taxa_count{$outgroup_taxa} == 0) {
+
+                        $remove_alignment = 1;
+                        print $alnf_log_fh "\tALIGNMENT was removed because does not have the outgroup taxa: $outgroup_taxa\n";
+                    }
+                }
+            }
+
+            ## Check the number of taxa with zero representatives
+            my $taxa_n = scalar(keys %taxa_count);
+            my $zero_taxa_n = 0;
+            foreach my $tx (sort keys %taxa_count) {
+
+                if ($taxa_count{$tx} == 0) {
+ 
+                    $zero_taxa_n++;
+                }
+            }
+
+            ## How many zero taxa will be adequate
+            my $missing_ratio = $zero_taxa_n/$taxa_n;
+            if ($missing_ratio > $filter_missing_taxa) {  
+
+                $remove_alignment = 1;
+                print $alnf_log_fh "\tALIGNMENT was removed. The ratio of missing taxa ($missing_ratio) is higher than the cutoff ($filter_missing_taxa)\n";
+            }
+
+            if ($remove_alignment == 0) {
+
+                my $new_align_obj = Bio::AlignIO->new(-file   => ">$out_file" ,
+                                                      -format => 'phylip');
+                $new_align_obj->write_aln($aln);
+            }
+            else {
+
+                $rem_align++;
+            }
+         }
+
+        if ($remove_alignment == 0) {
+            $alnfil_dirs{$gid} = $out_file;
+        }
+    }
+
+    my $alnfil_n = scalar(keys %alnfil_dirs);
+    print STDERR "\n\t$alnfil_n alignment files remain after filtering.\n";
+    print STDERR "\t$rem_taxa taxa have been removed.\n";
+    print STDERR "\t$rem_align alignments have been removed.\n";
+}
+
+#########################################################
+## STEP 5: RUN IQTREE WITH BOOTSTRAPS                  ##
+#########################################################
+
+## Once Guidance runs, the script will select the alignment
+## files and run iqTree
+
+print_header("Step 5 - Run iQtrees - Boostraps");
+
+my %iqtreeb_dirs = ();
+
+## First, create a directory for the guidance outputs
+my $dir05_iqtreeb = File::Spec->catfile($outdir, "05_iQtreeBoots");
+my $log05_iqtreeb = File::Spec->catfile($outdir, "run05_iQtreeBoots.log");
+
+if (-d $dir05_iqtreeb) {
+
+    opendir( my $dir05_fh, $dir05_iqtreeb);
+    while(readdir $dir05_fh) {
+
+        my $subdir05 = File::Spec->catfile($dir05_iqtreeb, $_);
+        my $subdir05_abs = File::Spec->rel2abs($subdir05);
+        if ($_ =~ m/(.+)_iQtreeBoots/) {
+
+            my $gid = $1;
+            my $clid_iqtreeb_pre = File::Spec->catfile($subdir05_abs, $gid . "_iqtree_bootstraps");
+            $iqtreeb_dirs{$gid} = $clid_iqtreeb_pre;
+        }
+    }
+    closedir($dir05_fh);
+
+    print STDERR "\tiQtree boostrap directory detected.\n";
+    my $iqtreeb_files_n = scalar(keys %iqtreeb_dirs);
+
+    if ($iqtreeb_files_n > 0) {
+
+        print STDERR "\t$iqtreeb_files_n files have been added to the pipeline.\n";
+    }
+    else {
+
+        die("\nERROR: No iQTree files were detected inside $dir05_iqtreeb.\n\tPlease delete the directory and rerun the script.\n");
+    }
+}
+else {
+
+    mkdir($dir05_iqtreeb);
+}
+
+if (scalar(keys %iqtreeb_dirs > 0)) {
+
+    print STDERR "\n\tiQtree models files were detected. Skipping step.\n";
+
+}
+else {
+
+    my $dir05_iqtreeb_abs = File::Spec->rel2abs($dir05_iqtreeb);
+
+    open my $iqtreeb_log_fh, '>', $log05_iqtreeb;
+
+    my ($iqtreeb_runs, $iqtreeb_ok, $iqtreeb_fails) = (0, 0, 0);
+
+    foreach my $gid (sort keys %alnfil_dirs) {
+
+        my $clid_iqtreeb_out = File::Spec->catfile($dir05_iqtreeb_abs, $gid . "_iQtreeBootstrap");
+        mkdir($clid_iqtreeb_out);
+        my $clid_iqtreeb_pre = File::Spec->catfile($clid_iqtreeb_out, $gid . "_iqtree_bootstraps");
+
+        my @iqtreeb_cmd = ($exepath{'iqtree'}, "-s", $alnfil_dirs{$gid}, "-pre", $clid_iqtreeb_pre);
+        push(@iqtreeb_cmd, ("-nt", $threads));
+
+        ## It will run these steps with the following defaults
+        my %iqtreeb_defaults = (
+            "-m"     => $parsed_iqtreem{$gid},
+            "-bb"    => 1000,
+            "-bnni"  => "",
+            "-alrt"  => 1000, 
+            "-redo"  => "",
+        );
+
+        if (exists $outgroup_ids{$gid}) {
+
+            ## Only one outgroup can be used
+            my @outgroups = @{$outgroup_ids{$gid}};
+            $iqtreeb_defaults{"-o"} = $outgroups[0];
+        }
+
+        my %iqtreeb_args = %iqtree_args;
+        foreach my $def_arg (sort keys %iqtreeb_defaults) {
+
+            unless (exists $iqtreeb_args{$def_arg}) {
+
+                $iqtreeb_args{$def_arg} = $iqtreeb_defaults{$def_arg};
+            }
+        }
+
+        foreach my $iqtree_arg (sort keys %iqtreeb_args) {
+
+            push @iqtreeb_cmd, $iqtree_arg;
+            if ($iqtreeb_args{$iqtree_arg} =~ m/.+/) {
+
+                push @iqtreeb_cmd, $iqtreeb_args{$iqtree_arg};
+            }
+        }
+
+        print $iqtreeb_log_fh "RUN\tIQTREE (BOOSTRAP)\t$gid\tSTART\n";
+        my $iqtreeb_cmd = join(" ", @iqtreeb_cmd);
+        print $iqtreeb_log_fh "CMD $iqtreeb_cmd\n";
+
+        $iqtreeb_runs++;
+        my @iqtreeb05run = run( command => \@iqtreeb_cmd, verbose => $opt_V );
+        if ($iqtreeb05run[1]) {
+
+            print $iqtreeb_log_fh "RUN\tIQTREE (BOOSTRAP)\t$gid\tFAIL\n";
+            print $iqtreeb_log_fh "IQTREE ERROR: $iqtreeb05run[1]\n";
+            foreach my $err (@{$iqtreeb05run[4]}) {
+
+                print $iqtreeb_log_fh "ERROR BACKTRACE: $err\n";
+            }
+            print $iqtreeb_log_fh "\n";
+            $iqtreeb_fails++;
+        }
+        else {
+
+          print $iqtreeb_log_fh "RUN\tIQTREE (BOOSTRAP)\t$gid\tFINISHED\n";
+            print $iqtreeb_log_fh "IQTREE (BOOTSTRAP) EXECUTION MESSAGE: $iqtreeb05run[0]\n\n";
+            $iqtreeb_dirs{$gid} = $clid_iqtreeb_pre;
+            $iqtreeb_ok++;
+        }
+    }
+
+    print STDERR "\tiQtree (boostrap) runs finished\n";
+    print STDERR "\t\t$iqtreeb_runs processes have been run of which $iqtreeb_fails failed and $iqtreeb_ok succeed\n";
+}
 
 
 $date = `date`;
@@ -1043,7 +1429,7 @@ sub print_header {
   Ret: A hash ref. with keys=iqtree_parameter, value=iqtree_value
   Args: $file, filename with iqtree data
   Side_Effects: die fi somethings goes wrong
-  Example: my %iqtree_info = parse_iqtree_file($file)
+  Example: my $iqtree_log_href = parse_iqtree_file($file)
 
 =cut
 
@@ -1087,6 +1473,58 @@ sub parse_iqtree_file {
 
     return \%iqtree_ps;
 }
+
+
+=head2 parse_iqtree_log
+
+  Usage: my $iqtree_log_hashref = parse_iqtree_log($file)
+  Desc: Function to parse the iqtree log file
+  Ret: A hash ref. with keys=iqtree_parameter, value=iqtree_value
+  Args: $file, filename with iqtree data
+  Side_Effects: die fi somethings goes wrong
+  Example: my $iqtree_log_href = parse_iqtree_log($file)
+
+=cut
+
+sub parse_iqtree_log {
+
+    my $file = shift();
+
+    my %iqtree_ls = ();
+    my $parse_on = 0;
+    open my $fh, '<', $file;
+    while(<$fh>) {
+
+        chomp($_);
+        if ($_ =~ m/\s+Gap\/Ambiguity\s+Composition\s+p-value/) {
+
+            $parse_on = 1;
+        }
+        else {
+            if ($parse_on == 1) {
+
+                if ($_ =~ m/\s+(\d+)\s+(.+?)\s+(.+?)%\s+(\w+)\s+(.+)%/) {
+
+                    my $taxaid = $2;
+                    $iqtree_ls{$taxaid} = {
+                        "taxa_order"   => $1,
+                        "taxa_id"      => $2,
+                        "gap_amb_perc" => $3,
+                        "test_result"  => $4,
+                        "p_value"      => $5
+                    }
+                }
+                else {
+
+                    $parse_on = 0;
+                }
+            }
+        } 
+    }
+    return(\%iqtree_ls);
+}
+
+
 
 
 ####
