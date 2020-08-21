@@ -93,7 +93,7 @@ B<help>                 Print the help
 
   The script also can use outgroup taxa. The outgroup taxa should be 4 or more 
   characters at the begining of each sequence ID. For example, if the sequences of
-  the outgroup are Slyc000001 and Slyc000002, the output prefiix should be "Slyc".    
+  the outgroup are Slyc000001 and Slyc000002, the output prefix should be "Slyc".    
 
   Guidance produces several types of output. The ones that this script takes are:
    * MSA.<aligner>.aln.With_Names, a consensus alignment.
@@ -1373,21 +1373,54 @@ sub help {
 
     Description:
 
+      This script run two programs Guidance and iQTree on a set of FASTA files with the
+      goal of align the sequences and generate a phylogenetic tree.
+
+      The script uses as an input a tabular file with two columns: cluster_id and file
+      path to the fasta file.
+
+      The script can use configuration files for Guidance and iQtree to pass specific
+      arguments. The configuration file should have one argument per line with the
+      format -/--argument=value (e.g. --bootstraps=100). For switch arguments with no
+      values, the configuration file should have the word "ENABLED" (e.g. -wbt=ENABLED).
+
+      The script also can use outgroup taxa. The outgroup taxa should be 4 or more
+      characters at the begining of each sequence ID. For example, if the sequences of
+      the outgroup are Slyc000001 and Slyc000002, the output prefix should be "Slyc".
+
+      Guidance produces several types of output. The ones that this script takes are:
+       * MSA.<aligner>.aln.With_Names, a consensus alignment.
+       * MSA.<aligner>.Without_low_SP_Col.With_Names, a edited alignment with conflictive
+         nucleotides (or aminoacids) removed. This option is activated with the argument
+         -G. If this option is activated, the formating step (2) will remove the taxa with
+         only gaps.
+
+      iQtree will be run twice. In the first run the best substitution model will be
+      calculated. If there are some taxa that fail the iQtree taxa test, the can be
+      removed using the option -F. In the second run, the phylogentic tree will be estimated
+      with the optimal model and a default boostrap of 100. The boostrat can be changed
+      in the iQtree configuration file (-q <iqtree _conf>).
 
     Usage:
-      
-       FromAlign2Trees [-h] -i <fasta_file_list> -d <output_dir> -t <threads>
+
+      FromAlign2Trees [-h] -i <fasta_file_list> -d <output_dir> -t <threads> [-s <seqtype>]
                       [-g <guidance_conf>] [-q <iqtree_conf>] [-o <outgroup_taxon>]
-                      [-V] [-v]
+                      [-f <missing_taxa_cutoff_value>]
+                      [-G] [-V] [-v] [-F]
+
       
     Flags:
 
       -i <fasta_file_list>      File with two fields: CLID and fasta file path (mandatory)
       -d <output_dir>           Name of the output directory (mandatory)
       -t <threads>              Number of threads to be used by the Guidance and iQtree (default 2)
+      -s <seq_type>             Sequence type (options: DNA, CDS, PEP, default DNA)
       -g <guidance_conf>        Guidance configuration file (optional)
       -q <iqtree_conf>          iQtree configuration file (optional)
       -o <outgroup_taxon>       outgroup taxon (optional)
+      -G <guidance_corrected>   use guidance corrected alignments (optional)
+      -F <filter_failed_taxa>   filter taxa that has not passed the iQtree check (optional)
+      -f <filter_aln_cutoff>    filter alignment with missing taxa ratio below this value (optional)
       -V <be_verbose>           print more details of the running scripts
       -v <version>              print script version
       -h <help>                 Print the help
