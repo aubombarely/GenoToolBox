@@ -1,0 +1,657 @@
+#!/usr/bin/perl
+
+=head1 NAME
+
+ MultiTreeAnalyzer
+ Script to analyze multiple tree topologies
+
+=cut
+
+our $VERSION = '0.1';
+$VERSION = eval $VERSION;
+
+=head1 SYPNOSIS
+
+ MultiTreeAnalyzer [-h] -i <tree_file_list> -o <output_dir> -t <taxa_group_file>   
+                        -e <outgroup_taxa>  -g <target_taxa> [-b <bootstrap_filter>]
+
+=head2 I<Flags:>
+
+=over
+
+
+=item -i
+
+B<tree_file_list>      File with two fields: CLID and newick file path (mandatory)
+
+=item -o
+
+B<output_dir>          Name of the output directory (mandatory)
+
+=item -t
+
+B<taxa_group_file>     File with taxa groups to analyze (mandatory) 
+
+=item -e
+
+B<outgroup_taxa>       Outgroup_taxa (mandatory)
+
+=item -g
+
+B<target_taxa>         Target taxa (mandatory)
+
+=item -b
+
+B<boostrap_filter>     Bootstrap filter (optional)
+
+=item -V
+
+B<be_verbose>           print more details of the running scripts
+
+=item -v
+
+B<version>              print script version
+
+=item -h
+
+B<help>                 Print the help
+
+=back
+
+=cut
+
+=head1 DESCRIPTION
+
+  This script analyzes the topology of different phylogenetic trees.
+  Fist it will replace the leaf names (gene_id) by the name of the
+  taxa, sort the names alphabetically and transform all the branches
+  to 1. Then it will compare the trees between them counting each of 
+  topologies.
+
+=cut
+
+=head1 AUTHORS
+
+  Aureliano Bombarely.
+  (aureliano.bombarely@unimi.it).
+
+=cut
+
+
+use strict;
+use warnings;
+use autodie;
+
+use Getopt::Std;
+use File::Spec;
+use File::Basename;
+use File::Copy;
+use File::Path qw(make_path remove_tree);
+use IPC::Cmd qw[can_run run];
+use Math::BigFloat;
+use Scalar::Util qw(looks_like_number);
+use Bio::TreeIO;
+
+our ($opt_i, $opt_o, $opt_t, $opt_b, $opt_e, $opt_g, $opt_V, $opt_v, $opt_h);
+getopts("i:o:t:b:e:g:Vvh");
+
+if (!$opt_i && !$opt_o && !$opt_t && !$opt_b && !$opt_e && !$opt_g && !$opt_V && !$opt_v && !$opt_h) {
+    print "There are n\'t any tags. Print help\n\n";
+    help();
+}
+elsif ($opt_v) {
+    print STDERR "\nMultiTreeAnalyzer version: $VERSION\n\n";
+    exit(1);
+}
+
+my $date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## MultiTreeAnalyzer Starts ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+## First will parse the equivalence file and store the sequences in a hash
+## for a quick access.
+
+#########################################################
+## STEP 0: ARGUMENT CHECKS                             ##
+#########################################################
+
+print_header("Step 0 - Checking arguments");
+
+## Check the input and parse the file paths
+my $input = $opt_i;
+my %tree_list = ();
+if (!$opt_i) {
+
+    die("\nERROR: No -i <tree_file_list> argument was supplied.\n");
+}
+else {
+
+    my $l1 = 0;
+    open my $ifh, '<', $input;
+    while(<$ifh>) {
+ 
+        chomp($_);
+        $l1++;
+        my @fields = split(/\t/, $_);
+        if (scalar(@fields) != 2) {
+
+            die("\nPARSING ERROR: Line $l1 at the file $input doesn't have two columns");
+        }
+        else {
+
+            if (-e $fields[1]) {
+
+                $tree_list{$fields[0]} = $fields[1];
+            }
+            else {
+
+                die("\nINPUT ERROR: file $fields[1] does not exist. Please check.\n");
+            }
+        }
+    }
+}
+
+print STDERR "\tTREE FILE LIST: $input\n";
+my $list_n = scalar(keys %tree_list);
+print STDERR "\tTREE FILE LIST has $list_n files.\n";
+
+## Check the output dir
+my $outdir = $opt_o;
+if (!$opt_o) {
+
+    die("\nERROR: No -o <outdir> argument was supplied.\n");
+}
+unless (-d $outdir) {
+
+    die("\nERROR: -o <outdir> does not exist.\n");
+}
+print STDERR "\tOUTDIR: $outdir\n";
+
+## Check and load the taxa file
+## It should be a file with at least three columns:
+## CLID, GENEID, TAXA
+## Other columns can be added as subgroups
+## E.g. 
+## CL0001  Ntab0001  N_tabacum          Nicotiana
+## CL0001  Ntab0002  N_tabacum          Nicotiana
+## CL0001  Nsyl0001  N_sylvestris       Nicotiana
+## CL0001  Ntom0001  N_tomentosiformis  Nicotiana
+## CL0001  Ngla0001  N_glauca           Nicotiana
+## CL0001  Slyc0001  S_lycopersium      Solanum
+
+my %taxa = ();
+my %taxa_dif = ();
+my %clusters = ();
+my %groups = ();
+
+my $taxa_schema = $opt_t;
+if (!$opt_t) {
+
+    die("\nERROR: No -t <taxa_group_file> argument was supplied.\n");
+}
+else {
+
+    my $l2 = 0;
+    open my $ifh2, '<', $taxa_schema;
+    while(<$ifh2>) {
+
+        chomp($_);
+        $l2++;
+        my @fields = split(/\t/, $_);
+        if (scalar(@fields) < 3) {
+
+            die("\nPARSING ERROR: Line $l2 at the file $taxa_schema doesn't have at least three columns");
+        }
+        else {
+    
+            my $cluster_id = shift(@fields);
+            my $leaf_id = shift(@fields);
+            my $taxa_name = shift(@fields);
+
+            $taxa{$leaf_id} = $taxa_name;
+            if (exists $taxa_dif{$taxa_name}) {
+
+                push(@{$taxa_dif{$taxa_name}}, $leaf_id);
+            }
+            else {
+
+                $taxa_dif{$taxa_name} = [$leaf_id];
+            }
+
+            if (exists $clusters{$cluster_id}) {
+
+                push(@{$clusters{$cluster_id}}, $leaf_id);
+            }
+            else {
+
+                $clusters{$cluster_id} = [$leaf_id];
+            }
+
+            if (scalar(@fields) > 0) {
+
+                if (exists $groups{$cluster_id}) {
+
+                    $groups{$cluster_id}->{$leaf_id} = [];
+                }
+                else {
+
+                    $groups{$cluster_id} = {$leaf_id => []};
+                }
+                $groups{$leaf_id} = [];
+                foreach my $subgroup (@fields) {
+            
+                    push(@{$groups{$cluster_id}->{$leaf_id}}, $subgroup);
+                }
+            }
+        }
+    }
+}
+
+print STDERR "\tTAXA GROUP FILE: $taxa_schema\n";
+my $clusters_n = scalar(keys %clusters);
+print STDERR "\t\tTAXA GROUP FILE has $clusters_n clusters.\n";
+my $leaf_n = scalar(keys %taxa);
+my $taxa_n = scalar(keys %taxa_dif);
+print STDERR "\t\tTAXA GROUP FILE has $leaf_n leafs with $taxa_n different taxa\n";
+
+
+my $outgroup_taxa = $opt_e;
+unless ($outgroup_taxa) {
+
+    die("ERROR: -e <outgroup_taxa> argument was not supplied.\n"); 
+}
+else {
+
+    unless (exists $taxa_dif{$outgroup_taxa}) {
+
+        die("ERROR: -e $outgroup_taxa is not on the $taxa_schema file.\n");
+    }
+}
+
+my $target_taxa = $opt_g;
+unless ($target_taxa) {
+
+    die("ERROR: -g <target_taxa> argument was not supplied.\n");
+}
+else {
+
+    unless (exists $taxa_dif{$target_taxa}) {
+
+        die("ERROR: -g $target_taxa is not on the $taxa_schema file.\n");
+    }
+}
+
+
+
+my $boots_cutoff = 0;
+if ($opt_b) {
+
+    if ($opt_b =~ m/^\d+$/) {
+
+        $boots_cutoff = $opt_b;
+    }
+    else {
+
+        die("\nERROR: -b <bootstrap_cutoff> does not have a numeric value.\n");
+    }
+}
+
+
+#########################################################
+## STEP 1: PARSE TREES                                 ##
+#########################################################
+
+print_header("Step 1 - Splitting trees according outgroups");
+
+my $dir01_splitstree = File::Spec->catfile($outdir, "01_SplitsTree");
+mkdir($dir01_splitstree);
+
+my %splitstree = ();
+
+foreach my $clid (sort keys %tree_list) {
+
+    my $treeio = Bio::TreeIO->new(-format => 'newick',
+			          -file   => $tree_list{$clid});    
+
+    while( my $tree = $treeio->next_tree ) {
+
+        my %id2nodes = ();
+        my %taxacomp = ();
+        my @leaf_nodes = $tree->get_leaf_nodes;
+  
+        for my $leafobj (@leaf_nodes) {
+  
+            my $leaf_id = $leafobj->id();
+            if (exists $taxa{$leaf_id}) {
+
+                $id2nodes{$leaf_id} = $leafobj;
+                if (exists $taxacomp{$taxa{$leaf_id}}) {
+
+                    push(@{$taxacomp{$taxa{$leaf_id}}}, $leaf_id);
+                }
+                else {
+
+                    $taxacomp{$taxa{$leaf_id}} = [$leaf_id];
+                }
+            }
+            else {
+
+                print "\n\tWARNING: $leaf_id id is not on the file $taxa_schema.\n";
+            }
+        }
+
+        my $outgroups_n = scalar(@{$taxacomp{$outgroup_taxa}});
+        print STDERR "\t$outgroups_n leaf outgroups have been found for $clid\n";
+
+        if ($outgroups_n == 1) {
+
+            my $tree_copy = $tree->clone();
+            my $splitfile = File::Spec->catfile($dir01_splitstree, $clid."_1.splitstree.newick");
+            my $out_treeio = Bio::TreeIO->new(-format => 'newick',
+                                              -file   => ">splitfile");
+    
+            my $outg_node = $tree_copy->findnode_by_id($taxacomp{$outgroup_taxa}->[0]); 
+            $tree_copy->reroot_at_midpoint($outg_node);
+            $out_treeio->write_tree($tree_copy);
+        }
+        else {
+
+            my @outgr_nodes = ();
+            foreach my $outg_id (@{$taxacomp{$outgroup_taxa}}) {
+
+                push(@outgr_nodes, $tree->find_node(-id => $outg_id));
+            }
+            my $lca_node = $tree->get_lca(@outgr_nodes);
+            my $fsn_node = get_fsn($tree, \@outgr_nodes);
+
+            if (defined $fsn_node) {
+ 
+                 my $fsn_node_id = $fsn_node->id();
+                 print STDERR "\tRerooting $clid tree to the first speciation node after the outgroup LCA: $fsn_node_id\n";
+                 $tree->reroot_at_midpoint($fsn_node);
+            }
+            else {
+            
+                 my $lca_node_id = $lca_node->id();
+                 print STDERR "\tRerooting $clid tree to the outgroups LCA: $lca_node_id\n";
+                 $tree->reroot_at_midpoint($lca_node);
+            }
+
+            my $test_treefile = File::Spec->catfile($dir01_splitstree, $clid."_test_reroot.newick");
+            my $out_treeio = Bio::TreeIO->new(-format => 'newick',
+                                              -file   => ">$test_treefile");
+
+            $out_treeio->write_tree($tree);
+
+
+            #    my $tree_copy = $tree->clone();
+            #    my $outg_node = $tree_copy->find_node(-id => $outg_id);
+            #    my $outg_ancestor = $outg_node->ancestor();
+            #    $tree_copy->reroot_at_midpoint($outg_ancestor);
+                
+                ## Once the tree has been rerooted, it will take the new
+                ## ancestor
+            #    $outg_ancestor = $outg_node->ancestor();
+
+            #    my @descendents = $outg_ancestor->get_all_Descendents();
+            #    my @ids = ();
+            #    my @nodes = ();
+            #    my $n = 0;
+            #    foreach my $desc (@descendents) {
+
+            #        my $id = $desc->id();
+            #        $n++;
+            #        print STDERR "TESTING Descendents ($n): $id\n";
+            #        push(@ids, $id);
+            #        push(@nodes, $desc);
+            #    }
+         
+                
+            #    $tree_copy->splice(-keep => \@nodes);
+                #$tree_copy->set_root_node($outg_ancestor);
+
+            #    my $original_tree_size = $tree->number_nodes();
+            #    my $splitted_tree_size = $tree_copy->number_nodes();
+
+            #    print STDERR "\n\tTree reduced from $original_tree_size to $splitted_tree_size\n";
+
+            #    my $splitfile = File::Spec->catfile($dir01_splitstree, $clid."_".$ogn.".splitstree.newick");
+            #    my $out_treeio = Bio::TreeIO->new(-format => 'newick',
+            #                                      -file   => ">$splitfile");
+
+            #    $out_treeio->write_tree($tree_copy);
+            #}
+        }
+
+
+        ## Replace the leaf_id by taxa and print the new tree
+        
+  
+
+ #       my $target_n = scalar(@{$taxacomp{$target_taxa}});
+ #       print STDERR "TEST: $clid\t$target_n\n";
+
+ #       foreach my $target_id (@{$taxacomp{$target_taxa}}) {
+
+ #           my $target_node = $id2nodes{$target_id};
+ #           my @lineage = escalate_tree($tree, $target_node);
+ #           my $plineage = join("\n", @lineage);
+ #           print STDERR "TEST1: $target_id\n$plineage\n"; 
+ #       }
+    }
+}
+
+
+
+$date = `date`;
+chomp($date);
+print STDERR "\n\n############################################################";
+print STDERR "\n## MultiTreeAnalyzer ($date)     ##\n";
+print STDERR "############################################################\n\n";
+
+
+
+=head2 help
+
+  Usage: help()
+  Desc: print help of this script
+  Ret: none
+  Args: none
+  Side_Effects: exit of the script
+  Example: if (!@ARGV) {
+               help();
+           }
+
+=cut
+
+sub help {
+  print STDERR <<EOF;
+  $0:
+
+    Description:
+
+
+    Usage:
+      
+      
+    Flags:
+
+      -V <be_verbose>           print more details of the running scripts
+      -v <version>              print script version
+      -h <help>                 Print the help
+
+EOF
+exit (1);
+}
+
+=head2 print_header
+
+  Usage: print_head("Message");
+  Desc: print a section head
+  Ret: None
+  Args: Message to print in the header
+  Side_Effects: None
+  Example: print_head("Step1: This is a test");
+
+=cut
+
+
+sub print_header {
+    my $message = shift;
+
+    my $date = `date`;
+    chomp($date);
+
+    print STDERR "\n";
+    print STDERR "============================================================";
+    print STDERR "\n $message ($date)\n";
+    print STDERR "============================================================";
+    print STDERR "\n\n";
+}
+
+sub get_siblings {
+
+    my $leaf_node_obj = shift;
+    
+    my @siblings = ();
+    my $ancestor = $leaf_node_obj->ancestor();
+    foreach my $descendent ($ancestor->get_all_Descendents) {
+
+        if ($descendent->is_Leaf()) {
+
+            push(@siblings, $descendent); 
+        }
+    }
+    return(@siblings);
+}
+
+sub get_outgroups {
+
+    my $tree_obj = shift;
+    my @leaf_nodes = $tree_obj->get_leaf_nodes();
+
+    my @outgroups = ();
+    my $leaf_n = scalar(@leaf_nodes);
+    foreach my $leafobj (@leaf_nodes) {
+
+        my @siblings = get_siblings($leafobj);
+        my $siblings_n = scalar(@siblings);
+        
+        if ($siblings_n == $leaf_n) {
+
+            push(@outgroups, $leafobj->id());
+        }
+    }
+    return(@outgroups);
+}
+
+sub escalate_tree {
+
+   my $tree = shift;
+   my $node = shift;
+   
+   my $rootnode = $tree->get_root_node();
+   my $ancestor = $node->ancestor();
+   my @lineage = ();
+   my $rootnode_id = $rootnode->id();
+   my $ancestor_id = $ancestor->id();
+
+   my %catched = ();
+   my $level = 0;
+   while ($ancestor ne $rootnode) {
+
+       $level++;
+       my @descendents = $ancestor->get_all_Descendents();
+       my @ids = ();
+       foreach my $desc (@descendents) {
+
+           if ($desc->is_Leaf()) {
+
+               my $id = $desc->id();
+               unless (exists $catched{$id}) {
+
+                   push(@ids, $desc->id());
+                   $catched{$id} = 1;
+               }
+           }
+       }
+       my $pline = $level."-".join(",", sort(@ids));
+       push(@lineage, $pline);
+
+       my $new_ancestor = $ancestor->ancestor();
+       $ancestor = $new_ancestor;
+   }
+   return @lineage;
+}
+
+
+sub get_fsn {
+
+    my $tree = shift;
+    my $nodes_aref = shift;
+    my @nodes = @{$nodes_aref};
+    my %nodes = ();
+    foreach my $node (@nodes) {
+
+        $nodes{$node} = $node->id() || "NA";
+    }
+  
+    my $lca = $tree->get_lca(@nodes);
+    my @descendants = $lca->each_Descendent();
+
+    ## If all the descedents are the specified nodes
+
+    my $leaf_n = 0;
+    my $fsn;
+    foreach my $desc (@descendants) {
+
+        my @desc_desc = $desc->get_all_Descendents();
+        my @desc_leaves = ();
+        my $is_node = 0;
+        foreach my $desc_desc ($desc->get_all_Descendents()) {
+
+            if ($desc_desc->is_Leaf()) {
+
+                push(@desc_leaves, $desc_desc);
+                if (exists $nodes{$desc_desc}) {
+
+                    $is_node++;
+                }
+            }
+        }
+  
+        if ($is_node == scalar(@desc_leaves)) {
+
+            $leaf_n++;
+        }
+        else {
+
+            if ($desc->is_Leaf()) {
+
+                $leaf_n++;
+            }
+            else {
+
+                $fsn = $desc;
+            }
+        }
+    }
+    if ($leaf_n > 0) {
+    
+        return($fsn);
+    }
+    else {
+
+        my $empty;
+        return($empty);
+    }
+}
+
+
+####
+1; #
+####
+
+
